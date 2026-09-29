@@ -17,6 +17,12 @@ teardown() {
     done
 }
 
+# The command line checks need sleep to be a real program. With
+# coreutils-single, as on Rocky, it is a script that runs coreutils.
+needs_real_sleep() {
+    head -c 4 tbproc-sleeper | grep -q ELF || skip "sleep is a script here"
+}
+
 # Start a sleeper and store its pid in $pid.
 start() {
     ./tbproc-sleeper 60 "$@" >/dev/null 2>&1 3>&- &
@@ -51,6 +57,7 @@ start() {
 }
 
 @test "shows everything about one pid" {
+    needs_real_sleep
     start
     tb_stub ss "echo 'tcp LISTEN 0 5 127.0.0.1:8384 0.0.0.0:* users:((\"tbproc-sleeper\",pid=$pid,fd=3))'"
     run proc "$pid"
@@ -72,6 +79,7 @@ start() {
 }
 
 @test "a name that matches several lists them and exits 2" {
+    needs_real_sleep
     start
     local first=$pid
     start
@@ -83,6 +91,7 @@ start() {
 }
 
 @test "-q prints the pid and command line" {
+    needs_real_sleep
     start
     run proc -q "$pid"
     [ "$status" -eq 0 ]
@@ -90,6 +99,7 @@ start() {
 }
 
 @test "-f lists open files and counts deleted ones" {
+    needs_real_sleep
     printf 'notes\n' > notes.txt
     ./tbproc-sleeper 60 >/dev/null 2>&1 3<notes.txt &
     pid=$!
