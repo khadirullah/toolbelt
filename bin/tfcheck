@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+# tfcheck: every Terraform check in one pass.
+set -uo pipefail
+TB_CMD=tfcheck
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: tfcheck [--fix] [--only CHECK] [dir] [-- validate options]
+
+Every Terraform check in one pass.
+
+Options:
+  --fix               let terraform fmt rewrite the files
+  --only CHECK        fmt, validate, tflint or trivy, repeat it for more
+  -q, --quiet         only the summary line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to terraform validate.
+
+Examples:
+  tfcheck
+  tfcheck infra/eks
+  tfcheck --fix infra/eks
+  tfcheck --only tflint --only trivy modules/vpc
+
+Needs: terraform or tofu, python3. tflint and trivy are optional.
+Exit: 0 ok, 1 a check failed, 2 bad usage or no .tf files, 3 missing tool.
+EOF
+}
+
+ALL_CHECKS=(fmt validate tflint trivy)
+
+# Print a section: name, result word, and an optional note on the same line.
+section() {
+    (( TB_QUIET )) && return 0
+    if [[ -n ${3:-} ]]; then
+        printf '%-9s %-5s %s\n' "$1" "$2" "$3"
+    else
+        printf '%-9s %s\n' "$1" "$2"
+    fi
+}
+
+# A detail line under a section, indented to line up with the result word.
+detail() { (( TB_QUIET )) || printf '          %s\n' "$*"; }
+
+# A long message under a detail line, folded to fit 80 columns.
+wrap() {
+    local line
+    (( TB_QUIET )) && return 0
+    while IFS= read -r line; do
+        detail "  $line"
+    done < <(printf '%s\n' "$1" | fold -s -w 64 | sed 's/ *$//')
+}
+
+wanted() {
+    local c
+    for c in "${only[@]}"; do [[ $c == "$1" ]] && return 0; done
+    return 1
+}
+
+check_fmt() {
+    local out rc f files=()
+    if (( fix )); then
+        tb_show "$TF" "-chdir=$dir" fmt -list=true -no-color
+        out=$("$TF" "-chdir=$dir" fmt -list=true -no-color 2>&1)
+        rc=$?
+    else
+        tb_show "$TF" "-chdir=$dir" fmt -check -list=true -no-color
+        out=$("$TF" "-chdir=$dir" fmt -check -list=true -no-color 2>&1)
+        rc=$?
+    fi
+    while IFS= read -r f; do
+        [[ $f == *.tf || $f == *.tfvars || $f == *.tftest.hcl ]] && files+=("$f")
+    done <<<"$out"
+    if (( fix )); then
+        if (( rc != 0 )); then
+            section fmt fail "terraform fmt could not parse the files"
+            print_tool_error "$out"
+            return 1
+        fi
+        if (( ${#files[@]} )); then
+            section fmt fixed "${files[*]}"
+        else
+            section fmt pass
+        fi
+        return 0
+    fi
+    if (( rc == 0 )); then
+        section fmt pass
+        return 0
+    fi
+    if (( ${#files[@]} )); then
+        section fmt fail "$(tb_plural "${#files[@]}" file) need$( (( ${#files[@]} == 1 )) && echo s) formatting"
+        for f in "${files[@]}"; do detail "$f"; done
+        detail "tfcheck --fix rewrites them"
+    else
+        section fmt fail "terraform fmt could not parse the files"
+        print_tool_error "$out"
+    fi
+    return 1
+}
+
+# The first lines of a tool's own error text, indented and folded.
+print_tool_error() {
+    local line part n=0
+    (( TB_QUIET )) && return 0
+    while IFS= read -r line; do
+        [[ -z ${line// } ]] && continue
+        line=${line#Error: }
+        while IFS= read -r part; do
+            detail "$part"
+        done < <(printf '%s\n' "$line" | fold -s -w 68 | sed 's/ *$//')
+        (( ++n >= 4 )) && break
+    done <<<"$1"
+}
+
+# Read terraform validate -json on stdin. Prints one of:
+#   valid
+#   init          the folder needs terraform init first
+#   diag FILE:LINE<TAB>SUMMARY<TAB>DETAIL   for each error or warning
+#   bad           the output was not JSON
+parse_validate() {
+    python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("bad"); sys.exit(0)
+diags = d.get("diagnostics") or []
+text = " ".join((x.get("summary", "") + " " + x.get("detail", "")) for x in diags)
+if not d.get("valid", False) and ("terraform init" in text or "tofu init" in text
+        or "Missing required provider" in text or "Module not installed" in text):
+    print("init"); sys.exit(0)
+if d.get("valid", False) and not any(x.get("severity") == "error" for x in diags):
+    print("valid")
+for x in diags:
+    if x.get("severity") != "error":
+        continue
+    r = x.get("range") or {}
+    where = r.get("filename", "")
+    if where and r.get("start"):
+        where += ":" + str(r["start"].get("line", ""))
+    det = " ".join((x.get("detail") or "").split())
+    print("diag\t%s\t%s\t%s" % (where or "-", " ".join(x.get("summary", "").split()), det))
+'
+}
+
+check_validate() {
+    local out result line where summary det errors=()
+    tb_need python3
+    tb_show "$TF" "-chdir=$dir" validate -no-color ${TB_PASS[@]+"${TB_PASS[@]}"} -json
+    out=$("$TF" "-chdir=$dir" validate -no-color ${TB_PASS[@]+"${TB_PASS[@]}"} -json 2>/dev/null)
+    result=$(printf '%s\n' "$out" | parse_validate)
+    case $result in
+        valid)
+            section validate pass
+            return 0 ;;
+        init)
+            section validate skip "needs $TF init first, see man tfcheck"
+            return 2 ;;
+        bad|"")
+            section validate fail "$TF validate gave no result"
+            out=$("$TF" "-chdir=$dir" validate -no-color ${TB_PASS[@]+"${TB_PASS[@]}"} 2>&1)
+            print_tool_error "$out"
+            return 1 ;;
+    esac
+    while IFS=$'\t' read -r _ where summary det; do
+        errors+=("$where"$'\t'"$summary"$'\t'"$det")
+    done < <(grep '^diag' <<<"$result")
+    section validate fail "$(tb_plural "${#errors[@]}" error)"
+    for line in "${errors[@]}"; do
+        IFS=$'\t' read -r where summary det <<<"$line"
+        detail "$where  $summary"
+        [[ -n $det ]] && wrap "$det"
+    done
+    return 1
+}
+
+# tflint --format compact prints one issue per line:
+#   main.tf:14:31: Error - "t3.mediun" is an invalid value as instance_type (aws_instance_invalid_type)
+check_tflint() {
+    local out rc line file msg rule issues=() re
+    if ! tb_has tflint; then
+        if wanted_explicitly tflint; then tb_need tflint; fi
+        section tflint skip "not installed, see toolbelt doctor"
+        return 2
+    fi
+    tb_show tflint "--chdir=$dir" --format=compact --no-color
+    out=$(tflint "--chdir=$dir" --format=compact --no-color 2>&1)
+    rc=$?
+    re='^([^:]+):([0-9]+):[0-9]+: (Error|Warning|Notice) - (.*) \(([A-Za-z0-9_]+)\)$'
+    while IFS= read -r line; do
+        if [[ $line =~ $re ]]; then
+            issues+=("${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"$'\t'"${BASH_REMATCH[5]}"$'\t'"${BASH_REMATCH[4]}")
+        fi
+    done <<<"$out"
+    if (( ${#issues[@]} == 0 )); then
+        if (( rc == 0 )); then
+            section tflint pass
+            return 0
+        fi
+        section tflint fail "tflint stopped with exit $rc"
+        print_tool_error "$out"
+        [[ $out == *"tflint --init"* ]] && detail "run tflint --init in $dir to install its plugins"
+        return 1
+    fi
+    section tflint fail "$(tb_plural "${#issues[@]}" issue)"
+    for line in "${issues[@]}"; do
+        IFS=$'\t' read -r file rule msg <<<"$line"
+        detail "$file  $rule"
+        wrap "$msg"
+    done
+    return 1
+}
+
+# Read trivy config --format json on stdin. Prints "count HIGH CRITICAL",
+# then "find FILE:LINE<TAB>ID SEVERITY<TAB>TITLE" for each failed check.
+parse_trivy() {
+    python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("bad"); sys.exit(0)
+high = crit = 0
+rows = []
+for r in d.get("Results") or []:
+    for m in r.get("Misconfigurations") or []:
+        if m.get("Status", "FAIL") != "FAIL":
+            continue
+        sev = m.get("Severity", "")
+        if sev == "HIGH": high += 1
+        elif sev == "CRITICAL": crit += 1
+        else: continue
+        line = (m.get("CauseMetadata") or {}).get("StartLine")
+        where = r.get("Target", "?") + (":" + str(line) if line else "")
+        title = " ".join((m.get("Title") or m.get("Message") or "").split())
+        rows.append((0 if sev == "CRITICAL" else 1, where, m.get("AVDID") or m.get("ID", ""), sev, title))
+print("count %d %d" % (high, crit))
+for _, where, i, sev, title in sorted(rows, key=lambda x: x[0]):
+    print("find\t%s\t%s %s\t%s" % (where, i, sev, title))
+'
+}
+
+check_trivy() {
+    local out rc result counts high crit where id title
+    if ! tb_has trivy; then
+        if wanted_explicitly trivy; then tb_need trivy; fi
+        section trivy skip "not installed, see toolbelt doctor"
+        return 2
+    fi
+    tb_need python3
+    tb_show trivy config --quiet --format json --severity HIGH,CRITICAL "$dir"
+    out=$(trivy config --quiet --format json --severity HIGH,CRITICAL "$dir" 2>/dev/null)
+    rc=$?
+    result=$(printf '%s\n' "$out" | parse_trivy)
+    if (( rc != 0 )) || [[ $result == bad || -z $result ]]; then
+        section trivy fail "trivy stopped with exit $rc"
+        out=$(trivy config --quiet --severity HIGH,CRITICAL "$dir" 2>&1)
+        print_tool_error "$out"
+        return 1
+    fi
+    counts=$(head -n 1 <<<"$result")
+    read -r _ high crit <<<"$counts"
+    if (( high + crit == 0 )); then
+        section trivy pass "0 high, 0 critical"
+        return 0
+    fi
+    section trivy fail "$high high, $crit critical"
+    while IFS=$'\t' read -r _ where id title; do
+        detail "$where  $id"
+        wrap "$title"
+    done < <(grep '^find' <<<"$result")
+    return 1
+}
+
+# True when the user named this check with --only.
+wanted_explicitly() { (( only_set )) && wanted "$1"; }
+
+main() {
+    local c rc failed=0 skipped=0 ran=0 summary
+    [[ -d $dir ]] || tb_die 1 "$dir: no such folder"
+    local abs
+    abs=$(cd "$dir" && pwd) || tb_die 1 "$dir: cannot open the folder"
+    if ! compgen -G "$dir/*.tf" >/dev/null && ! compgen -G "$dir/*.tf.json" >/dev/null; then
+        tb_die "$E_USAGE" "no .tf files in $abs"
+    fi
+    (( ${#only[@]} )) || only=("${ALL_CHECKS[@]}")
+    if (( fix )) && ! wanted fmt; then
+        tb_usage_error "--fix works with the fmt check"
+    fi
+    if wanted fmt || wanted validate; then
+        tb_need_any TF terraform tofu
+    fi
+    tb_say "checking $abs"
+    for c in "${ALL_CHECKS[@]}"; do
+        wanted "$c" || continue
+        tb_say "running $c"
+        "check_$c"
+        rc=$?
+        case $rc in
+            0) ((ran++)) ;;
+            1) ((ran++)); ((failed++)) ;;
+            *) ((skipped++)) ;;
+        esac
+    done
+    if (( failed )); then
+        summary="$failed of $ran checks failed"
+    elif (( ran == 1 )); then
+        summary="1 check passed"
+    else
+        summary="all $ran checks passed"
+    fi
+    (( ran == 0 )) && summary="no check ran"
+    (( skipped )) && summary+=", $skipped skipped"
+    echo "$summary"
+    (( failed == 0 ))
+}
+
+fix=0
+only=()
+only_set=0
+dir=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --fix)  fix=1 ;;
+        --only) tb_optarg "$@"
+                case $2 in
+                    fmt|validate|tflint|trivy) only+=("$2"); only_set=1 ;;
+                    *) tb_usage_error "--only takes fmt, validate, tflint or trivy, not $2" ;;
+                esac
+                shift ;;
+        --)     shift; TB_PASS=("$@"); break ;;
+        -*)     tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)      [[ -z $dir ]] || tb_usage_error "one folder at a time, not $dir and $1"
+                dir=$1 ;;
+    esac
+    shift
+done
+dir=${dir:-.}
+dir=${dir%/}
+dir=${dir:-/}
+
+main
+exit $?

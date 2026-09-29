@@ -154,7 +154,10 @@ pbpaste        -                    -                    -                    - 
 cksum          coreutils            coreutils            coreutils            coreutils            coreutils
 stty           coreutils            coreutils            coreutils            coreutils            coreutils
 drill          ldnsutils            ldns-utils           ldns                 ldns                 drill
+terraform      -                    -                    terraform            -                    -
 tofu           -                    opentofu             opentofu             opentofu             opentofu
+tflint         -                    -                    tflint               -                    -
+trivy          -                    trivy                trivy                trivy                -
 kubectl        kubectl              -                    kubectl              kubernetes-client    kubectl
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils

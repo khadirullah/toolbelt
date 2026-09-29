@@ -1,0 +1,247 @@
+.TH "TFCHECK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+tfcheck \- every Terraform check in one pass
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+tfcheck [--fix] [--only CHECK] [dir] [-- validate options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+A Terraform change usually has to pass four checks before anyone merges it. \fBterraform fmt\fR wants the files laid out its way, \fBterraform validate\fR wants every reference to point at something real, tflint knows the provider's rules, and trivy knows the security mistakes. Each tool has its own flags and its own output. \fBtfcheck\fR runs all four on one folder and prints one short section per check, with the file and line of every finding.
+.PP
+The folder is one Terraform module, the current folder by default. \fBtfcheck\fR looks at the \fB.tf\fR files directly in it, the same set \fBterraform plan\fR would read. It does not walk into subfolders such as \fBmodules/\fR. Run it once per module, or in a loop.
+.PP
+The checks run in a fixed order, fmt, validate, tflint, trivy. Each one prints \fBpass\fR, \fBfail\fR or \fBskip\fR on its own line, with the details indented below. The last line counts the result, such as \fB3 of 4 checks failed\fR. That line goes to stdout like the rest, so \fBtfcheck \-q\fR in a script prints just the count.
+.PP
+\fBtfcheck\fR changes no file unless you pass \fB\-\-fix\fR. It never runs \fBterraform init\fR, never downloads a provider or a module, and never touches state or a backend.
+.SH THE FOUR CHECKS
+.PP
+fmt : Runs \fBterraform fmt \-check \-list=true\fR. Terraform prints the name of each file whose layout differs from its own style, and \fBtfcheck\fR lists them. With \fB\-\-fix\fR it runs \fBterraform fmt \-list=true\fR instead, which rewrites those files and prints their names after \fBfixed\fR.
+.PP
+validate : Runs \fBterraform validate \-json\fR and shows each error with its file, line, summary and the detail Terraform gives, folded to fit the screen. Validate checks references, types and required arguments. It knows nothing about the cloud, so a wrong instance type still passes here.
+.PP
+tflint : Runs \fBtflint \-\-chdir=DIR \-\-format=compact\fR when tflint is installed. Each issue shows the file, line and rule name, then tflint's message. Errors, warnings and notices all count as issues. With the AWS, Azure or Google plugin, tflint knows the real instance types, regions and machine sizes.
+.PP
+trivy : Runs \fBtrivy config \-\-format json \-\-severity HIGH,CRITICAL DIR\fR when trivy is installed. Only high and critical findings count, and critical ones are listed first, each with its file, line, check ID and title. Lower severities stay out of the way. Run trivy by hand to see them.
+.PP
+tflint and trivy are optional. When one is missing, its line says \fBskip  not installed, see toolbelt doctor\fR, and the summary counts it as skipped rather than failed. When you ask for it by name with \fB\-\-only\fR, a missing tool is an error, exit 3.
+.SH OPTIONS
+.TP
+\fB\-\-fix\fR
+Let \fBterraform fmt\fR rewrite the files that need it. The other checks run as usual.
+.TP
+\fB\-\-only CHECK\fR
+Run only this check, \fBfmt\fR, \fBvalidate\fR, \fBtflint\fR or \fBtrivy\fR. Repeat it for more.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the summary line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-\-fix\fR needs the fmt check, so \fB\-\-fix \-\-only tflint\fR is bad usage.
+.SH TERRAFORM OR OPENTOFU
+.PP
+\fBtfcheck\fR uses \fBterraform\fR when it is on your PATH, and \fBtofu\fR from OpenTofu when it is not. Both take the same \fBfmt\fR and \fBvalidate\fR commands and give the same JSON, so the output looks the same. The command lines in \fB\-v\fR and in the messages name the tool that ran.
+.PP
+When you only ask for tflint or trivy with \fB\-\-only\fR, \fBtfcheck\fR does not need Terraform at all.
+.SH WHEN VALIDATE NEEDS INIT
+.PP
+\fBterraform validate\fR has to load every provider and module the configuration uses. Those live in \fB.terraform/\fR, which \fBterraform init\fR fills. A fresh clone has no \fB.terraform/\fR, so validate cannot run there.
+.PP
+\fBtfcheck\fR does not run init for you. Init downloads providers from the internet, can take hundreds of megabytes, writes \fB.terraform/\fR and may create \fB.terraform.lock.hcl\fR, and none of that fits a command that promises to change nothing. Instead the validate line says
+.PP
+.RS 4
+.nf
+validate  skip  needs terraform init first, see man tfcheck
+.fi
+.RE
+.PP
+and the summary counts it as skipped. To validate without touching a remote backend, run this once in the folder, then run \fBtfcheck\fR again.
+.PP
+.RS 4
+.nf
+$ terraform init -backend=false
+.fi
+.RE
+.PP
+A module with no providers, such as one that only holds variables and outputs, validates without init.
+.SH TFLINT PLUGINS
+.PP
+tflint's cloud rules live in plugins named in \fB.tflint.hcl\fR. When the file names a plugin that is not installed, tflint stops with an error and \fBtfcheck\fR shows it.
+.PP
+.RS 4
+.nf
+tflint    fail  tflint stopped with exit 1
+          Failed to initialize plugins; Plugin "aws" not found. Did you run
+          "tflint --init"?
+          run tflint --init in infra/eks to install its plugins
+.fi
+.RE
+.PP
+Run \fBtflint \-\-init\fR in that folder once. It downloads the plugins into \fB~/.tflint.d/\fR.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBterraform validate\fR, before \fB\-json\fR. \fB\-no\-tests\fR skips the \fB.tftest.hcl\fR files, and \fB\-test\-directory=DIR\fR points at tests kept elsewhere.
+.PP
+.RS 4
+.nf
+$ tfcheck infra/eks -- -no-tests
+.fi
+.RE
+.PP
+The other checks take no extra options from the command line. tflint reads \fB.tflint.hcl\fR in the folder and trivy reads \fBtrivy.yaml\fR, so put their settings there.
+.SH PER\-DISTRO NOTES
+.PP
+Terraform : HashiCorp ships Terraform from its own package repository for Debian, Ubuntu, Fedora and RHEL, since the license change keeps it out of most distro repos. Arch has \fBterraform\fR in extra. On openSUSE and Alpine, use the HashiCorp zip or OpenTofu.
+.PP
+OpenTofu : Fedora, Arch, openSUSE Tumbleweed and Alpine have \fBopentofu\fR, which installs \fBtofu\fR. On Debian and Ubuntu, use the OpenTofu apt repository or the standalone installer.
+.PP
+tflint : Arch has \fBtflint\fR. Elsewhere, download the release zip from github.com/terraform\-linters/tflint and put the binary in \fB~/.local/bin\fR.
+.PP
+trivy : Fedora, Arch and openSUSE Tumbleweed have \fBtrivy\fR. On Debian and Ubuntu, use Aqua Security's apt repository. trivy downloads its check bundle on the first run and caches it in \fB~/.cache/trivy\fR.
+.SH NEEDS
+.PP
+\fBterraform\fR or \fBtofu\fR for the fmt and validate checks, and \fBpython3\fR to read their JSON and trivy's. \fBtflint\fR and \fBtrivy\fR are optional. \fBtoolbelt doctor\fR lists which of them this machine has.
+.SH EXAMPLES
+.SS A module with work to do
+.PP
+.RS 4
+.nf
+$ tfcheck infra/eks
+fmt       fail  2 files need formatting
+          main.tf
+          variables.tf
+          tfcheck --fix rewrites them
+validate  pass
+tflint    fail  2 issues
+          main.tf:14  aws_instance_invalid_type
+            "t3.mediun" is an invalid value as instance_type
+          vpc.tf:3  terraform_unused_declarations
+            variable "azs" is declared but not used
+trivy     fail  1 high, 1 critical
+          eks.tf:8  AVD-AWS-0040 CRITICAL
+            EKS cluster has the public access enabled
+          eks.tf:21  AVD-AWS-0039 HIGH
+            EKS should have the encryption of secrets enabled
+3 of 4 checks failed
+$ echo $?
+1
+.fi
+.RE
+.PP
+Validate passed, and still the instance type is wrong. Only tflint's AWS plugin knows the list of real types.
+.SS Fix the layout
+.PP
+.RS 4
+.nf
+$ tfcheck --fix infra/eks
+fmt       fixed main.tf variables.tf
+validate  pass
+tflint    pass
+trivy     pass  0 high, 0 critical
+all 4 checks passed
+.fi
+.RE
+.PP
+\fBgit diff\fR shows exactly what fmt changed.
+.SS A typo in a variable name, without tflint
+.PP
+.RS 4
+.nf
+$ tfcheck modules/vpc
+fmt       pass
+validate  fail  1 error
+          main.tf:9  Reference to undeclared input variable
+            An input variable with the name "cluster_verison" has not been
+            declared. Did you mean "cluster_version"?
+tflint    skip  not installed, see toolbelt doctor
+trivy     pass  0 high, 0 critical
+1 of 3 checks failed, 1 skipped
+.fi
+.RE
+.SS A fresh clone
+.PP
+.RS 4
+.nf
+$ tfcheck infra/eks
+fmt       pass
+validate  skip  needs terraform init first, see man tfcheck
+tflint    skip  not installed, see toolbelt doctor
+trivy     pass  0 high, 0 critical
+all 2 checks passed, 2 skipped
+.fi
+.RE
+.PP
+Run \fBterraform init \-backend=false\fR in \fBinfra/eks\fR to let validate run.
+.SS Only the fast checks, with the commands shown
+.PP
+.RS 4
+.nf
+$ tfcheck -v --only fmt --only validate modules/vpc
+tfcheck: checking /home/khadir/lab/infra/modules/vpc
+tfcheck: running fmt
++ terraform -chdir=modules/vpc fmt -check -list=true -no-color
+fmt       pass
+tfcheck: running validate
++ terraform -chdir=modules/vpc validate -no-color -json
+validate  pass
+all 2 checks passed
+.fi
+.RE
+.SS In a script or a git hook
+.PP
+.RS 4
+.nf
+$ tfcheck -q infra/eks || echo "fix the findings first"
+3 of 4 checks failed
+fix the findings first
+.fi
+.RE
+.PP
+A pre\-commit hook can run \fBtfcheck \-q\fR on each changed module and stop the commit when one fails.
+.SS The wrong folder
+.PP
+.RS 4
+.nf
+$ tfcheck ~/Downloads
+tfcheck: no .tf files in /home/khadir/Downloads
+$ echo $?
+2
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBtfcheck: no .tf files in DIR\fR : The folder holds no \fB.tf\fR or \fB.tf.json\fR files at its top level. \fBcd\fR into the module, or name it, such as \fBtfcheck infra/eks\fR.
+.PP
+\fBtfcheck: needs terraform. Install the package that provides it\fR : Neither \fBterraform\fR nor \fBtofu\fR is on your PATH. Install one of them, see the per\-distro notes above.
+.PP
+\fBvalidate  skip  needs terraform init first\fR : The module uses providers or modules that are not in \fB.terraform/\fR yet. Run \fBterraform init \-backend=false\fR in the folder once.
+.PP
+\fBfmt  fail  terraform fmt could not parse the files\fR : A file has a syntax error, such as a missing brace. The lines below show Terraform's own message with the file and line. Validate fails for the same reason.
+.PP
+\fBtflint  fail  tflint stopped with exit 1\fR : tflint could not run, most often because a plugin in \fB.tflint.hcl\fR is missing. Run \fBtflint \-\-init\fR in the folder.
+.PP
+\fBtrivy  fail  trivy stopped with exit 1\fR : trivy could not download its check bundle, often because the machine is offline. The lines below show trivy's own message. Once the bundle is cached in \fB~/.cache/trivy\fR, it works offline.
+.SH EXIT STATUS
+.TP
+0
+Every check that ran passed. Skipped checks do not count.
+.TP
+1
+A check failed, or a tool it runs stopped with an error.
+.TP
+2
+Bad usage, or no \fB.tf\fR files in the folder.
+.TP
+3
+Neither \fBterraform\fR nor \fBtofu\fR is installed, or a check named with \fB\-\-only\fR is missing.
+.SH SEE ALSO
+.PP
+\fByamlcheck\fR, \fBterraform(1)\fR, \fBtflint(1)\fR, \fBtrivy(1)\fR
