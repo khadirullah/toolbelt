@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# clip: copy and paste from the terminal.
+set -uo pipefail
+TB_CMD=clip
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: command | clip [options] [-- tool options]
+       clip [options] file
+       clip -o [--primary]
+       clip -c [--primary]
+
+Copy and paste from the terminal.
+
+Options:
+  -o, --out           print the clipboard to stdout
+  -c, --clear         empty the clipboard
+  --primary           use the primary selection, the middle click one
+  --clear-after SECS  empty the clipboard again after this many seconds
+  -q, --quiet         no lines of its own
+  -v, --verbose       the tool it picked, and its command line
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to wl-copy, xclip, xsel or pbcopy.
+
+Examples:
+  clip ~/.ssh/id_ed25519.pub
+  clip -o | kubectl apply -f -
+  ksecret db-creds DB_PASSWORD | clip --clear-after 30
+  clip report.png -- --type image/png
+
+Needs: wl-clipboard, xclip or xsel. None over SSH. See man clip.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 no clipboard tool fits the session.
+EOF
+}
+
+# Pick the clipboard tool for this session and store it in TOOL: wl-copy,
+# xclip, xsel, pbcopy, or osc52 when there is no display at all.
+pick_tool() {
+    if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
+        if [[ -n ${DISPLAY:-} ]] && ! tb_has wl-copy && tb_has xclip; then TOOL=xclip
+        elif [[ -n ${DISPLAY:-} ]] && ! tb_has wl-copy && tb_has xsel; then TOOL=xsel
+        else tb_need_any TOOL wl-copy
+        fi
+    elif [[ -n ${DISPLAY:-} ]]; then
+        tb_need_any TOOL xclip xsel
+    elif tb_has pbcopy; then
+        TOOL=pbcopy
+    else
+        TOOL=osc52
+    fi
+    tb_say "using $TOOL"
+    if [[ $TOOL == pbcopy && $sel == primary ]]; then
+        tb_warn "macOS has no primary selection, using the clipboard"
+        sel=clipboard
+    fi
+}
+
+# The command that copies stdin for the picked tool, in CMD.
+copy_cmd() {
+    case $TOOL in
+        wl-copy) CMD=(wl-copy) ; [[ $sel == primary ]] && CMD+=(--primary) ;;
+        xclip)   CMD=(xclip -selection "$sel" -in) ;;
+        xsel)    CMD=(xsel "--$sel" --input) ;;
+        pbcopy)  CMD=(pbcopy) ;;
+    esac
+    CMD+=(${TB_PASS[@]+"${TB_PASS[@]}"})
+}
+
+# Where OSC 52 goes: the terminal, or a file when a test asks for one.
+osc_target() { echo "${TB_TEST_OSC52:-/dev/tty}"; }
+
+# Send a file to the terminal's clipboard with the OSC 52 escape. An empty
+# file clears it. Inside tmux the escape is wrapped so tmux passes it on.
+osc52() {
+    local file=$1 data target=c tty
+    [[ $sel == primary ]] && target=p
+    tty=$(osc_target)
+    data=$(base64 < "$file" | tr -d '\n') || return 1
+    tb_show_text "base64 < $file, sent to the terminal as OSC 52"
+    if [[ -n ${TMUX:-} ]]; then
+        { printf '\ePtmux;\e\e]52;%s;%s\a\e\\' "$target" "$data" > "$tty"; } 2>/dev/null
+    else
+        { printf '\e]52;%s;%s\a' "$target" "$data" > "$tty"; } 2>/dev/null
+    fi
+}
+
+# Copy a file to the clipboard with the picked tool.
+copy_file() {
+    local file=$1
+    if [[ $TOOL == osc52 ]]; then
+        osc52 "$file" || tb_die 1 "no terminal to send the text to, OSC 52 needs one"
+        return 0
+    fi
+    copy_cmd
+    tb_show_text "$(show_line "${CMD[@]}") < $file"
+    "${CMD[@]}" < "$file" > /dev/null || tb_die 1 "$TOOL failed to copy"
+}
+
+# A command line the way tb_show prints it, without the "+ ".
+show_line() {
+    local out="" a
+    for a in "$@"; do
+        if [[ $a =~ ^[][A-Za-z0-9_./:=,@%+^-]+$ ]]; then out+=" $a"; else out+=" '${a//\'/\'\\\'\'}'"; fi
+    done
+    echo "${out# }"
+}
+
+# Print the clipboard to stdout.
+paste_out() {
+    case $TOOL in
+        wl-copy) tb_need wl-paste
+                 CMD=(wl-paste --no-newline) ; [[ $sel == primary ]] && CMD+=(--primary) ;;
+        xclip)   CMD=(xclip -selection "$sel" -out) ;;
+        xsel)    CMD=(xsel "--$sel" --output) ;;
+        pbcopy)  tb_need pbpaste; CMD=(pbpaste) ;;
+        osc52)   tb_die "$E_TOOL" "cannot read the clipboard with no display, OSC 52 only copies" ;;
+    esac
+    tb_run "${CMD[@]}" || tb_die 1 "$TOOL could not read the clipboard"
+}
+
+# Empty the clipboard.
+clear_it() {
+    case $TOOL in
+        wl-copy) CMD=(wl-copy --clear) ; [[ $sel == primary ]] && CMD+=(--primary)
+                 tb_run "${CMD[@]}" ;;
+        xsel)    tb_run xsel "--$sel" --clear ;;
+        xclip)   tb_show_text "xclip -selection $sel -in < /dev/null"
+                 xclip -selection "$sel" -in < /dev/null > /dev/null ;;
+        pbcopy)  tb_show_text "pbcopy < /dev/null"
+                 pbcopy < /dev/null ;;
+        osc52)   osc52 /dev/null ;;
+    esac
+}
+
+# A checksum of what the clipboard holds now, or nothing when it cannot be read.
+clip_sum() {
+    [[ $TOOL == osc52 ]] && return 0
+    paste_out 2>/dev/null | cksum
+}
+
+# Clear the clipboard after a wait, in the background, but only when it
+# still holds what clip put there. With OSC 52 there is no way to check.
+clear_later() {
+    local want=$1
+    (
+        trap - EXIT INT TERM
+        sleep "$clear_after"
+        if [[ $TOOL != osc52 ]]; then
+            [[ $(clip_sum) == "$want" ]] || exit 0
+        fi
+        TB_VERBOSE=0 clear_it
+    ) < /dev/null > /dev/null 2>&1 &
+    disown 2>/dev/null
+}
+
+main() {
+    local file bytes sum="" line
+    pick_tool
+    case $mode in
+        out)   paste_out; return ;;
+        clear) clear_it || tb_die 1 "$TOOL could not clear the clipboard"
+               tb_info "$TB_CMD: cleared the $sel"
+               return 0 ;;
+    esac
+    if [[ -n $src && $src != - ]]; then
+        [[ -e $src ]] || tb_die 1 "$src: no such file"
+        [[ -d $src ]] && tb_die 1 "$src is a folder, clip copies the text of a file"
+        [[ -r $src ]] || tb_die 1 "$src: cannot read it"
+        file=$src
+    else
+        tb_tmpdir work || tb_die 1 "could not make a temp folder"
+        file=$work/in
+        cat > "$file" || tb_die 1 "could not read stdin"
+    fi
+    bytes=$(wc -c < "$file")
+    bytes=${bytes//[[:space:]]/}
+    if [[ $TOOL == osc52 ]] && (( bytes > 74000 )); then
+        tb_warn "$(tb_human "$bytes") is more than many terminals take through OSC 52"
+    fi
+    copy_file "$file"
+    if [[ $TOOL == osc52 ]]; then
+        line="copied $(tb_plural "$bytes" byte) through the terminal with OSC 52"
+    else
+        line="copied $(tb_plural "$bytes" byte) with $TOOL"
+    fi
+    if [[ -n $clear_after ]]; then
+        [[ $TOOL != osc52 ]] && sum=$(cksum < "$file")
+        clear_later "$sum"
+        line+=", clearing in ${clear_after}s"
+    fi
+    tb_info "$TB_CMD: $line"
+}
+
+mode=copy sel=clipboard clear_after="" src=""
+tb_expand "" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -o|--out)      mode=out ;;
+        -c|--clear)    mode=clear ;;
+        --primary)     sel=primary ;;
+        --clear-after) tb_optarg "$@"; clear_after=$2; shift
+                       [[ $clear_after =~ ^[0-9]{1,6}$ ]] && (( 10#$clear_after > 0 )) ||
+                           tb_usage_error "--clear-after needs whole seconds, not $clear_after"
+                       clear_after=$(( 10#$clear_after )) ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -)             [[ -z $src ]] || tb_usage_error "clip copies one file at a time"; src=- ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)             [[ -z $src ]] || tb_usage_error "clip copies one file at a time"; src=$1 ;;
+    esac
+    shift
+done
+
+if [[ $mode != copy ]]; then
+    [[ -z $src ]] || tb_usage_error "--out and --clear take no file"
+    [[ -z $clear_after ]] || tb_usage_error "--clear-after goes with a copy"
+fi
+if [[ $mode == copy && -z $src && -t 0 ]]; then
+    tb_usage_error "nothing to copy, pipe text in or name a file"
+fi
+main
+exit $?

@@ -1,0 +1,191 @@
+.TH "CLIP" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+clip \- copy and paste from the terminal
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+command | clip [options] [-- tool options]
+clip [options] file
+clip -o [--primary]
+clip -c [--primary]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBclip\fR puts text on the clipboard, so you can paste it into a browser, a chat or an editor. It copies whatever you pipe into it, or the contents of a file you name. \fBclip \-o\fR prints the clipboard, so you can pipe what you copied in a browser into a command. \fBclip \-c\fR empties it.
+.PP
+Every Linux desktop has a different clipboard tool, with different options. \fBclip\fR picks the right one for the session you are in and runs it for you:
+.TP
+Wayland
+How it knows: \fBWAYLAND_DISPLAY\fR is set. Tool: \fBwl\-copy\fR and \fBwl\-paste\fR
+.TP
+Wayland, \fBwl\-copy\fR missing
+How it knows: \fBDISPLAY\fR is set too. Tool: \fBxclip\fR, else \fBxsel\fR, through XWayland
+.TP
+X11
+How it knows: \fBDISPLAY\fR is set. Tool: \fBxclip\fR, else \fBxsel\fR
+.TP
+macOS
+How it knows: \fBpbcopy\fR exists. Tool: \fBpbcopy\fR and \fBpbpaste\fR
+.TP
+SSH, or a console
+How it knows: none of the above. Tool: OSC 52, through the terminal
+.PP
+\fBclip\fR copies the bytes exactly. It adds nothing and strips nothing. \fBecho hello | clip\fR copies six bytes, with the newline at the end. Use \fBprintf\fR when you do not want the newline, such as for a password you will paste into a login field.
+.PP
+After a copy, one line on stderr says how many bytes went to the clipboard, and with which tool.
+.SS Copying over SSH
+.PP
+On a server you reach over SSH there is no desktop and no clipboard tool. \fBclip\fR then sends the text to your terminal program with an OSC 52 escape code. The terminal on your own machine puts the text on your own clipboard. That means \fBcat ~/.ssh/id_ed25519.pub | clip\fR on a server copies the key to the laptop you are typing on.
+.PP
+Most modern terminals accept OSC 52, among them kitty, WezTerm, Alacritty, foot, iTerm2, Windows Terminal and xterm. GNOME Terminal and other VTE\-based terminals do not. Some turn it off by default for safety. Inside tmux, \fBclip\fR wraps the code so tmux passes it on, and tmux needs \fBset \-g set\-clipboard on\fR or \fBallow\-passthrough on\fR.
+.PP
+OSC 52 only copies. There is no way to read the clipboard back through the terminal, so \fBclip \-o\fR over SSH exits 3. Terminals also limit how much they take, often 100 KB or less of encoded text, so \fBclip\fR warns when you send more than 74 KB.
+.SS Clearing after a while
+.PP
+\fB\-\-clear\-after 30\fR copies the text, then empties the clipboard 30 seconds later, from a small job in the background. Use it for a password or a token, so it does not sit on the clipboard for the rest of the day.
+.PP
+Before it clears, the job reads the clipboard back and compares it with what \fBclip\fR put there. When you copied something else in the meantime, it leaves your new copy alone. Over OSC 52 it cannot read the clipboard back, so it always clears.
+.SH OPTIONS
+.TP
+\fB\-o\fR, \fB\-\-out\fR
+Print the clipboard to stdout.
+.TP
+\fB\-c\fR, \fB\-\-clear\fR
+Empty the clipboard.
+.TP
+\fB\-\-primary\fR
+Use the primary selection instead of the clipboard. That is the text you last selected with the mouse, the one a middle click pastes. macOS has none, and \fBclip\fR uses the clipboard there.
+.TP
+\fB\-\-clear\-after SECS\fR
+Empty the clipboard again after this many seconds, unless something else was copied by then.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print no lines of its own. Errors still show.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the tool it picked and the command it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-\-primary\fR has no short form. In toolbelt \fB\-p\fR always means a password.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to the tool that copies: \fBwl\-copy\fR, \fBxclip\fR, \fBxsel\fR or \fBpbcopy\fR. Use this for what \fBclip\fR does not cover, such as a type for an image:
+.PP
+.RS 4
+.nf
+$ clip report.png -- --type image/png
+.fi
+.RE
+.PP
+That line is for \fBwl\-copy\fR. With \fBxclip\fR the same thing is \fB\-\- \-t image/png\fR. Nothing goes through with OSC 52.
+.SH NEEDS
+.PP
+One tool for your session. None over SSH or on macOS.
+.TP
+\fBwl\-copy\fR, \fBwl\-paste\fR
+Debian, Ubuntu: \fBwl\-clipboard\fR. Fedora: \fBwl\-clipboard\fR. Arch: \fBwl\-clipboard\fR. openSUSE: \fBwl\-clipboard\fR. Alpine: \fBwl\-clipboard\fR
+.TP
+\fBxclip\fR
+Debian, Ubuntu: \fBxclip\fR. Fedora: \fBxclip\fR. Arch: \fBxclip\fR. openSUSE: \fBxclip\fR. Alpine: \fBxclip\fR
+.TP
+\fBxsel\fR
+Debian, Ubuntu: \fBxsel\fR. Fedora: \fBxsel\fR. Arch: \fBxsel\fR. openSUSE: \fBxsel\fR. Alpine: \fBxsel\fR
+.PP
+GNOME and KDE Plasma run Wayland by default on current releases, so \fBwl\-clipboard\fR is the one most people need.
+.SH EXAMPLES
+.SS Copy a public key
+.PP
+.RS 4
+.nf
+$ clip ~/.ssh/id_ed25519.pub
+clip: copied 91 bytes with wl-copy
+.fi
+.RE
+.SS Paste into a command
+.PP
+Copy a manifest in the browser, then:
+.PP
+.RS 4
+.nf
+$ clip -o | kubectl apply -f -
+deployment.apps/api configured
+service/api unchanged
+.fi
+.RE
+.SS A secret that does not stay
+.PP
+.RS 4
+.nf
+$ ksecret db-creds DB_PASSWORD | clip --clear-after 30
+clip: copied 12 bytes with wl-copy, clearing in 30s
+.fi
+.RE
+.SS Over SSH
+.PP
+.RS 4
+.nf
+$ echo hello | clip
+clip: copied 6 bytes through the terminal with OSC 52
+$ clip -o
+clip: cannot read the clipboard with no display, OSC 52 only copies
+.fi
+.RE
+.SS See what it runs
+.PP
+.RS 4
+.nf
+$ echo hi | clip -v
+clip: using xclip
++ xclip -selection clipboard -in < /tmp/.clip-uTmXnv/in
+clip: copied 3 bytes with xclip
+.fi
+.RE
+.SS Empty the clipboard
+.PP
+.RS 4
+.nf
+$ clip -c
+clip: cleared the clipboard
+.fi
+.RE
+.SS A missing tool
+.PP
+.RS 4
+.nf
+$ echo hello | clip
+clip: needs xclip. Install it with: sudo apt install xclip
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBclip: needs xclip. Install it with: sudo apt install xclip\fR : You are in an X11 session and neither \fBxclip\fR nor \fBxsel\fR is installed. Install one of them.
+.PP
+\fBclip: needs wl\-copy. Install it with: sudo apt install wl\-clipboard\fR : You are in a Wayland session with no \fBwl\-copy\fR. Install \fBwl\-clipboard\fR.
+.PP
+The copy worked over SSH but nothing is on my clipboard : Your terminal does not accept OSC 52, or has it turned off. Look for "clipboard" or "OSC 52" in its settings. In tmux, add \fBset \-g set\-clipboard on\fR to \fB~/.tmux.conf\fR.
+.PP
+\fBclip: no terminal to send the text to, OSC 52 needs one\fR : \fBclip\fR ran with no display and no terminal, such as from cron. There is no clipboard to reach.
+.PP
+The text is gone when I close the terminal : On X11 the program that copied holds the text until something else takes the clipboard. \fBxclip\fR and \fBwl\-copy\fR stay in the background for that, so this should not happen. A clipboard manager, such as the one in KDE or GNOME, also keeps a copy.
+.PP
+\fBsudo clip\fR does not work : \fBsudo\fR drops \fBDISPLAY\fR and \fBWAYLAND_DISPLAY\fR. Run \fBclip\fR as yourself: \fBsudo cat /etc/file | clip\fR.
+.SH EXIT STATUS
+.TP
+0
+It copied, pasted or cleared.
+.TP
+1
+It failed, such as a file that does not exist, or a tool that returned an error.
+.TP
+2
+Bad usage, such as two files, or \fB\-o\fR with a file.
+.TP
+3
+No clipboard tool fits the session, or \fB\-o\fR over OSC 52.
+.SH SEE ALSO
+.PP
+\fBgenpass\fR, \fBksecret\fR, \fBwl\-copy(1)\fR, \fBxclip(1)\fR, \fBxsel(1)\fR

@@ -147,5 +147,10 @@ busybox        busybox              busybox              busybox              bu
 iw             iw                   iw                   iw                   iw                   iw
 avahi-resolve  avahi-utils          avahi-tools          avahi                avahi-utils          avahi-tools
 resolvectl     systemd-resolved     systemd-resolved     systemd              systemd-resolved|systemd-network -
+xsel           xsel                 xsel                 xsel                 xsel                 xsel
+wl-paste       wl-clipboard         wl-clipboard         wl-clipboard         wl-clipboard         wl-clipboard
+pbcopy         -                    -                    -                    -                    -
+pbpaste        -                    -                    -                    -                    -
+cksum          coreutils            coreutils            coreutils            coreutils            coreutils
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
