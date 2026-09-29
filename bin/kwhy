@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# kwhy: show why pods are not Ready, on one screen.
+set -uo pipefail
+TB_CMD=kwhy
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: kwhy [-n NAMESPACE | -A] [--lines N] [POD ...] [-- kubectl options]
+
+Show why pods are not Ready, on one screen.
+
+Options:
+  -n, --namespace NS  one namespace, the context's own by default
+  -A, --all-namespaces
+                      every namespace
+  --lines N           log lines per pod, 20 by default, 0 for none
+  -q, --quiet         one line per pod, no details
+  -v, --verbose       every step, and each kubectl command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to every kubectl call, such as --context.
+
+Examples:
+  kwhy
+  kwhy -n shop --lines 5
+  kwhy -n shop api-5b8c9d7f6-mk4tn
+  kwhy -A -- --context kind-kind
+
+Needs: kubectl and jq. See man kwhy.
+Exit: 0 every pod Ready, 1 some pods not Ready or kubectl failed,
+      2 bad usage, 3 missing tool.
+EOF
+}
+
+# One line per pod, fields split by \x1f:
+# namespace name reason restarts ok container image waiting-message
+# exit-code exit-reason finished logs-from sched-message cpu mem status-message init
+read -r -d '' PODS_JQ <<'JQ'
+def cpu_m: if . == null then 0 else tostring as $s |
+    if ($s | endswith("m")) then ($s[:-1] | tonumber)
+    elif ($s | endswith("u")) then ($s[:-1] | tonumber / 1000)
+    elif ($s | endswith("n")) then ($s[:-1] | tonumber / 1000000)
+    else ($s | tonumber * 1000) end end;
+def mem_b: if . == null then 0 else tostring as $s |
+    ({"Ki":1024,"Mi":1048576,"Gi":1073741824,"Ti":1099511627776,
+      "k":1000,"K":1000,"M":1000000,"G":1000000000,"T":1000000000000}) as $u |
+    ($s | capture("^(?<n>[0-9.eE+-]+)(?<u>[A-Za-z]*)$")) as $m |
+    ($m.n | tonumber) * ($u[$m.u] // 1) end;
+def cpu_text: if . == 0 then "" elif . % 1000 == 0 then "\(. / 1000 | floor)" else "\(. | floor)m" end;
+def mem_text: if . == 0 then ""
+    elif . % 1073741824 == 0 then "\(. / 1073741824 | floor)Gi"
+    elif . % 1048576 == 0 then "\(. / 1048576 | floor)Mi"
+    elif . % 1024 == 0 then "\(. / 1024 | floor)Ki"
+    else "\(. | floor)" end;
+def epoch: if . == null or . == "" then "" else sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 | tostring end;
+def clean: tostring | gsub("[\t\n\r\u001f]+"; " ") | gsub("^ +| +$"; "");
+(if has("items") then .items[] else . end) as $p |
+$p |
+([.status.conditions[]? | select(.type == "Ready") | .status] | first) as $ready |
+(.status.phase == "Succeeded") as $done |
+(if $ready == "True" or $done then 1 else 0 end) as $ok |
+([.status.containerStatuses[]? | .restartCount // 0] | add // 0) as $restarts |
+([.status.initContainerStatuses[]? | select(.ready | not) | . + {init: 1}] +
+ [.status.containerStatuses[]? | select(.ready | not) | . + {init: 0}]
+ | (map(select(.state.waiting.reason != null and .state.waiting.reason != "PodInitializing")) + .) | first) as $c |
+(.spec.containers + (.spec.initContainers // [])) as $specs |
+([.status.containerStatuses[]? | .ready] | map(select(.)) | length) as $nready |
+(.spec.containers | length) as $ntotal |
+(if .metadata.deletionTimestamp then "Terminating"
+ elif .status.reason then .status.reason
+ elif $done then "Completed"
+ elif $c != null and $c.init == 1 then
+     "Init:" + ($c.state.waiting.reason // $c.state.terminated.reason // "Running")
+ elif $c != null and ($c.state.waiting.reason // $c.state.terminated.reason) != null then
+     ($c.state.waiting.reason // $c.state.terminated.reason)
+ elif .status.phase == "Running" then "Running \($nready)/\($ntotal)"
+ else .status.phase // "Unknown" end) as $reason |
+(if $c == null then null
+ elif $c.lastState.terminated != null then $c.lastState.terminated + {from: "previous"}
+ elif $c.state.terminated != null then $c.state.terminated + {from: "current"}
+ elif $c.state.running != null then {from: "current"}
+ else null end) as $t |
+([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False") | .message] | first) as $sched |
+([.spec.containers[] | .resources.requests.cpu | cpu_m] | add // 0) as $cpu |
+([.spec.containers[] | .resources.requests.memory | mem_b] | add // 0) as $mem |
+[ .metadata.namespace, .metadata.name, $reason, $restarts, $ok,
+  ($c.name // ""),
+  (if $c == null then "" else ([$specs[] | select(.name == $c.name) | .image] | first // $c.image // "") end),
+  ($c.state.waiting.message // "" | clean),
+  ($t.exitCode // "" | tostring), ($t.reason // ""), ($t.finishedAt | epoch), ($t.from // ""),
+  ($sched // "" | clean), ($cpu | cpu_text), ($mem | mem_text),
+  (.status.message // "" | clean), ($c.init // 0)
+] | map(tostring) | join("\u001f")
+JQ
+
+# The newest Warning event of an object, or the newest event when it has
+# no warnings, as one line.
+read -r -d '' EVENT_JQ <<'JQ'
+def t: (.lastTimestamp // .eventTime // .series.lastObservedTime // .metadata.creationTimestamp // "");
+[.items[]? | select(.involvedObject.kind == "Pod")] | sort_by(t) |
+((map(select(.type == "Warning")) | last) // last) |
+if . == null then empty else .message // "" | gsub("[\t\n\r]+"; " ") | gsub("^ +| +$"; "") end
+JQ
+
+# A one-line hint for the common reasons.
+hint_for() {
+    local reason=$1 text=$2 code=$3 why=$4
+    case $reason in
+        ImagePullBackOff|ErrImagePull|Init:ImagePullBackOff|Init:ErrImagePull)
+            case $text in
+                *"manifest unknown"*|*"not found"*|*"NotFound"*|*"does not exist"*)
+                    echo "the tag does not exist, or the pull secret is wrong" ;;
+                *nauthorized*|*denied*|*"authentication required"*|*403*)
+                    echo "the registry refused the pull, check imagePullSecrets" ;;
+                *"no such host"*|*timeout*|*"dial tcp"*|*"connection refused"*)
+                    echo "the node cannot reach the registry" ;;
+                *) echo "check the image name, the tag and the pull secret" ;;
+            esac ;;
+        InvalidImageName) echo "the image name is not valid, check it for typos" ;;
+        CreateContainerConfigError)
+            echo "a Secret or ConfigMap it reads is missing, or a key in it" ;;
+        CreateContainerError|RunContainerError)
+            echo "the runtime could not start the container, read the event" ;;
+        Evicted) echo "the node ran short of a resource, kclean removes evicted pods" ;;
+        Terminating) echo "it is stuck deleting, a finalizer or a lost node holds it" ;;
+        Pending|ContainerCreating)
+            case $text in
+                *Insufficient*) echo "no node has ${5:-its request} free, see kres" ;;
+                *"untolerated taint"*|*"had taint"*) echo "the nodes have taints the pod does not tolerate" ;;
+                *"affinity"*|*"selector"*) echo "no node matches its nodeSelector or affinity" ;;
+                *"PersistentVolumeClaim"*|*"persistentvolumeclaim"*)
+                    echo "its PersistentVolumeClaim is not bound, see kubectl get pvc" ;;
+                *"MountVolume"*|*"FailedMount"*|*"Unable to attach or mount"*)
+                    echo "a volume does not mount, read the event" ;;
+                *) [[ $reason == Pending ]] && echo "the scheduler has not placed it, read the event" ;;
+            esac ;;
+        Running*) echo "the readiness probe fails, read the event and the log lines" ;;
+        Init:*) echo "an init container has not finished, its logs say why" ;;
+        CrashLoopBackOff|Error|OOMKilled|Completed)
+            if [[ $why == OOMKilled || $code == 137 ]]; then
+                echo "killed for using more memory than its limit, raise resources.limits.memory"
+            elif [[ $code == 0 ]]; then
+                echo "the process exits with 0, it must keep running to stay Ready"
+            elif [[ $code == 127 || $code == 126 ]]; then
+                echo "the command in the image does not exist or cannot run"
+            else
+                echo "the app stops on start, read the log lines above"
+            fi ;;
+    esac
+}
+
+show_pod() {
+    local ns=$1 name=$2 reason=$3 restarts=$4 c=$5 image=$6 wmsg=$7 code=$8 why=$9
+    local finished=${10} from=${11} sched=${12} cpu=${13} mem=${14} smsg=${15} label event text asks hint ago
+    label=$name
+    (( all )) && label=$ns/$name
+    printf "%-${width}s %-18s restarts %s\n" "$label" "$reason" "$restarts"
+    (( TB_QUIET )) && return 0
+
+    kube_to "$TMP/ev" get events -n "$ns" --field-selector "involvedObject.name=$name" -o json || kube_fail
+    event=$(jq -r "$EVENT_JQ" "$TMP/ev" 2>/dev/null)
+    [[ -n $event ]] || event=${sched:-${wmsg:-$smsg}}
+    event=${event%% preemption: *}
+    case $reason in
+        *ImagePull*|*ErrImage*|InvalidImageName) [[ -n $image ]] && echo "  image  $image" ;;
+    esac
+    [[ -n $event ]] && echo "  event  $event"
+    [[ -n $wmsg && $wmsg != "$event" && $reason == *Config* ]] && echo "  detail $wmsg"
+    [[ -n $smsg && $smsg != "$event" ]] && echo "  status $smsg"
+    asks=""
+    if [[ -n $sched ]]; then
+        [[ -n $cpu ]] && asks="cpu $cpu"
+        [[ -n $mem ]] && asks+="${asks:+, }memory $mem"
+        [[ -n $asks ]] && echo "  asks   $asks"
+    fi
+
+    if [[ -n $from && -n $c ]]; then
+        text=""
+        if [[ -n $code ]]; then
+            text="$code"
+            [[ -n $why && $why != Error && $why != Completed ]] && text+=", $why"
+            if [[ -n $finished ]]; then
+                ago=$(( $(date +%s) - finished ))
+                text+=", $(tb_age "$ago") ago"
+            fi
+        fi
+        if (( lines > 0 )); then
+            local what="last $(tb_plural "$lines" line)"
+            [[ $from == previous ]] && what+=" of the crashed container"
+            if [[ -n $text ]]; then echo "  exit   $text, $what"; else echo "  logs   $what"; fi
+            local args=(logs "$name" -n "$ns" -c "$c" --tail "$lines")
+            [[ $from == previous ]] && args+=(--previous)
+            if kube_to "$TMP/log" "${args[@]}"; then
+                if [[ -s $TMP/log ]]; then
+                    sed 's/^/    /' "$TMP/log"
+                else
+                    echo "    (no output)"
+                fi
+            else
+                echo "    kubectl could not read the logs: $(grep -m1 . "$TMP/kerr" | sed -E 's/^(error: |Error from server( \([A-Za-z]+\))?: )//')"
+            fi
+        elif [[ -n $text ]]; then
+            echo "  exit   $text"
+        fi
+    fi
+    hint=$(hint_for "$reason" "$event $wmsg $smsg $sched" "$code" "$why" "$asks")
+    [[ -n $hint ]] && echo "  hint   $hint"
+    return 0
+}
+
+main() {
+    local where rows total bad nsn
+    tb_need kubectl jq
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    [[ -n $ns ]] || ns=$KNS
+    local get=(get pods -o json)
+    if (( all )); then
+        get+=(-A)
+        where="all namespaces"
+    else
+        get+=(-n "$ns")
+        where="namespace $ns"
+        (( ${#pods[@]} )) && get=(get pod "${pods[@]}" -n "$ns" -o json)
+    fi
+    tb_say "context ${KCTX:-none}, $where"
+    if ! kube_to "$TMP/pods" "${get[@]}"; then
+        if kube_notfound && (( ${#pods[@]} )); then
+            local miss
+            miss=$(grep -o 'pods "[^"]*" not found' "$TMP/kerr" | head -n 1 | cut -d'"' -f2)
+            tb_die 1 "no pod ${miss:-${pods[0]}} in $ns. List them with: kubectl get pods -n $ns"
+        fi
+        kube_fail
+    fi
+    rows=$(jq -r "$PODS_JQ" "$TMP/pods") || tb_die 1 "kubectl gave output jq cannot read"
+    total=0 bad=0
+    [[ -n $rows ]] && total=$(grep -c . <<<"$rows")
+    bad=$(awk -F '\x1f' '$5 == 0' <<<"$rows" | grep -c .)
+    nsn=$(awk -F '\x1f' '{ print $1 }' <<<"$rows" | sort -u | grep -c .)
+    width=20
+    local r n
+    while IFS=$'\x1f' read -r r n _; do
+        [[ -n $n ]] || continue
+        (( all )) && n="$r/$n"
+        (( ${#n} + 2 > width )) && width=$(( ${#n} + 2 ))
+    done <<<"$rows"
+
+    if (( ! TB_QUIET )); then
+        if (( total == 0 )); then
+            echo "context ${KCTX:-none}, $where, no pods"
+        elif (( bad == 0 )); then
+            local done_n
+            done_n=$(awk -F '\x1f' '$3 == "Completed"' <<<"$rows" | grep -c .)
+            local what="Ready"
+            (( done_n )) && what="Ready or Completed"
+            local count="all $(tb_plural "$total" pod)"
+            (( total == 1 )) && count="1 pod"
+            if (( all )); then
+                echo "context ${KCTX:-none}, $count $what in $(tb_plural "$nsn" namespace)"
+            else
+                echo "context ${KCTX:-none}, $where, $count $what"
+            fi
+        else
+            echo "context ${KCTX:-none}, $where, $bad of $(tb_plural "$total" pod) not Ready"
+        fi
+    fi
+    local f
+    while IFS=$'\x1f' read -r -a f; do
+        (( ${#f[@]} )) || continue
+        if [[ ${f[4]} == 1 ]]; then
+            (( ${#pods[@]} )) || continue
+            local state=Ready
+            [[ ${f[2]} == Completed ]] && state=Completed
+            printf "%-${width}s %-18s restarts %s\n" "${f[1]}" "$state" "${f[3]}"
+            continue
+        fi
+        show_pod "${f[0]}" "${f[1]}" "${f[2]}" "${f[3]}" "${f[5]:-}" "${f[6]:-}" "${f[7]:-}" "${f[8]:-}" \
+            "${f[9]:-}" "${f[10]:-}" "${f[11]:-}" "${f[12]:-}" "${f[13]:-}" "${f[14]:-}" "${f[15]:-}"
+    done <<<"$rows"
+    (( bad == 0 ))
+}
+
+ns=""
+all=0
+lines=20
+pods=()
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--namespace)      tb_optarg "$@"; ns=$2; shift ;;
+        -A|--all-namespaces) all=1 ;;
+        --lines)             tb_optarg "$@"
+                             [[ $2 =~ ^[0-9]+$ ]] || tb_usage_error "--lines needs a number, such as --lines 5"
+                             lines=$2; shift ;;
+        --)                  shift; TB_PASS=("$@"); break ;;
+        -*)                  tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)                   pods+=("$1") ;;
+    esac
+    shift
+done
+if (( all )) && [[ -n $ns ]]; then
+    tb_usage_error "use -n or -A, not both"
+fi
+if (( all && ${#pods[@]} )); then
+    tb_usage_error "name pods with -n, not -A, such as: kwhy -n shop ${pods[0]}"
+fi
+
+main
+exit $?
