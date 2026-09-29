@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# waitfor: wait for a port, a URL or a file.
+set -uo pipefail
+TB_CMD=waitfor
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: waitfor [options] HOST:PORT | URL | PATH [-- curl options]
+
+Wait for a port, a URL or a file.
+
+Options:
+  -t, --timeout SEC   give up after SEC seconds, 30 by default,
+                      0 waits for ever
+  -i, --interval SEC  seconds between tries, 1 by default
+  -s, --status CODE   for a URL, wait for this code instead of 200
+  -q, --quiet         only the result line and errors
+  -v, --verbose       every try, and the command it runs
+  -h, --help          this help
+
+What it waits for:
+  HOST:PORT           a TCP port that accepts a connection, :PORT is
+                      localhost
+  http://, https://   a URL that answers 200, or the code from -s
+  anything else       a path that exists
+
+Pass-through:
+  Options after -- go to curl, for a URL.
+
+Examples:
+  waitfor db:5432 -t 60
+  waitfor http://localhost:8080/healthz && ./smoke-test.sh
+  waitfor -t 10 /run/app/app.sock
+  waitfor https://localhost:8443/health -- --insecure
+
+Needs: bash and timeout. curl for URLs. See man waitfor.
+Exit: 0 ready, 1 timed out, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# One try at a TCP port. Sets WHY on failure.
+try_port() {
+    local limit=$1 err rc
+    err=$(timeout "$limit" bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>&1)
+    rc=$?
+    (( rc == 0 )) && return 0
+    case $err in
+        *refused*) WHY="connection refused" ;;
+        *"Name or service not known"*|*"not known"*|*"resolution"*) WHY="unknown host" ;;
+        *"No route"*) WHY="no route to host" ;;
+        *unreachable*) WHY="network unreachable" ;;
+        *) WHY="no answer" ;;
+    esac
+    (( rc == 124 )) && WHY="no answer in ${limit}s"
+    return 1
+}
+
+# One try at a URL. Sets WHY and CODE.
+try_url() {
+    local limit=$1 rc
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$limit" ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$target" 2>/dev/null)
+    rc=$?
+    [[ $CODE == "$want" ]] && return 0
+    case $rc in
+        0|22) WHY=$CODE ;;
+        6) WHY="unknown host" ;;
+        7) WHY="refused" ;;
+        28) WHY="no answer in ${limit}s" ;;
+        35) WHY="TLS failed" ;;
+        60) WHY="untrusted certificate" ;;
+        *) WHY="curl exit $rc" ;;
+    esac
+    return 1
+}
+
+try_path() {
+    [[ -e $target ]] && return 0
+    WHY="does not exist"
+    return 1
+}
+
+# Seconds with a fraction, for timeout and sleep. "1" and "0.5" pass.
+is_seconds() { [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
+
+main() {
+    local start now left n=0 limit ok elapsed nap
+    case $kind in
+        port)
+            tb_need timeout
+            tb_show bash -c "exec 3<>/dev/tcp/$host/$port"
+            ;;
+        url)
+            tb_need curl
+            tb_show curl -s -o /dev/null -w '%{http_code}' ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$target"
+            ;;
+    esac
+    start=$(tb_now_ms)
+    while :; do
+        ((n++))
+        now=$(tb_now_ms)
+        left=$(( timeout_ms > 0 ? timeout_ms - (now - start) : 5000 ))
+        limit=$(( left < 1000 ? 1 : (left > 5000 ? 5 : left / 1000) ))
+        WHY="" CODE=""
+        case $kind in
+            port) try_port "$limit" ;;
+            url)  try_url "$limit" ;;
+            path) try_path ;;
+        esac
+        ok=$?
+        elapsed=$(tb_elapsed $(( $(tb_now_ms) - start )))
+        if (( ok == 0 )); then
+            tb_line_end
+            case $kind in
+                port) echo "$target open after $elapsed" ;;
+                url)  echo "$target answered $CODE after $elapsed" ;;
+                path) echo "$target exists after $elapsed" ;;
+            esac
+            return 0
+        fi
+        (( TB_VERBOSE )) && printf 'try %d  %s\n' "$n" "$WHY" >&2
+        tb_line "waitfor: $target, try $n, $WHY, $elapsed"
+        now=$(tb_now_ms)
+        if (( timeout_ms > 0 && now - start >= timeout_ms )); then
+            tb_line_end
+            local what
+            case $kind in
+                port) what="$target is still closed, $WHY" ;;
+                url)  what="$target last said $WHY" ;;
+                path) what="$target does not exist" ;;
+            esac
+            tb_err "gave up after $(tb_elapsed $(( now - start ))), $what"
+            return 1
+        fi
+        # Sleep the interval, or less when the time runs out sooner.
+        nap=$interval_ms
+        (( timeout_ms > 0 && timeout_ms - (now - start) < nap )) && nap=$(( timeout_ms - (now - start) ))
+        sleep "$(( nap / 1000 )).$(printf '%03d' $(( nap % 1000 )))"
+    done
+}
+
+timeout_s=30
+interval=1
+want=200
+target=""
+tb_expand "tis" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -t|--timeout)  tb_optarg "$@"; timeout_s=$2; shift ;;
+        -i|--interval) tb_optarg "$@"; interval=$2; shift ;;
+        -s|--status)   tb_optarg "$@"; want=$2; shift ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            [[ -z $target ]] || tb_usage_error "name one thing to wait for, got $target and $1"
+            target=$1
+            ;;
+    esac
+    shift
+done
+[[ -n $target ]] || tb_usage_error "name a HOST:PORT, a URL or a path to wait for"
+is_seconds "$timeout_s" || tb_usage_error "--timeout needs seconds, such as 30, got $timeout_s"
+is_seconds "$interval" || tb_usage_error "--interval needs seconds, such as 1 or 0.5, got $interval"
+[[ $want =~ ^[1-5][0-9][0-9]$ ]] || tb_usage_error "--status needs an HTTP code such as 200 or 401, got $want"
+timeout_ms=$(awk -v s="$timeout_s" 'BEGIN { printf "%d", s * 1000 }')
+interval_ms=$(awk -v s="$interval" 'BEGIN { printf "%d", s * 1000 }')
+(( interval_ms > 0 )) || tb_usage_error "--interval must be more than 0"
+
+if [[ $target =~ ^https?:// ]]; then
+    kind=url
+elif [[ $target =~ ^\[([0-9a-fA-F:]+)\]:([0-9]+)$ ]] || [[ $target =~ ^([^/:]*):([0-9]+)$ ]]; then
+    kind=port
+    host=${BASH_REMATCH[1]:-localhost}
+    port=${BASH_REMATCH[2]}
+    (( 10#$port >= 1 && 10#$port <= 65535 )) || tb_usage_error "$port is not a port number, use 1 to 65535"
+    [[ -n ${BASH_REMATCH[1]} ]] || target=localhost:$port
+else
+    kind=path
+fi
+(( ${#TB_PASS[@]} == 0 )) || [[ $kind == url ]] || tb_usage_error "options after -- go to curl, and only a URL uses curl"
+
+main
+exit $?
