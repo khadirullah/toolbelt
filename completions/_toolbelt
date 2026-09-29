@@ -1,0 +1,9 @@
+#compdef unpack squash archdiff archmount autounpack bak checksum bulkrename fixperms dupes bigfiles recent mirror lock unlock shrink togif pkg mem cleanup sysinfo proc svc logs disks boottime temps seccheck schedules port myip netcheck waitfor share lan httptime sshfwd speed again notify-done cheats clip genpass timer note epoch kwhy ksecret kyaml kclean kfwd kres knodes kevents ctx certcheck dnscheck tfcheck yamlcheck imgpeek jwtpeek git-undo git-prune-merged git-recent git-wip git-sync git-whoami toolbelt
+# zsh completion for every toolbelt command. `toolbelt shell enable` puts this
+# folder on fpath. Options come from each command's own --help.
+
+if [[ $service == toolbelt ]] && (( CURRENT == 2 )); then
+    _values 'subcommand' help doctor setup shell update version uninstall new
+else
+    _gnu_generic
+fi

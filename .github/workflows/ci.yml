@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          make lint
+      - name: docs
+        run: python3 tools/check-docs.py
+      - name: man pages are up to date
+        run: |
+          python3 tools/md2man.py
+          git diff --exit-code -I '^\.TH' man/
+
+  test:
+    name: test on ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:13
+          - ubuntu:24.04
+          - ubuntu:22.04
+          - fedora:44
+          - rockylinux:9
+          - archlinux:latest
+          - opensuse/leap:15
+          - alpine:3
+    steps:
+      - name: install test tools
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make python3 bash file \
+              tar gzip bzip2 xz-utils zstd lz4 zip unzip cpio rsync jq curl iproute2 procps
+          elif command -v dnf >/dev/null; then
+            dnf install -y -q git make python3 bash file tar gzip bzip2 xz zstd lz4 zip unzip \
+              cpio rsync jq curl-minimal iproute procps-ng findutils diffutils which
+          elif command -v pacman >/dev/null; then
+            pacman -Syu --noconfirm --quiet git make python bash file tar gzip bzip2 xz zstd lz4 \
+              zip unzip cpio rsync jq curl iproute2 procps-ng diffutils which
+          elif command -v zypper >/dev/null; then
+            zypper -q install -y git make python3 bash file tar gzip bzip2 xz zstd lz4 zip unzip \
+              cpio rsync jq curl iproute2 procps findutils diffutils which gawk
+          elif command -v apk >/dev/null; then
+            apk add -q git make python3 bash file tar gzip bzip2 xz zstd lz4 zip unzip cpio \
+              rsync jq curl iproute2 procps
+          fi
+      - uses: actions/checkout@v4
+      - name: bats
+        run: git clone -q --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
+      - name: test
+        run: bash -c 'git config --global --add safe.directory "$PWD"; /tmp/bats/bin/bats tests'
+      - name: package names exist in this distro
+        if: matrix.image != 'rockylinux:9' && matrix.image != 'ubuntu:22.04'
+        run: bash tools/check-pkgmap

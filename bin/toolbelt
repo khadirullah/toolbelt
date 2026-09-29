@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# toolbelt: help, health check, setup and updates for toolbelt.
+set -uo pipefail
+TB_CMD=toolbelt
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: toolbelt help [group | command]
+       toolbelt doctor
+       toolbelt setup [--only group] [-y] [-- package manager options]
+       toolbelt shell [enable | disable] [setting ...]
+       toolbelt update [--check] [-y]
+       toolbelt version
+       toolbelt uninstall [-y]
+       toolbelt new name
+
+Help, health check, setup and updates for toolbelt.
+
+Subcommands:
+  help                every command by group
+  help GROUP          the group's commands with one line each
+  help COMMAND        that command's help page
+  doctor              check this machine for missing tools and name clashes
+  setup               install the optional tools, after showing the list
+  shell               list or change the opt-in shell settings
+  update              install the latest release, after asking
+  version             toolbelt, bash and distro versions
+  uninstall           remove toolbelt, after asking
+  new NAME            start a new command from the template
+
+Options:
+  --only GROUP        setup: only this group, such as archives or devops
+  --check             update: only report whether a new release exists
+  -y, --yes           do not ask in setup, update and uninstall
+  -q, --quiet         doctor: print only problems
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Examples:
+  toolbelt help
+  toolbelt help network
+  toolbelt doctor
+  toolbelt shell enable functions history
+
+Needs: bash 4.4 or newer. curl or wget for update.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+GROUP_WIDTH=12
+REPO_API=https://api.github.com/repos/khadirullah/toolbelt/releases/latest
+
+# ---------------------------------------------------------------- command list
+
+# Lines of "Group cmd cmd ..." from lib/commands.
+groups_raw() { grep -v '^[[:space:]]*#' "$TB_ROOT/lib/commands" | grep -v '^[[:space:]]*$'; }
+
+# Every command name, one per line.
+all_commands() { groups_raw | awk '{ for (i = 2; i <= NF; i++) print $i }'; }
+
+# The group of a command, or nothing.
+group_of() { groups_raw | awk -v c="$1" '{ for (i = 2; i <= NF; i++) if ($i == c) { print $1; exit } }'; }
+
+# The commands of a group, matched without case.
+group_members() { groups_raw | awk -v g="${1,,}" 'tolower($1) == g { for (i = 2; i <= NF; i++) print $i }'; }
+
+# git-undo shows as "git undo", since git runs it as a subcommand.
+display_name() { if [[ $1 == git-* ]]; then echo "git ${1#git-}"; else echo "$1"; fi; }
+
+# The one-line description of a command: the first line after the first
+# blank line of its help, below the usage lines.
+describe() {
+    local c=$1 line first='NF == 0 { b = 1; next } b { print; exit }'
+    case $c in
+        mkcd|up) line=$(bash -c 'source "$1"; "$2" --help' _ "$TB_ROOT/shell/functions.sh" "$c" 2>/dev/null | awk "$first") ;;
+        *)       line=$("$TB_ROOT/bin/$c" --help 2>/dev/null | awk "$first") ;;
+    esac
+    line=${line%.}
+    echo "${line,}"
+}
+
+# Print words after a label, wrapped to 64 columns, continuing under the words.
+wrap_row() {
+    local label=$1 width=64 line="" w
+    shift
+    local pad
+    printf -v pad '%*s' "$GROUP_WIDTH" ""
+    printf '%-*s' "$GROUP_WIDTH" "$label"
+    for w in "$@"; do
+        if [[ -n $line ]] && (( GROUP_WIDTH + ${#line} + 1 + ${#w} > width )); then
+            echo "$line"
+            printf '%s' "$pad"
+            line=$w
+        else
+            line=${line:+$line }$w
+        fi
+    done
+    echo "$line"
+}
+
+cmd_help() {
+    local what=${1:-} g c names members
+    if [[ -z $what ]]; then
+        while read -r g members; do
+            names=()
+            local gits=()
+            for c in $members; do
+                [[ $c == toolbelt ]] && continue
+                if [[ $c == git-* ]]; then gits+=("${c#git-}"); else names+=("$c"); fi
+            done
+            (( ${#gits[@]} )) && names+=("git" "${gits[@]}")
+            wrap_row "$g" "${names[@]}"
+        done < <(groups_raw)
+        wrap_row toolbelt help doctor setup shell update version uninstall new
+        echo
+        echo "toolbelt help GROUP adds descriptions. COMMAND --help shows one page."
+        return 0
+    fi
+    if [[ -n $(group_members "$what") ]]; then
+        local width=0 list=()
+        mapfile -t list < <(group_members "$what")
+        for c in "${list[@]}"; do
+            c=$(display_name "$c")
+            (( ${#c} > width )) && width=${#c}
+        done
+        for c in "${list[@]}"; do
+            printf '%-*s  %s\n' "$width" "$(display_name "$c")" "$(describe "$c")"
+        done
+        return 0
+    fi
+    [[ $what == git\ * ]] && what="git-${what#git }"
+    if [[ -n $(group_of "$what") ]]; then
+        case $what in
+            mkcd|up) bash -c 'source "$1"; "$2" --help' _ "$TB_ROOT/shell/functions.sh" "$what" ;;
+            toolbelt) usage ;;
+            *) "$TB_ROOT/bin/$what" --help ;;
+        esac
+        return
+    fi
+    tb_die "$E_USAGE" "no command or group named $what. Run toolbelt help for the list"
+}
+
+# ---------------------------------------------------------------- doctor
+
+distro_name() {
+    local NAME="" VERSION_ID="" PRETTY_NAME=""
+    # shellcheck disable=SC1091
+    [[ -r /etc/os-release ]] && . /etc/os-release
+    if [[ -n $NAME ]]; then
+        NAME=${NAME% GNU/Linux}
+        NAME=${NAME% Linux}
+        echo "$NAME${VERSION_ID:+ $VERSION_ID}"
+    else
+        echo "unknown Linux"
+    fi
+}
+
+# Where the toolbelt links live, from the install record, or the repo bin.
+bin_dir() {
+    local rec=$TB_ROOT/.installed
+    if [[ -r $rec ]]; then
+        sed -n 's/^prefix=//p' "$rec" | head -1 | sed 's|$|/bin|'
+    else
+        echo "$TB_ROOT/bin"
+    fi
+}
+
+# Shell functions and aliases in the user's rc files that shadow a command.
+rc_shadows() {
+    local c f
+    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_aliases"; do
+        [[ -r $f ]] || continue
+        while read -r c; do
+            if grep -Eq "^[[:space:]]*(alias[[:space:]]+$c=|function[[:space:]]+$c\b|$c[[:space:]]*\(\))" "$f"; then
+                echo "$c ${f/#$HOME/\~}"
+            fi
+        done < <(all_commands | grep -v -e '^mkcd$' -e '^up$')
+    done
+}
+
+cmd_doctor() {
+    local problems=0 bindir c first shell_line tool group users missing=() line
+    bindir=$(bin_dir)
+    tb_color_stdout
+
+    if (( ! TB_QUIET )); then
+        printf '%-11s%s, %s\n' distro "$(distro_name)" "$(tb_pm)"
+        printf '%-11s%s, 4.4 or newer is needed\n' bash "${BASH_VERSION%%(*}"
+        shell_line=$(basename "${SHELL:-sh}")
+        [[ -d $HOME/.oh-my-zsh ]] && shell_line+=" with oh-my-zsh"
+        printf '%-11s%s\n' shell "$shell_line"
+        if [[ :$PATH: == *":$bindir:"* ]]; then
+            printf '%-11s%s is on PATH\n' path "${bindir/#$HOME/\~}"
+        else
+            printf '%-11s%s%s is not on PATH%s\n' path "$C_RED" "${bindir/#$HOME/\~}" "$C_OFF"
+        fi
+    fi
+    [[ :$PATH: == *":$bindir:"* ]] || problems=1
+
+    while read -r tool group users; do
+        [[ -z $tool || $tool == \#* ]] && continue
+        tb_has "$tool" && continue
+        line=$(tb_install_line "$tool") || line="no $(tb_pm) package, get it from its project page"
+        missing+=("$(printf '  %-12s %-14s %s' "$tool" "$(cut -d' ' -f1-2 <<<"$users")" "$line")")
+    done < "$TB_ROOT/lib/recommends"
+    if (( ! TB_QUIET )); then
+        if (( ${#missing[@]} )); then
+            printf '%-11s%s\n' missing "$(tb_plural ${#missing[@]} "optional tool")"
+            printf '%s\n' "${missing[@]}"
+        else
+            printf '%-11s%s\n' missing "none"
+        fi
+    fi
+
+    # A clash is a command that runs something other than toolbelt's copy.
+    local clashes=()
+    while read -r c; do
+        [[ $c == mkcd || $c == up ]] && continue
+        first=$(type -P "$c" 2>/dev/null) || continue
+        if [[ $(readlink -f "$first") != "$(readlink -f "$TB_ROOT/bin/$c" 2>/dev/null)" ]]; then
+            clashes+=("! ${first/#$HOME/\~} comes before toolbelt's $c on PATH")
+        fi
+    done < <(all_commands)
+    while read -r c f; do
+        [[ -n ${c:-} ]] && clashes+=("! $f defines $c, which hides toolbelt's $c")
+    done < <(rc_shadows)
+    if (( ${#clashes[@]} )); then
+        problems=1
+        (( TB_QUIET )) || printf '%-11s%s\n' clashes "$(tb_plural ${#clashes[@]} clash clashes)"
+        for line in "${clashes[@]}"; do
+            printf '%s%s%s\n' "$C_YEL" "$line" "$C_OFF"
+        done
+        echo "  rename one, or move ${bindir/#$HOME/\~} earlier in PATH"
+    elif (( ! TB_QUIET )); then
+        printf '%-11s%s\n' clashes none
+    fi
+
+    if (( ! TB_QUIET )); then
+        if [[ -r $HOME/.zshrc ]] && grep -Eq '^[[:space:]]*plugins=\(.*\bextract\b' "$HOME/.zshrc"; then
+            printf '%-11s%s\n' note "oh-my-zsh defines a shell function named extract."
+            printf '%-11s%s\n' "" "extract is not a toolbelt command, so it does not"
+            printf '%-11s%s\n' "" "clash with anything."
+        fi
+        local rec=()
+        for tool in btop ncdu fzf tldr dive; do tb_has "$tool" || rec+=("$tool"); done
+        (( ${#rec[@]} )) && printf '%-11s%s\n' recommend "${rec[*]}"
+    fi
+    return "$problems"
+}
+
+# ---------------------------------------------------------------- setup
+
+cmd_setup() {
+    local only=${1:-} tool group users pkg pm want=() have=() nopkg=() groups_seen=() line
+    pm=$(tb_pm)
+    [[ $pm == unknown ]] && tb_die "$E_TOOL" "no known package manager found, install the tools by hand"
+    local -A by_group=()
+    while read -r tool group users; do
+        [[ -z $tool || $tool == \#* ]] && continue
+        [[ -n $only && $group != "${only,,}" ]] && continue
+        if tb_has "$tool"; then
+            have+=("$tool")
+            continue
+        fi
+        if pkg=$(tb_pkg_for "$tool"); then
+            pkg=${pkg%%|*}
+            [[ " ${want[*]} " == *" $pkg "* ]] && continue
+            want+=("$pkg")
+            [[ -z ${by_group[$group]:-} ]] && groups_seen+=("$group")
+            by_group[$group]+=" $pkg"
+        else
+            nopkg+=("$tool")
+        fi
+    done < "$TB_ROOT/lib/recommends"
+    [[ -n $only && ${#want[@]} -eq 0 && ${#have[@]} -eq 0 && ${#nopkg[@]} -eq 0 ]] &&
+        tb_usage_error "no group named $only. Groups: $(awk '!/^#/ && NF { print $2 }' "$TB_ROOT/lib/recommends" | sort -u | tr '\n' ' ')"
+
+    echo "recommended tools for $(distro_name), $pm"
+    for group in "${groups_seen[@]}"; do
+        printf '  %-11s %s\n' "$group" "${by_group[$group]# }"
+    done
+    (( ${#have[@]} )) && printf '  %-11s %s, skipped\n' installed "${have[*]}"
+    (( ${#nopkg[@]} )) && printf '  %-11s %s, see each project for a release\n' "not in $pm" "${nopkg[*]}"
+    if (( ${#want[@]} == 0 )); then
+        echo "nothing to install"
+        return 0
+    fi
+
+    local sudo=(sudo)
+    (( EUID == 0 )) && sudo=()
+    local cmd
+    case $pm in
+        apt)    cmd=(apt install -y) ;;
+        dnf)    cmd=(dnf install -y) ;;
+        pacman) cmd=(pacman -S --needed --noconfirm) ;;
+        zypper) cmd=(zypper install -y) ;;
+        apk)    cmd=(apk add) ;;
+    esac
+    line="${sudo[*]:+${sudo[*]} }${cmd[*]} ${TB_PASS[*]:+${TB_PASS[*]} }${want[*]}"
+    echo "will run  $line"
+    tb_confirm "Install $(tb_plural ${#want[@]} package)?"
+    tb_run "${sudo[@]}" "${cmd[@]}" "${TB_PASS[@]}" "${want[@]}" || tb_die 1 "the package manager failed, see its message above"
+}
+
+# ---------------------------------------------------------------- shell
+
+SHELL_SETTINGS=(functions history safe)
+
+shell_conf() { echo "$(tb_config_dir)/shell"; }
+setting_on() { grep -qx "$1" "$(shell_conf)" 2>/dev/null; }
+
+# The rc file that loads toolbelt's shell settings.
+rc_file() {
+    case $(basename "${SHELL:-bash}") in
+        zsh) echo "$HOME/.zshrc" ;;
+        *)   echo "$HOME/.bashrc" ;;
+    esac
+}
+
+RC_LINE='[ -f "$HOME/.local/share/toolbelt/shell/init.sh" ] && . "$HOME/.local/share/toolbelt/shell/init.sh"  # toolbelt'
+
+rc_line() { printf '%s' "${RC_LINE//\$HOME\/.local\/share\/toolbelt/$TB_ROOT}"; }
+
+cmd_shell() {
+    local action=${1:-} rc s n
+    rc=$(rc_file)
+    if [[ -z $action ]]; then
+        tb_color_stdout
+        printf '%-10s %-6s %s\n' SETTING STATE "WHAT IT DOES"
+        for s in "${SHELL_SETTINGS[@]}"; do
+            local state=off
+            setting_on "$s" && state=on
+            case $s in
+                functions) printf '%-10s %-6s %s\n' "$s" "$state" "mkcd and up" ;;
+                history)   printf '%-10s %-6s %s\n' "$s" "$state" "50000 lines, timestamps, shared by terminals" ;;
+                safe)      printf '%-10s %-6s %s\n' "$s" "$state" "cp and mv ask before they overwrite" ;;
+            esac
+        done
+        if n=$(grep -n '# toolbelt$' "$rc" 2>/dev/null | head -1 | cut -d: -f1) && [[ -n $n ]]; then
+            printf '%-10s %s\n' "loaded by" "${rc/#$HOME/\~} line $n"
+        else
+            printf '%-10s %s\n' "loaded by" "nothing yet, toolbelt shell enable adds one line to ${rc/#$HOME/\~}"
+        fi
+        return 0
+    fi
+    shift
+    [[ $action == enable || $action == disable ]] || tb_usage_error "shell takes enable or disable, not $action"
+    (( $# )) || tb_usage_error "name a setting: ${SHELL_SETTINGS[*]}"
+    for s in "$@"; do
+        [[ " ${SHELL_SETTINGS[*]} " == *" $s "* ]] || tb_usage_error "no setting named $s. Settings: ${SHELL_SETTINGS[*]}"
+    done
+    local conf
+    conf=$(shell_conf)
+    touch "$conf"
+    for s in "$@"; do
+        if [[ $action == enable ]]; then
+            setting_on "$s" || echo "$s" >> "$conf"
+        else
+            local rest
+            rest=$(grep -vx "$s" "$conf")
+            printf '%s\n' "$rest" | grep -v '^$' > "$conf"
+        fi
+    done
+    if [[ -s $conf ]] && ! grep -q '# toolbelt$' "$rc" 2>/dev/null; then
+        printf '\n%s\n' "$(rc_line)" >> "$rc"
+        tb_say "added the toolbelt line to ${rc/#$HOME/\~}"
+    fi
+    echo "${action}d $* in ${rc/#$HOME/\~}"
+    echo "open a new terminal, or run: source ${rc/#$HOME/\~}"
+}
+
+# ---------------------------------------------------------------- update
+
+fetch() {
+    if tb_has curl; then
+        tb_run curl -fsSL "$@"
+    elif tb_has wget; then
+        tb_run wget -qO- "$@"
+    else
+        tb_die "$E_TOOL" "$(tb_missing_msg curl)"
+    fi
+}
+
+cmd_update() {
+    local check=$1 json latest tarball sums tmp want got
+    json=$(fetch "$REPO_API") || tb_die 1 "could not reach GitHub, check the network and try again"
+    latest=$(sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' <<<"$json" | head -1)
+    [[ -n $latest ]] || tb_die 1 "GitHub did not return a release"
+    printf '%-10s %s\n' installed "$TB_VERSION"
+    printf '%-10s %s\n' latest "$latest"
+    if [[ $latest == "$TB_VERSION" ]]; then
+        echo "already up to date"
+        return 0
+    fi
+    (( check )) && return 0
+    tarball=$(grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' <<<"$json" | head -1 | sed 's/.*"\(http[^"]*\)"/\1/')
+    sums=$(grep -o '"browser_download_url": *"[^"]*\.sha256"' <<<"$json" | head -1 | sed 's/.*"\(http[^"]*\)"/\1/')
+    [[ -n $tarball && -n $sums ]] || tb_die 1 "the release has no tarball and sha256 file"
+    tb_confirm "Update to $latest?"
+    tb_tmpdir tmp
+    fetch "$tarball" > "$tmp/toolbelt.tar.gz" || tb_die 1 "download failed, nothing changed"
+    want=$(fetch "$sums" | awk '{ print $1; exit }')
+    got=$(sha256sum "$tmp/toolbelt.tar.gz" | awk '{ print $1 }')
+    [[ -n $want && $want == "$got" ]] || tb_die "$E_SAFE" "sha256 does not match the release, nothing changed"
+    echo "checked sha256 of $(basename "$tarball")"
+    tar -xzf "$tmp/toolbelt.tar.gz" -C "$tmp" || tb_die 1 "could not unpack the release, nothing changed"
+    local src
+    src=$(find "$tmp" -mindepth 2 -maxdepth 2 -name install.sh | head -1)
+    [[ -n $src ]] || tb_die 1 "the release has no install.sh, nothing changed"
+    src=$(dirname "$src")
+    local prefix
+    prefix=$(sed -n 's/^prefix=//p' "$TB_ROOT/.installed" 2>/dev/null | head -1)
+    "$src/install.sh" --prefix "${prefix:-$HOME/.local}" -q || tb_die 1 "install failed"
+    echo "updated to $latest"
+}
+
+# ---------------------------------------------------------------- uninstall
+
+cmd_uninstall() {
+    [[ -r $TB_ROOT/.installed ]] || tb_die 1 "toolbelt runs from a clone here, run ./install.sh --uninstall in it instead"
+    local n
+    n=$(grep -c '^bin ' "$TB_ROOT/.installed")
+    echo "removes $n commands, their man pages, completions and the toolbelt line in $(basename "$(rc_file)")"
+    echo "keeps your notes and ~/.config/toolbelt"
+    tb_confirm "Uninstall toolbelt?"
+    local prefix
+    prefix=$(sed -n 's/^prefix=//p' "$TB_ROOT/.installed" | head -1)
+    bash "$TB_ROOT/install.sh" --prefix "$prefix" --uninstall || tb_die 1 "uninstall failed"
+}
+
+# ---------------------------------------------------------------- new
+
+cmd_new() {
+    local name=$1 dir where
+    [[ $name =~ ^[a-z][a-z0-9-]*$ ]] || tb_usage_error "use lower case letters, digits and -, starting with a letter"
+    if where=$(type -P "$name"); then
+        tb_die "$E_SAFE" "$name is already on PATH at $where, pick another name"
+    fi
+    if [[ -f lib/common.sh && -f lib/commands && -d bin ]]; then
+        dir=.
+        [[ -e bin/$name ]] && tb_die "$E_SAFE" "bin/$name already exists"
+        write_template "$name" 'source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"' > "bin/$name"
+        chmod +x "bin/$name"
+        write_test "$name" > "tests/$name.bats"
+        write_doc "$name" > "docs/$name.md"
+        echo "wrote bin/$name          the command, with help and options"
+        echo "wrote tests/$name.bats   3 starter tests"
+        echo "wrote docs/$name.md      the help page"
+        echo "try it: ./bin/$name --help"
+    else
+        [[ -e $name ]] && tb_die "$E_SAFE" "./$name already exists"
+        write_template "$name" "source \"$TB_ROOT/lib/common.sh\"" > "$name"
+        chmod +x "$name"
+        echo "wrote ./$name, using the installed toolbelt library"
+        echo "try it: ./$name --help"
+    fi
+}
+
+write_template() {
+    local name=$1 src=$2
+    cat <<EOF
+#!/usr/bin/env bash
+# $name: say in one line what it does.
+set -uo pipefail
+TB_CMD=$name
+# shellcheck source=/dev/null
+$src
+
+usage() {
+    cat <<'HELP'
+usage: $name [options] file ...
+
+Say in one line what it does.
+
+Options:
+  -o, --out DIR       where the result goes
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Examples:
+  $name notes.txt
+
+Needs: nothing outside coreutils.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+HELP
+}
+
+main() {
+    local out=. files=()
+    tb_expand "o" "\$@"
+    set -- "\${TB_EXPANDED[@]}"
+    while (( \$# )); do
+        case \$1 in
+            -o|--out) tb_optarg "\$@"; out=\$2; shift ;;
+            --)       shift; TB_PASS=("\$@"); break ;;
+            -*)       tb_common_opt "\$1" || tb_unknown "\$1" ;;
+            *)        files+=("\$1") ;;
+        esac
+        shift
+    done
+    (( \${#files[@]} )) || tb_usage_error "name at least one file"
+
+    local f
+    for f in "\${files[@]}"; do
+        [[ -e \$f ]] || tb_die 1 "\$f: no such file"
+        tb_say "working on \$f"
+        echo "\$f -> \$out"
+    done
+}
+
+main "\$@"
+EOF
+}
+
+write_test() {
+    cat <<EOF
+#!/usr/bin/env bats
+
+load helpers
+
+setup() { tb_setup; }
+
+@test "$1 --help prints usage" {
+    run $1 --help
+    [ "\$status" -eq 0 ]
+    [[ \${lines[0]} == "usage: $1"* ]]
+}
+
+@test "$1 with no file is bad usage" {
+    run $1
+    [ "\$status" -eq 2 ]
+}
+
+@test "$1 handles a file" {
+    echo hi > a.txt
+    run $1 a.txt
+    [ "\$status" -eq 0 ]
+}
+EOF
+}
+
+write_doc() {
+    cat <<EOF
+# $1
+
+Say in one line what it does.
+
+## Synopsis
+
+\`\`\`
+$1 [options] file ...
+\`\`\`
+
+## Description
+
+What it does, how it decides, and what it never does.
+
+## Options
+
+| Option | What it does |
+|---|---|
+| \`-o\`, \`--out DIR\` | Where the result goes. |
+| \`-q\`, \`--quiet\` | Only the result line. |
+| \`-v\`, \`--verbose\` | Every step, and each real command before it runs. |
+| \`-h\`, \`--help\` | The help page. |
+
+## Needs
+
+Nothing outside coreutils.
+
+## Examples
+
+### The normal case
+
+\`\`\`console
+\$ $1 notes.txt
+notes.txt -> .
+\`\`\`
+
+## Exit status
+
+0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+    local sub="" only="" check=0 args=()
+    tb_expand "" "$@"
+    set -- "${TB_EXPANDED[@]}"
+    while (( $# )); do
+        case $1 in
+            --only)  tb_optarg "$@"; only=$2; shift ;;
+            --check) check=1 ;;
+            --)      shift; TB_PASS=("$@"); break ;;
+            -*)      tb_common_opt "$1" || tb_unknown "$1" ;;
+            *)       if [[ -z $sub ]]; then sub=$1; else args+=("$1"); fi ;;
+        esac
+        shift
+    done
+    case ${sub:-help} in
+        help)      cmd_help "${args[*]:-}" ;;
+        doctor)    cmd_doctor ;;
+        setup)     cmd_setup "$only" ;;
+        shell)     cmd_shell "${args[@]}" ;;
+        update)    cmd_update "$check" ;;
+        version)   echo "toolbelt $TB_VERSION, bash ${BASH_VERSION%%(*}, $(distro_name)" ;;
+        uninstall) cmd_uninstall ;;
+        new)       (( ${#args[@]} == 1 )) || tb_usage_error "new takes one name"; cmd_new "${args[0]}" ;;
+        *)         tb_usage_error "no subcommand named $sub" ;;
+    esac
+}
+
+main "$@"

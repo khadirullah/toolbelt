@@ -1,0 +1,38 @@
+# Optional tools, and the toolbelt commands that use them.
+# `toolbelt doctor` lists the missing ones and `toolbelt setup` installs them.
+# The package names come from lib/pkgmap.
+#
+# tool          group        used by
+zstd            archives     unpack squash
+pigz            archives     squash
+7z              archives     unpack squash archdiff
+lz4             archives     unpack squash
+lzip            archives     unpack squash
+lzop            archives     unpack squash
+brotli          archives     unpack squash
+unar            archives     unpack
+pv              archives     unpack squash
+archivemount    archives     archmount
+inotifywait     archives     autounpack
+rsync           files        mirror
+age             files        lock unlock
+magick          files        shrink
+gs              files        shrink
+ffmpeg          files        shrink togif
+lsof            system       proc port
+smartctl        system       disks
+sensors         system       temps
+qrencode        network      share
+dig             network      myip dnscheck
+nmap            network      lan
+curl            network      httptime speed netcheck cheats
+notify-send     everyday     notify-done
+wl-copy         everyday     clip
+xclip           everyday     clip
+kubectl         kubernetes   kwhy ksecret kyaml kclean kfwd kres knodes kevents
+jq              devops       jwtpeek imgpeek
+openssl         devops       certcheck
+yamllint        devops       yamlcheck
+kubeconform     devops       yamlcheck
+tflint          devops       tfcheck
+trivy           devops       tfcheck

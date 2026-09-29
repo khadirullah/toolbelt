@@ -1,0 +1,60 @@
+# The package that provides each command, per package manager.
+# Columns: command, apt, dnf, pacman, zypper, apk. A dash means the distro has
+# no package for it. "a|b" means a, or b on older releases.
+# tools/check-pkgmap checks every name against the real repos in CI.
+#
+# command      apt                  dnf                  pacman               zypper               apk
+7z             7zip|p7zip-full      7zip|p7zip           7zip                 7zip|p7zip-full      7zip
+age            age                  age                  age                  age                  age
+ar             binutils             binutils             binutils             binutils             binutils
+archivemount   archivemount         archivemount         archivemount         archivemount         -
+arp-scan       arp-scan             arp-scan             arp-scan             arp-scan             arp-scan
+brotli         brotli               brotli               brotli               brotli               brotli
+bzip2          bzip2                bzip2                bzip2                bzip2                bzip2
+cpio           cpio                 cpio                 cpio                 cpio                 cpio
+curl           curl                 curl                 curl                 curl                 curl
+dig            bind9-dnsutils       bind-utils           bind                 bind-utils           bind-tools
+docker         docker.io            moby-engine          docker               docker               docker
+dpkg-deb       dpkg                 dpkg                 dpkg                 dpkg                 dpkg
+ffmpeg         ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7             ffmpeg
+file           file                 file                 file                 file                 file
+flatpak        flatpak              flatpak              flatpak              flatpak              flatpak
+fzf            fzf                  fzf                  fzf                  fzf                  fzf
+gio            libglib2.0-bin       glib2                glib2                glib2-tools          glib
+git            git                  git                  git                  git                  git
+gpg            gnupg                gnupg2               gnupg                gpg2                 gnupg
+gs             ghostscript          ghostscript          ghostscript          ghostscript          ghostscript
+gzip           gzip                 gzip                 gzip                 gzip                 gzip
+inotifywait    inotify-tools        inotify-tools        inotify-tools        inotify-tools        inotify-tools
+jq             jq                   jq                   jq                   jq                   jq
+lsof           lsof                 lsof                 lsof                 lsof                 lsof
+lz4            lz4                  lz4                  lz4                  lz4                  lz4
+lzip           lzip                 lzip                 lzip                 lzip                 lzip
+lzop           lzop                 lzop                 lzop                 lzop                 lzop
+magick         imagemagick          ImageMagick          imagemagick          ImageMagick          imagemagick
+convert        imagemagick          ImageMagick          imagemagick          ImageMagick          imagemagick
+nmap           nmap                 nmap                 nmap                 nmap                 nmap
+notify-send    libnotify-bin        libnotify            libnotify            libnotify-tools      libnotify
+openssl        openssl              openssl              openssl              openssl              openssl
+pbzip2         pbzip2               pbzip2               pbzip2               pbzip2               pbzip2
+pigz           pigz                 pigz                 pigz                 pigz                 pigz
+plzip          plzip                plzip                plzip                plzip                -
+podman         podman               podman               podman               podman               podman
+pv             pv                   pv                   pv                   pv                   pv
+python3        python3              python3              python               python3              python3
+qrencode       qrencode             qrencode             qrencode             qrencode             libqrencode-tools
+rpm2cpio       rpm2cpio             rpm                  rpmextract           rpm                  rpm
+rsync          rsync                rsync                rsync                rsync                rsync
+sensors        lm-sensors           lm_sensors           lm_sensors           sensors              lm-sensors
+smartctl       smartmontools        smartmontools        smartmontools        smartmontools        smartmontools
+ss             iproute2             iproute              iproute2             iproute2             iproute2
+ssh            openssh-client       openssh-clients      openssh              openssh-clients      openssh-client
+tar            tar                  tar                  tar                  tar                  tar
+unar           unar                 unar                 unarchiver           unar                 unar
+unzip          unzip                unzip                unzip                unzip                unzip
+wl-copy        wl-clipboard         wl-clipboard         wl-clipboard         wl-clipboard         wl-clipboard
+xclip          xclip                xclip                xclip                xclip                xclip
+xz             xz-utils             xz                   xz                   xz                   xz
+zip            zip                  zip                  zip                  zip                  zip
+zstd           zstd                 zstd                 zstd                 zstd                 zstd
+yamllint       yamllint             yamllint             yamllint             yamllint             yamllint

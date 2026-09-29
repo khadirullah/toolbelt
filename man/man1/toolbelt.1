@@ -1,0 +1,306 @@
+.TH "TOOLBELT" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+toolbelt \- help, health check, setup and updates for toolbelt
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+toolbelt help [group | command]
+toolbelt doctor
+toolbelt setup [--only group] [-y] [-- package manager options]
+toolbelt shell [enable | disable] [setting ...]
+toolbelt update [--check] [-y]
+toolbelt version
+toolbelt uninstall [-y]
+toolbelt new name
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBtoolbelt\fR is the one command that looks after the others. It lists every command, checks your machine for the tools they use, installs what is missing, turns on the shell settings, and updates or removes toolbelt itself.
+.PP
+Every other command works on its own. You never type \fBtoolbelt unpack\fR, you type \fBunpack\fR. \fBtoolbelt\fR is only for finding commands and keeping the install healthy.
+.PP
+\fBtoolbelt doctor\fR and \fBtoolbelt help\fR only read. \fBsetup\fR, \fBupdate\fR and \fBuninstall\fR show what they will do and ask before they change anything. \fBshell\fR changes one line in your shell startup file and tells you which.
+.SH SUBCOMMANDS
+.SS help
+.PP
+\fBtoolbelt help\fR prints every command, grouped the way this manual groups them. It fits one screen.
+.PP
+\fBtoolbelt help GROUP\fR adds the one\-line description of each command in the group. Groups are archives, files, system, network, everyday, kubernetes, devops and shell, in any case.
+.PP
+\fBtoolbelt help COMMAND\fR prints that command's help page, the same as \fBCOMMAND \-\-help\fR. For the git helpers you can write \fBtoolbelt help git\-undo\fR or \fBtoolbelt help "git undo"\fR.
+.SS doctor
+.PP
+\fBtoolbelt doctor\fR checks the machine and prints one line per topic.
+.TP
+\fBdistro\fR
+The distro name and version from \fB/etc/os\-release\fR, and the package manager toolbelt found.
+.TP
+\fBbash\fR
+The Bash version. toolbelt needs 4.4 or newer.
+.TP
+\fBshell\fR
+Your login shell, and whether oh\-my\-zsh is installed.
+.TP
+\fBpath\fR
+Whether the folder with the toolbelt commands is on your PATH.
+.TP
+\fBmissing\fR
+Optional tools that are not installed, which commands use them, and the install line for your distro.
+.TP
+\fBclashes\fR
+Commands that run something other than toolbelt's copy.
+.TP
+\fBnote\fR
+Things that look like a clash but are not, such as the oh\-my\-zsh \fBextract\fR plugin.
+.TP
+\fBrecommend\fR
+Good tools toolbelt does not replace, such as btop, ncdu, fzf, tldr and dive, when they are missing.
+.PP
+A clash is either a program with the same name earlier on your PATH, or an alias or function with the same name in \fB~/.bashrc\fR, \fB~/.zshrc\fR or \fB~/.bash_aliases\fR. doctor names the file. Fix a clash by renaming one of the two, or by moving \fB~/.local/bin\fR earlier in PATH.
+.PP
+With \fB\-q\fR, doctor prints only problems, so a script can run it and show the output only when there is something to fix.
+.SS setup
+.PP
+\fBtoolbelt setup\fR reads the list of optional tools, finds the ones you lack, and looks up each package name for your package manager. It prints the list grouped by what the tools are for, prints the exact command it will run, and asks. Tools that your distro does not package are listed at the end with a note to get them from their project.
+.PP
+\fB\-\-only GROUP\fR limits the list to one group, such as \fB\-\-only archives\fR.
+.PP
+Options after \fB\-\-\fR go to the package manager, for example \fBtoolbelt setup \-\- \-\-no\-install\-recommends\fR on apt.
+.PP
+setup runs the package manager with sudo, unless you are root.
+.SS shell
+.PP
+Three opt\-in settings, off until you turn them on.
+.TP
+\fBfunctions\fR
+Loads \fBmkcd\fR and \fBup\fR. They must run inside your shell to change its folder, so they are shell functions and need this setting.
+.TP
+\fBhistory\fR
+Keeps 50000 lines of history with a timestamp on each, writes each command at once, and shares history between open terminals.
+.TP
+\fBsafe\fR
+Makes \fBcp\fR and \fBmv\fR ask before they overwrite a file, with aliases to \fBcp \-i\fR and \fBmv \-i\fR.
+.PP
+\fBtoolbelt shell\fR lists the settings, whether each is on, and the line that loads them.
+.PP
+\fBtoolbelt shell enable functions history\fR turns settings on. The first time, it adds one line, ending in \fB# toolbelt\fR, to \fB~/.bashrc\fR, or to \fB~/.zshrc\fR when your shell is zsh. That line loads \fB~/.local/share/toolbelt/shell/init.sh\fR, which reads the settings from \fB~/.config/toolbelt/shell\fR. Open a new terminal, or run \fBsource ~/.bashrc\fR, to use them.
+.PP
+\fBtoolbelt shell disable safe\fR turns a setting off. The line stays, and loads nothing that is off.
+.PP
+In zsh, the same line also puts toolbelt's completion folder on \fBfpath\fR.
+.SS update
+.PP
+\fBtoolbelt update\fR asks GitHub for the latest release, prints the installed and latest versions, and asks before it changes anything. It downloads the release tarball and its \fB.sha256\fR file, checks the hash, unpacks it into a temp folder and runs its installer with your install prefix. When the hash does not match, it stops with exit 4 and changes nothing.
+.PP
+\fB\-\-check\fR only prints the two versions.
+.SS version
+.PP
+Prints the toolbelt version, the Bash version and the distro on one line. Paste it into a bug report.
+.SS uninstall
+.PP
+Removes every command link, man page link, completion link and the \fB# toolbelt\fR line in your shell startup file, then the installed files in \fB~/.local/share/toolbelt\fR. It asks first. It keeps your notes and anything in \fB~/.config/toolbelt\fR, \fB~/.local/state/toolbelt\fR and \fB~/.cache/toolbelt\fR, so a later install picks up where you left off. Delete those folders by hand to remove every trace.
+.PP
+It removes only links that still point into toolbelt. A file of your own with the same name stays.
+.SS new
+.PP
+\fBtoolbelt new NAME\fR starts a command of your own from the same template the others use, with help, the shared options, tool checks and exit codes in place.
+.PP
+Inside a clone of the toolbelt repo, it writes \fBbin/NAME\fR, \fBtests/NAME.bats\fR and \fBdocs/NAME.md\fR. Anywhere else, it writes \fB./NAME\fR, which loads the installed toolbelt library.
+.PP
+The name must be lower case letters, digits and \fB\-\fR, starting with a letter. new refuses a name that is already a command on your PATH, with exit 4, so your command never hides another.
+.SH OPTIONS
+.TP
+\fB\-\-only GROUP\fR
+setup: only the tools for one group.
+.TP
+\fB\-\-check\fR
+update: only report the installed and latest versions.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Do not ask in setup, update and uninstall.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+doctor: print only problems.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Every step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+The help page.
+.SH PASS\-THROUGH
+.PP
+\fBtoolbelt setup\fR passes the options after \fB\-\-\fR to your package manager. The other subcommands take none.
+.PP
+.RS 4
+.nf
+$ toolbelt setup -- --no-install-recommends
+.fi
+.RE
+.SH NEEDS
+.PP
+Bash 4.4 or newer. \fBupdate\fR needs curl or wget. \fBsetup\fR needs sudo, unless you run it as root.
+.SH FILES
+.TP
+\fB~/.local/share/toolbelt/\fR
+The installed commands, library, completion and man pages.
+.TP
+\fB~/.local/share/toolbelt/.installed\fR
+Every link the installer made, so uninstall removes exactly those.
+.TP
+\fB~/.local/bin/\fR
+One link per command.
+.TP
+\fB~/.config/toolbelt/shell\fR
+The shell settings that are on, one per line.
+.TP
+\fB~/.local/state/toolbelt/\fR
+Records some commands keep, such as unpack's history.
+.TP
+\fB~/.cache/toolbelt/\fR
+Caches, such as cheats pages.
+.PP
+The XDG variables move these folders when they are set.
+.SH EXAMPLES
+.SS See every command
+.PP
+.RS 4
+.nf
+$ toolbelt help
+Archives    unpack squash archdiff archmount autounpack
+Files       bak checksum bulkrename fixperms dupes bigfiles
+            recent mirror lock unlock shrink togif
+System      pkg mem cleanup sysinfo proc svc logs disks boottime
+            temps seccheck schedules
+Network     port myip netcheck waitfor share lan httptime sshfwd
+            speed
+Everyday    again notify-done cheats clip genpass timer note
+            epoch
+Kubernetes  kwhy ksecret kyaml kclean kfwd kres knodes kevents
+DevOps      ctx certcheck dnscheck tfcheck yamlcheck imgpeek
+            jwtpeek git undo prune-merged recent wip sync whoami
+Shell       mkcd up
+toolbelt    help doctor setup shell update version uninstall new
+
+toolbelt help GROUP adds descriptions. COMMAND --help shows one page.
+.fi
+.RE
+.SS One group, with descriptions
+.PP
+.RS 4
+.nf
+$ toolbelt help kubernetes
+kwhy     show why pods are not Ready, on one screen
+ksecret  show a Secret decoded, one key or all
+kyaml    print clean YAML of a live object, ready to reuse
+kclean   delete evicted, completed and crashing pods
+kfwd     port-forward a service to a spare local port
+kres     compare node requests with real usage
+knodes   show node health and pressure at a glance
+kevents  show recent events in time order, newest last
+.fi
+.RE
+.SS Check the machine
+.PP
+.RS 4
+.nf
+$ toolbelt doctor
+distro     Debian 13, apt
+bash       5.2.37, 4.4 or newer is needed
+shell      bash
+path       ~/.local/bin is on PATH
+missing    3 optional tools
+  brotli       unpack squash  sudo apt install brotli
+  qrencode     share          sudo apt install qrencode
+  tflint       tfcheck        no apt package, get it from its project page
+clashes    none
+recommend  ncdu fzf tldr dive
+.fi
+.RE
+.PP
+A clash, printed with \fB\-q\fR so only problems show:
+.PP
+.RS 4
+.nf
+$ toolbelt doctor -q
+clashes    1 clash
+! ~/bin/timer comes before toolbelt's timer on PATH
+  rename one, or move ~/.local/bin earlier in PATH
+.fi
+.RE
+.SS Install the optional tools for archives
+.PP
+.RS 4
+.nf
+$ toolbelt setup --only archives
+recommended tools for Debian 13, apt
+  archives    brotli archivemount
+  installed   zstd pigz 7z lz4 lzip lzop unar pv, skipped
+will run  sudo apt install -y brotli archivemount
+Install 2 packages? [y/N] y
+.fi
+.RE
+.SS Turn on mkcd and up
+.PP
+.RS 4
+.nf
+$ toolbelt shell enable functions
+enabled functions in ~/.bashrc
+open a new terminal, or run: source ~/.bashrc
+$ toolbelt shell
+SETTING    STATE  WHAT IT DOES
+functions  on     mkcd and up
+history    off    50000 lines, timestamps, shared by terminals
+safe       off    cp and mv ask before they overwrite
+loaded by  ~/.bashrc line 118
+.fi
+.RE
+.SS Update
+.PP
+.RS 4
+.nf
+$ toolbelt update
+installed  0.1.0
+latest     0.2.0
+Update to 0.2.0? [y/N] y
+checked sha256 of toolbelt-0.2.0.tar.gz
+updated to 0.2.0
+.fi
+.RE
+.SS Start a command of your own
+.PP
+.RS 4
+.nf
+$ toolbelt new mytool
+wrote bin/mytool          the command, with help and options
+wrote tests/mytool.bats   3 starter tests
+wrote docs/mytool.md      the help page
+try it: ./bin/mytool --help
+$ toolbelt new tree
+toolbelt: tree is already on PATH at /usr/bin/tree, pick another name
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB"command not found" right after install.\fR \fB~/.local/bin\fR is not on your PATH. The installer printed the line to add. Add \fBexport PATH="$HOME/.local/bin:$PATH"\fR to \fB~/.bashrc\fR and open a new terminal.
+.PP
+\fBA command runs something else.\fR Run \fBtoolbelt doctor\fR. It names the program or alias that comes first.
+.PP
+\fBmkcd says command not found.\fR Run \fBtoolbelt shell enable functions\fR and open a new terminal.
+.PP
+\fBsetup says no known package manager.\fR toolbelt knows apt, dnf, yum, pacman, zypper and apk. On other systems, install the tools doctor lists by hand.
+.SH EXIT STATUS
+.PP
+The shared codes: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+.IP \(bu 2
+\fBdoctor\fR exits 1 when it finds a clash or the command folder is not on PATH.
+.IP \(bu 2
+\fBsetup\fR, \fBupdate\fR and \fBuninstall\fR exit 5 when you answer no.
+.IP \(bu 2
+\fBupdate\fR exits 4 when the sha256 does not match.
+.IP \(bu 2
+\fBnew\fR exits 4 when the name is taken.
+.SH SEE ALSO
+.PP
+\fBmkcd\fR, \fBup\fR, and each command's own page.

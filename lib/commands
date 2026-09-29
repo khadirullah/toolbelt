@@ -1,0 +1,10 @@
+# Every command toolbelt installs, by group, in the order `toolbelt help` lists them.
+# group        command
+Archives       unpack squash archdiff archmount autounpack
+Files          bak checksum bulkrename fixperms dupes bigfiles recent mirror lock unlock shrink togif
+System         pkg mem cleanup sysinfo proc svc logs disks boottime temps seccheck schedules
+Network        port myip netcheck waitfor share lan httptime sshfwd speed
+Everyday       again notify-done cheats clip genpass timer note epoch
+Kubernetes     kwhy ksecret kyaml kclean kfwd kres knodes kevents
+DevOps         ctx certcheck dnscheck tfcheck yamlcheck imgpeek jwtpeek git-undo git-prune-merged git-recent git-wip git-sync git-whoami
+Shell          mkcd up toolbelt

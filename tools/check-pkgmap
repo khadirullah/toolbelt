@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Check that every package name in lib/pkgmap exists in this distro's repos.
+# CI runs it once per distro image. Run it as root in a fresh container.
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+
+if command -v apt-get >/dev/null; then pm=apt col=2
+elif command -v dnf >/dev/null; then pm=dnf col=3
+elif command -v pacman >/dev/null; then pm=pacman col=4
+elif command -v zypper >/dev/null; then pm=zypper col=5
+elif command -v apk >/dev/null; then pm=apk col=6
+else echo "check-pkgmap: no known package manager" >&2; exit 1; fi
+
+(( EUID == 0 )) && case $pm in
+    apt)    apt-get update -qq >/dev/null ;;
+    pacman) pacman -Sy --noconfirm >/dev/null ;;
+    apk)    apk update -q >/dev/null ;;
+    zypper) zypper -q refresh >/dev/null ;;
+esac
+
+exists() {
+    case $pm in
+        apt)    apt-cache show "$1" >/dev/null 2>&1 ;;
+        dnf)    dnf -q info "$1" >/dev/null 2>&1 ;;
+        pacman) pacman -Si "$1" >/dev/null 2>&1 ;;
+        zypper) zypper -q info "$1" 2>/dev/null | grep -q '^Name' ;;
+        apk)    [[ -n $(apk search -e "$1" 2>/dev/null) ]] ;;
+    esac
+}
+
+bad=0 checked=0
+while read -r cmd rest; do
+    [[ -z $cmd || $cmd == \#* ]] && continue
+    pkg=$(awk -v n="$col" '{ print $n }' <<<"$cmd $rest")
+    [[ -z $pkg || $pkg == - ]] && continue
+    ok=0
+    IFS='|' read -ra names <<<"$pkg"
+    for name in "${names[@]}"; do
+        exists "$name" && { ok=1; break; }
+    done
+    ((checked++))
+    if (( ! ok )); then
+        echo "missing: $cmd needs $pkg, not found by $pm"
+        bad=1
+    fi
+done < "$root/lib/pkgmap"
+echo "checked $checked package names with $pm"
+exit "$bad"
