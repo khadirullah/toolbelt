@@ -1,0 +1,462 @@
+#!/usr/bin/env bash
+# dupes: find duplicate files by content.
+set -uo pipefail
+TB_CMD=dupes
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: dupes [options] [path ...] [-- tool options]
+
+Find duplicate files by content.
+
+What to look at:
+  -m, --min SIZE      skip files smaller than SIZE, such as 100K
+  --only PATTERN      look only at names that match, can repeat
+  -x, --exclude PAT   leave out names that match, can repeat
+  --fast              use jdupes, fdupes or rdfind when installed
+
+What to do with them:
+  --trash             keep the oldest in each group, trash the rest
+  --link              replace the copies with hard links to the oldest
+  -y, --yes           with --trash or --link, go ahead without asking
+  -q, --quiet         only the groups and the total
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  With --fast, options after -- go to jdupes, fdupes or rdfind.
+
+Examples:
+  dupes ~/Pictures
+  dupes -m 1M ~/Downloads ~/Videos
+  dupes --trash -x '*.part' ~/Downloads
+  dupes --link --fast /srv/backups
+
+Needs: find, stat, head, cmp and sha256sum. jdupes, fdupes or rdfind are
+optional, for --fast. See man dupes.
+Exit: 0 ok, found or not, 1 failed, 2 bad usage, 3 missing tool,
+      4 refused, 5 answered no.
+EOF
+}
+
+# The -name and -path tests for a list of patterns, joined with -o.
+name_tests() {
+    local pat first=1
+    NAME_TESTS=()
+    for pat in "$@"; do
+        (( first )) || NAME_TESTS+=(-o)
+        first=0
+        if [[ $pat == */* ]]; then NAME_TESTS+=(-path "$pat"); else NAME_TESTS+=(-name "$pat"); fi
+    done
+}
+
+# Print a progress line that overwrites itself, only in a terminal.
+progress() {
+    tb_progress || return 0
+    printf '\r%s\e[K' "$*" >&2
+}
+progress_end() {
+    tb_progress || return 0
+    printf '\r\e[K' >&2
+}
+
+# Walk the paths and fill F_SIZE, F_TIME, F_DEV and F_PATH with every
+# regular file of at least min bytes, one entry per inode, keeping only
+# sizes that more than one file has.
+scan_plain() {
+    local find_args=() line size mtime dev ino path errf
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    errf=$work/errors
+    find_args=(-P "${paths[@]}")
+    if (( ${#excludes[@]} )); then
+        name_tests "${excludes[@]}"
+        find_args+=( \( "${NAME_TESTS[@]}" \) -prune -o )
+    fi
+    find_args+=(-type f -size +$(( min - 1 ))c)
+    if (( ${#onlys[@]} )); then
+        name_tests "${onlys[@]}"
+        find_args+=( \( "${NAME_TESTS[@]}" \) )
+    fi
+    # A name with a line break would split the list, so those are skipped.
+    find_args+=(! -name $'*\n*' -exec stat -c '%s %Y %d %i %n' -- {} +)
+    show_find
+    progress "dupes: listing files"
+    # Keep one path per inode, then only sizes that more than one file has.
+    while IFS=' ' read -r size mtime dev ino path; do
+        F_SIZE+=("$size")
+        F_TIME+=("$mtime")
+        F_DEV+=("$dev")
+        F_PATH+=("$path")
+    done < <(find "${find_args[@]}" 2>"$errf" \
+        | awk '!seen[$3 " " $4]++' \
+        | awk '{ n[$1]++; line[NR] = $0; size[NR] = $1 }
+               END { for (i = 1; i <= NR; i++) if (n[size[i]] > 1) print line[i] }')
+    progress_end
+    if [[ -s $errf ]]; then
+        tb_info "dupes: could not read $(tb_plural "$(wc -l <"$errf")" path), run it with sudo to include them"
+    fi
+    tb_say "$(tb_plural "${#F_PATH[@]}" file) share a size with another file"
+}
+
+# Show the find command with -v. The pattern with a line break is shown as
+# $'*\n*', so the line can be copied and run.
+show_find() {
+    (( TB_VERBOSE )) || return 0
+    local a shown=()
+    for a in "${find_args[@]}"; do
+        [[ $a == $'*\n*' ]] && a=NEWLINEPATTERN
+        shown+=("$a")
+    done
+    a=$(tb_show find "${shown[@]}" 2>&1)
+    a=${a#"$C_DIM"}
+    a=${a%"$C_OFF"}
+    a=${a#+ }
+    tb_show_text "${a/NEWLINEPATTERN/\$\'*\\n*\'}"
+}
+
+# Hash the first 4KB of a file, or all of it with "full".
+hash_of() {
+    local out
+    if [[ $1 == head ]]; then
+        out=$(head -c 4096 -- "$2" 2>/dev/null | sha256sum) || return 1
+    else
+        out=$(sha256sum < "$2" 2>/dev/null) || return 1
+    fi
+    echo "${out%% *}"
+}
+
+# Narrow the candidates: same size, then the same first 4KB, then the same
+# full hash. Fills F_KEY with the group of each file, or "" when it is alone.
+group_plain() {
+    local i n=${#F_PATH[@]} key h
+    declare -A count=()
+    F_KEY=()
+    # Step 1, the first 4KB. For a file of 4KB or less this is the whole file.
+    for (( i = 0; i < n; i++ )); do
+        (( i % 50 == 0 )) && progress "dupes: reading the start of file $i of $n"
+        if h=$(hash_of head "${F_PATH[i]}"); then
+            key="${F_SIZE[i]}:$h"
+        else
+            key=""
+        fi
+        F_KEY[i]=$key
+        [[ -n $key ]] && count[$key]=$(( ${count[$key]:-0} + 1 ))
+    done
+    # Step 2, the whole file, for files over 4KB that still have a match.
+    local todo=0 done=0
+    for (( i = 0; i < n; i++ )); do
+        key=${F_KEY[i]}
+        if [[ -z $key || ${count[$key]} -lt 2 ]]; then
+            F_KEY[i]=""
+        elif (( F_SIZE[i] > 4096 )); then
+            ((todo++))
+        fi
+    done
+    tb_say "$todo files over 4KB match another in their first 4KB, hashing them whole"
+    count=()
+    for (( i = 0; i < n; i++ )); do
+        [[ -n ${F_KEY[i]} ]] || continue
+        if (( F_SIZE[i] > 4096 )); then
+            ((done++))
+            progress "dupes: hashing file $done of $todo"
+            if h=$(hash_of full "${F_PATH[i]}"); then
+                F_KEY[i]="${F_SIZE[i]}:$h"
+            else
+                F_KEY[i]=""
+                continue
+            fi
+        fi
+        count[${F_KEY[i]}]=$(( ${count[${F_KEY[i]}]:-0} + 1 ))
+    done
+    progress_end
+    for (( i = 0; i < n; i++ )); do
+        key=${F_KEY[i]}
+        [[ -n $key && ${count[$key]} -ge 2 ]] || F_KEY[i]=""
+    done
+}
+
+# True when a path passes --min, --only and -x. Used for the --fast tools,
+# which do their own walking.
+wanted() {
+    local path=$1 size=$2 name pat ok
+    (( size >= min )) || return 1
+    name=$(basename -- "$path")
+    for pat in ${excludes[@]+"${excludes[@]}"}; do
+        # shellcheck disable=SC2053
+        if [[ $pat == */* ]]; then [[ $path == $pat ]] && return 1
+        else [[ $name == $pat ]] && return 1; fi
+    done
+    (( ${#onlys[@]} )) || return 0
+    ok=1
+    for pat in "${onlys[@]}"; do
+        # shellcheck disable=SC2053
+        if [[ $pat == */* ]]; then [[ $path == $pat ]] && ok=0
+        else [[ $name == $pat ]] && ok=0; fi
+    done
+    return "$ok"
+}
+
+# Add one group of paths from a --fast tool, with sizes and times from stat.
+add_fast_group() {
+    local group=$1 p info size mtime dev ino kept=()
+    shift
+    declare -A inode=()
+    for p in "$@"; do
+        info=$(stat -c '%s %Y %d %i' -- "$p" 2>/dev/null) || continue
+        read -r size mtime dev ino <<<"$info"
+        wanted "$p" "$size" || continue
+        [[ -n ${inode[$dev:$ino]:-} ]] && continue
+        inode[$dev:$ino]=1
+        kept+=("$size $mtime $dev $p")
+    done
+    (( ${#kept[@]} >= 2 )) || return 0
+    for p in "${kept[@]}"; do
+        read -r size mtime dev info <<<"$p"
+        F_SIZE+=("$size")
+        F_TIME+=("$mtime")
+        F_DEV+=("$dev")
+        F_PATH+=("$info")
+        F_KEY+=("fast:$group")
+    done
+}
+
+# --fast: let jdupes, fdupes or rdfind find the groups.
+scan_fast() {
+    local tool="" line group=0 members=()
+    for tool in jdupes fdupes rdfind; do
+        tb_has "$tool" && break
+        tool=""
+    done
+    if [[ -z $tool ]]; then
+        tb_hint jdupes "--fast needs jdupes, fdupes or rdfind, so this run uses find and sha256sum"
+        return 1
+    fi
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    local cmd=()
+    case $tool in
+        jdupes) cmd=(jdupes -r -q ${TB_PASS[@]+"${TB_PASS[@]}"} -- "${paths[@]}") ;;
+        fdupes) cmd=(fdupes -r -q -n ${TB_PASS[@]+"${TB_PASS[@]}"} -- "${paths[@]}") ;;
+        rdfind) cmd=(rdfind -makeresultsfile true -outputname "$work/results.txt"
+                     ${TB_PASS[@]+"${TB_PASS[@]}"} "${paths[@]}") ;;
+    esac
+    tb_show "${cmd[@]}"
+    progress "dupes: $tool is reading the files"
+    if [[ $tool == rdfind ]]; then
+        "${cmd[@]}" >/dev/null 2>"$work/errors" || { progress_end; tb_die 1 "rdfind failed: $(head -n 1 "$work/errors")"; }
+        progress_end
+        # results.txt: duptype id depth size device inode priority name.
+        # The first file of a group has id N and its copies have -N.
+        local ids=() id
+        declare -A byid=()
+        while IFS= read -r line; do
+            [[ $line == \#* || -z $line ]] && continue
+            read -r _ id _ _ _ _ _ <<<"$line"
+            local name=$line k
+            for k in 1 2 3 4 5 6 7; do name=${name#* }; done
+            id=${id#-}
+            [[ -z ${byid[$id]:-} ]] && ids+=("$id")
+            byid[$id]+="$name"$'\n'
+        done < "$work/results.txt"
+        for id in ${ids[@]+"${ids[@]}"}; do
+            members=()
+            while IFS= read -r line; do [[ -n $line ]] && members+=("$line"); done <<<"${byid[$id]}"
+            ((group++))
+            add_fast_group "$group" "${members[@]}"
+        done
+        return 0
+    fi
+    # jdupes and fdupes print each group as lines, with a blank line after it.
+    while IFS= read -r line; do
+        if [[ -z $line ]]; then
+            if (( ${#members[@]} )); then
+                ((group++))
+                add_fast_group "$group" "${members[@]}"
+            fi
+            members=()
+        else
+            members+=("$line")
+        fi
+    done < <("${cmd[@]}" 2>"$work/errors"; echo)
+    progress_end
+    return 0
+}
+
+# Sort the groups, biggest waste first, oldest file first inside a group.
+# Fills G_ORDER with file indexes and a "" after each group, and G_COUNT
+# with the number of files per group.
+declare -A G_COUNT=()
+order_groups() {
+    local i key
+    G_ORDER=()
+    G_COUNT=()
+    (( ${#F_PATH[@]} )) || return 0
+    for i in "${!F_PATH[@]}"; do
+        key=${F_KEY[i]}
+        [[ -n $key ]] && G_COUNT[$key]=$(( ${G_COUNT[$key]:-0} + 1 ))
+    done
+    local prev=""
+    while IFS=$'\t' read -r _ key _ i; do
+        if [[ $key != "$prev" && -n $prev ]]; then G_ORDER+=(""); fi
+        prev=$key
+        G_ORDER+=("$i")
+    done < <(for i in "${!F_PATH[@]}"; do
+                 key=${F_KEY[i]}
+                 [[ -n $key ]] || continue
+                 printf '%s\t%s\t%s\t%s\n' "$(( F_SIZE[i] * (G_COUNT[$key] - 1) ))" "$key" "${F_TIME[i]}" "$i"
+             done | sort -t $'\t' -k1,1nr -k2,2 -k3,3n -k4,4n)
+    (( ${#G_ORDER[@]} )) && G_ORDER+=("")
+    return 0
+}
+
+# Print every group, and the total that deleting the copies would free.
+report() {
+    local i first=1 groups=0 wasted=0 size
+    for i in ${G_ORDER[@]+"${G_ORDER[@]}"}; do
+        if [[ -z $i ]]; then
+            first=1
+            continue
+        fi
+        if (( first )); then
+            first=0
+            ((groups++))
+            size=${F_SIZE[i]}
+            wasted=$(( wasted + size * (G_COUNT[${F_KEY[i]}] - 1) ))
+            printf '%s x %s\n' "$(tb_human "$size")" "${G_COUNT[${F_KEY[i]}]}"
+        fi
+        printf '  %s\n' "${F_PATH[i]}"
+    done
+    if (( groups == 0 )); then
+        echo "No duplicates."
+        return 0
+    fi
+    echo "$(tb_plural "$groups" group), $(tb_human "$wasted") you could free"
+}
+
+# --trash and --link: list what happens to each file, ask, then do it.
+act() {
+    local i keep="" plan=() verb n_act=0 bytes=0 skipped=0
+    [[ $action == trash ]] && verb=trash || verb=link
+    for i in ${G_ORDER[@]+"${G_ORDER[@]}"}; do
+        if [[ -z $i ]]; then keep=""; continue; fi
+        if [[ -z $keep ]]; then
+            keep=$i
+            printf 'keep   %s  oldest\n' "${F_PATH[i]}"
+            continue
+        fi
+        if [[ $action == link && ${F_DEV[i]} != "${F_DEV[keep]}" ]]; then
+            printf 'skip   %s  other filesystem\n' "${F_PATH[i]}"
+            ((skipped++))
+            continue
+        fi
+        printf '%-6s %s\n' "$verb" "${F_PATH[i]}"
+        plan+=("$keep:$i")
+        ((n_act++))
+        bytes=$(( bytes + F_SIZE[i] ))
+    done
+    if (( n_act == 0 )); then
+        tb_info "Nothing to do."
+        return 0
+    fi
+    if [[ $action == trash ]]; then
+        tb_confirm "Move $(tb_plural "$n_act" file) ($(tb_human "$bytes")) to the trash?"
+    else
+        tb_confirm "Replace $(tb_plural "$n_act" copy copies) ($(tb_human "$bytes")) with hard links?"
+    fi
+    local pair k done_n=0 done_b=0 tmp
+    tb_need cmp
+    for pair in "${plan[@]}"; do
+        keep=${pair%%:*}
+        i=${pair#*:}
+        # Check again, in case a file changed since the scan.
+        if ! cmp -s -- "${F_PATH[keep]}" "${F_PATH[i]}"; then
+            tb_warn "${F_PATH[i]} no longer matches ${F_PATH[keep]}, left alone"
+            continue
+        fi
+        if [[ $action == trash ]]; then
+            tb_say "trash ${F_PATH[i]}"
+            tb_trash "${F_PATH[i]}" || { tb_warn "could not move ${F_PATH[i]} to the trash"; continue; }
+        else
+            tmp=$(tb_free_name "$(dirname -- "${F_PATH[i]}")/.dupes-$$")
+            tb_show ln -- "${F_PATH[keep]}" "${F_PATH[i]}"
+            if ! ln -- "${F_PATH[keep]}" "$tmp" 2>/dev/null; then
+                tb_warn "could not link ${F_PATH[i]}, left alone"
+                continue
+            fi
+            if ! mv -f -- "$tmp" "${F_PATH[i]}"; then
+                rm -f -- "$tmp"
+                tb_warn "could not replace ${F_PATH[i]}, left alone"
+                continue
+            fi
+        fi
+        ((done_n++))
+        done_b=$(( done_b + F_SIZE[i] ))
+    done
+    if [[ $action == trash ]]; then
+        echo "$(tb_plural "$done_n" file) in the trash, $(tb_human "$done_b") freed."
+    else
+        if (( done_n == 1 )); then
+            echo "1 copy is now a hard link, $(tb_human "$done_b") freed."
+        else
+            echo "$done_n copies are now hard links, $(tb_human "$done_b") freed."
+        fi
+    fi
+    (( done_n == n_act ))
+}
+
+main() {
+    local p
+    (( ${#paths[@]} )) || paths=(.)
+    for p in "${paths[@]}"; do
+        [[ -e $p ]] || tb_die 1 "$p: no such file or folder"
+    done
+    F_SIZE=() F_TIME=() F_DEV=() F_PATH=() F_KEY=()
+    local used_fast=0
+    if (( fast )) && scan_fast; then
+        used_fast=1
+    fi
+    if (( ! used_fast )); then
+        (( ${#TB_PASS[@]} )) && tb_usage_error "options after -- need --fast and jdupes, fdupes or rdfind"
+        tb_need find stat head sha256sum
+        scan_plain
+        group_plain
+    fi
+    order_groups
+    tb_color_stdout
+    if [[ -z $action ]]; then
+        report
+        return 0
+    fi
+    act
+}
+
+paths=()
+excludes=()
+onlys=()
+min=1
+fast=0
+action=""
+tb_expand "mx" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -m|--min)     tb_optarg "$@"; min=$(tb_parse_size "$2") || tb_usage_error "--min needs a size such as 100K or 1M, not $2"
+                      (( min < 1 )) && min=1
+                      shift ;;
+        --only)       tb_optarg "$@"; onlys+=("$2"); shift ;;
+        -x|--exclude) tb_optarg "$@"; excludes+=("$2"); shift ;;
+        --fast)       fast=1 ;;
+        --trash)      [[ -n $action && $action != trash ]] && tb_usage_error "use --trash or --link, not both"
+                      action=trash ;;
+        --link)       [[ -n $action && $action != link ]] && tb_usage_error "use --trash or --link, not both"
+                      action=link ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            paths+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

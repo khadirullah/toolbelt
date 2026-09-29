@@ -1,0 +1,256 @@
+.TH "DUPES" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+dupes \- find duplicate files by content
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+dupes [options] [path ...] [-- tool options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBdupes\fR finds files with the same content, whatever their names. Photos copied off a phone twice, the same ISO in \fBDownloads\fR and \fBDownloads/iso\fR, and exports saved as \fBfinal\fR and \fBfinal\-2\fR all show up as groups. With no path it looks in the current folder.
+.PP
+It prints each group with the size of one copy and the number of copies, and a total at the end:
+.PP
+.RS 4
+.nf
+29KB x 2
+  Pictures/export/trip.mp4
+  Pictures/trip-final.mp4
+8.7KB x 3
+  Pictures/2026-09/IMG_4410.jpg
+  Pictures/phone/IMG_4410 (1).jpg
+  Pictures/phone/IMG_4410.jpg
+3 groups, 47KB you could free
+.fi
+.RE
+.PP
+The groups that waste the most space come first. In each group the oldest file, by modification time, comes first. The total counts every copy except one per group, which is the space you would get back.
+.PP
+On its own, \fBdupes\fR only reads. \fB\-\-trash\fR and \fB\-\-link\fR act on the groups, and both ask first.
+.SH OPTIONS
+.SS What to look at
+.TP
+\fB\-m\fR, \fB\-\-min SIZE\fR
+Skip files smaller than SIZE, such as \fB100K\fR, \fB1M\fR or \fB1.5G\fR. Units are powers of 1024, and \fBK\fR, \fBKB\fR and \fBKiB\fR mean the same.
+.TP
+\fB\-\-only PATTERN\fR
+Look only at names that match, such as \fB'*.jpg'\fR. Can repeat.
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave out names that match. A folder that matches is skipped whole. Can repeat.
+.TP
+\fB\-\-fast\fR
+Use \fBjdupes\fR, \fBfdupes\fR or \fBrdfind\fR when one is installed.
+.SS What to do with them
+.TP
+\fB\-\-trash\fR
+Keep the oldest file in each group and move the others to the trash. Asks first.
+.TP
+\fB\-\-link\fR
+Replace each copy with a hard link to the oldest file. Asks first.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+With \fB\-\-trash\fR or \fB\-\-link\fR, go ahead without asking.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the groups and the total.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step, and each \fBfind\fR and tool command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+Use \fB\-\-trash\fR or \fB\-\-link\fR, not both.
+.PP
+A pattern without a \fB/\fR matches a file name, the way \fBfind \-name\fR does. A pattern with a \fB/\fR matches the whole path, the way \fBfind \-path\fR does, so \fB\-x '*/node_modules/*'\fR works too. Quote every pattern so the shell does not expand it first.
+.SH HOW IT DECIDES
+.PP
+Hashing every file would read every byte on the disk. \fBdupes\fR narrows the list in three steps, and each step only looks at the files the step before could not rule out:
+.IP \(bu 2
+\fBSize.\fR One \fBfind\fR lists every file with its size. A file whose size no other file has cannot have a twin, so it drops out without being read. On a typical home folder, this step alone rules out most files.
+.IP \(bu 2
+\fBThe first 4KB.\fR For the files left, \fBdupes\fR hashes the first 4096 bytes. Two videos of the same length but different content almost always differ here.
+.IP \(bu 2
+\fBThe whole file.\fR Only files that still match get a full sha256 hash. Files of 4KB or less skip this step, since step 2 already read all of them.
+.PP
+Two files are duplicates when their full sha256 hashes match. \fB\-\-trash\fR and \fB\-\-link\fR also compare each pair byte for byte with \fBcmp\fR right before they act. A file that changed since the scan is left alone with a warning.
+.PP
+Some files never count:
+.IP \(bu 2
+Empty files. Every empty file matches every other one, and they take no space.
+.IP \(bu 2
+Hard links. Names that point to the same data on disk count as one file, since removing one frees nothing.
+.IP \(bu 2
+Symlinks. \fBdupes\fR never follows them.
+.IP \(bu 2
+Names that hold a line break. They are skipped, because the lists \fBdupes\fR builds are one path per line.
+.SH SAFETY CHECKS
+.IP \(bu 2
+On its own, \fBdupes\fR changes nothing.
+.IP \(bu 2
+\fB\-\-trash\fR keeps the oldest file in each group and moves the others to \fB~/.local/share/Trash\fR. Your file manager can restore them. \fBdupes\fR never deletes a file for good.
+.IP \(bu 2
+\fB\-\-link\fR swaps a copy for a hard link in two steps. It makes the link under a temp name such as \fB.dupes\-4242\fR, then moves the link over the copy. If either step fails, the copy stays as it was.
+.IP \(bu 2
+\fB\-\-link\fR only links files on the same filesystem as the one it keeps. The rest get a \fBskip ... other filesystem\fR line and stay as they are.
+.IP \(bu 2
+Both ask once, after the full list of \fBkeep\fR, \fBtrash\fR and \fBlink\fR lines. Without a terminal and without \fB\-y\fR they exit 4. Answering no exits 5.
+.IP \(bu 2
+Before each change, \fBcmp\fR checks that the pair still matches.
+.PP
+Hard links have a catch. After \fB\-\-link\fR, all the names share one file. Editing one edits them all, and they all have the owner, mode and time of the file that was kept. Use \fB\-\-link\fR for things you only read, such as backups, ISO images and photo archives. Use \fB\-\-trash\fR for files you edit.
+.SH THE \-\-FAST TOOLS
+.PP
+\fB\-\-fast\fR hands the search to the first one of these it finds:
+.TP
+\fBjdupes\fR
+Command it runs: \fBjdupes \-r \-q \-\- PATH\fR. Packages: \fBjdupes\fR on Debian, Ubuntu, Fedora, Arch and Alpine
+.TP
+\fBfdupes\fR
+Command it runs: \fBfdupes \-r \-q \-n \-\- PATH\fR. Packages: \fBfdupes\fR on all of them
+.TP
+\fBrdfind\fR
+Command it runs: \fBrdfind \-makeresultsfile true \-outputname TMP PATH\fR. Packages: \fBrdfind\fR on Debian, Ubuntu, Fedora and Arch
+.PP
+These tools are written in C and are faster on large trees. \fBdupes\fR reads their output and prints the groups in its own format, oldest first, so \fB\-\-trash\fR and \fB\-\-link\fR work the same. It never uses their own delete or link options. \fB\-\-min\fR, \fB\-\-only\fR and \fB\-x\fR still apply to the results.
+.PP
+When none of them is installed, \fBdupes\fR says so, names the package, and does the search itself.
+.SH PASS\-THROUGH
+.PP
+With \fB\-\-fast\fR, options after \fB\-\-\fR go to the tool it picked. For example, \fB\-Q\fR makes jdupes skip its final byte\-for\-byte check:
+.PP
+.RS 4
+.nf
+$ dupes --fast ~/Pictures -- -Q
+.fi
+.RE
+.PP
+Without \fB\-\-fast\fR, options after \fB\-\-\fR are a usage error.
+.SH NEEDS
+.PP
+\fBfind\fR, \fBstat\fR, \fBhead\fR and \fBsha256sum\fR to search, and \fBcmp\fR for \fB\-\-trash\fR and \fB\-\-link\fR. \fBfind\fR comes from findutils, \fBcmp\fR from diffutils, and the others from coreutils. BusyBox has all of them. \fBjdupes\fR, \fBfdupes\fR and \fBrdfind\fR are optional.
+.SH EXAMPLES
+.SS Look for copies in a photo folder
+.PP
+.RS 4
+.nf
+$ dupes Pictures
+29KB x 2
+  Pictures/export/trip.mp4
+  Pictures/trip-final.mp4
+8.7KB x 3
+  Pictures/2026-09/IMG_4410.jpg
+  Pictures/phone/IMG_4410 (1).jpg
+  Pictures/phone/IMG_4410.jpg
+500B x 2
+  Pictures/thumb.db
+  Pictures/phone/thumb.db
+3 groups, 47KB you could free
+.fi
+.RE
+.SS Skip small files, and see the steps
+.PP
+.RS 4
+.nf
+$ dupes -v -m 10K Pictures
++ find -P Pictures -type f -size +10239c '!' -name $'*\en*' -exec stat -c '%s %Y %d %i %n' -- '{}' +
+dupes: 2 files share a size with another file
+dupes: 2 files over 4KB match another in their first 4KB, hashing them whole
+29KB x 2
+  Pictures/export/trip.mp4
+  Pictures/trip-final.mp4
+1 group, 29KB you could free
+.fi
+.RE
+.SS Leave some names out
+.PP
+.RS 4
+.nf
+$ dupes -x '*.db' -x '*(1).jpg' Pictures
+29KB x 2
+  Pictures/export/trip.mp4
+  Pictures/trip-final.mp4
+8.7KB x 2
+  Pictures/2026-09/IMG_4410.jpg
+  Pictures/phone/IMG_4410.jpg
+2 groups, 38KB you could free
+.fi
+.RE
+.SS Move the copies to the trash
+.PP
+.RS 4
+.nf
+$ dupes --trash -m 1K Pictures
+keep   Pictures/export/trip.mp4  oldest
+trash  Pictures/trip-final.mp4
+keep   Pictures/2026-09/IMG_4410.jpg  oldest
+trash  Pictures/phone/IMG_4410 (1).jpg
+trash  Pictures/phone/IMG_4410.jpg
+Move 3 files (46KB) to the trash? [y/N] y
+3 files in the trash, 46KB freed.
+.fi
+.RE
+.SS Turn copies into hard links
+.PP
+.RS 4
+.nf
+$ dupes --link -m 10K Pictures
+keep   Pictures/export/trip.mp4  oldest
+link   Pictures/trip-final.mp4
+Replace 1 copy (29KB) with hard links? [y/N] y
+1 copy is now a hard link, 29KB freed.
+$ dupes -m 10K Pictures
+No duplicates.
+.fi
+.RE
+.PP
+Both names still work. The second run finds nothing, because hard links count as one file.
+.SS Ask for \-\-fast without the tools
+.PP
+.RS 4
+.nf
+$ dupes --fast Pictures
+dupes: --fast needs jdupes, fdupes or rdfind, so this run uses find and sha256sum. Install it with: sudo apt install jdupes
+29KB x 2
+  Pictures/export/trip.mp4
+  Pictures/trip-final.mp4
+\&...
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBdupes: options after \-\- need \-\-fast and jdupes, fdupes or rdfind\fR : The search without \fB\-\-fast\fR takes no extra options. Use \fB\-\-only\fR and \fB\-x\fR to pick files instead.
+.PP
+\fBdupes: Pictures/trip\-final.mp4 no longer matches Pictures/export/trip.mp4, left alone\fR : The file changed between the scan and the action. Run \fBdupes\fR again to see the groups as they are now.
+.PP
+\fBskip   /mnt/usb/trip.mp4  other filesystem\fR : A hard link cannot cross filesystems. Use \fB\-\-trash\fR for those, or run \fB\-\-link\fR on each drive on its own.
+.PP
+It takes a long time : The first run reads every candidate file whole. Skip small files with \fB\-m 1M\fR, which rules out most of a home folder, or install \fBjdupes\fR and use \fB\-\-fast\fR. \fB\-x .git \-x node_modules\fR helps in code folders.
+.PP
+A file you wanted to keep went to the trash : \fB\-\-trash\fR keeps the oldest copy, which may not sit in the folder you prefer. Restore the file from the trash with your file manager. To pick the copy that stays, run \fB\-\-trash\fR on only the folder that holds the extra copies, such as \fBdupes \-\-trash ~/Downloads ~/Pictures/phone\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked, whether it found duplicates or not.
+.TP
+1
+It failed. A path is missing, or some files could not be trashed or linked.
+.TP
+2
+Bad usage, such as \fB\-\-trash\fR with \fB\-\-link\fR, or a size it cannot read.
+.TP
+3
+A tool it needs, such as \fBsha256sum\fR, is missing.
+.TP
+4
+Refused. No terminal to ask in.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBbigfiles\fR, \fBchecksum\fR, \fBjdupes(1)\fR, \fBfdupes(1)\fR, \fBrdfind(1)\fR
