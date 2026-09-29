@@ -1,0 +1,476 @@
+#!/usr/bin/env bash
+# share: send text, a link, Wi-Fi or a folder to your phone.
+set -uo pipefail
+TB_CMD=share
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: share [options] TEXT | URL
+       share [options] < FILE
+       share [options] --wifi [NAME]
+       share [options] FOLDER | FILE
+
+Send text, a link, Wi-Fi or a folder to your phone.
+
+Options:
+  --wifi [NAME]       a join code for the current Wi-Fi, or a saved one
+  -P, --port PORT     with a folder, use this port, not a free one
+  -t, --time TIME     with a folder, stop after this long, such as 30m
+  --png FILE          write the code to a PNG file, not the terminal
+  -y, --yes           share a folder that holds keys or secrets anyway
+  -q, --quiet         only the result lines and the download log
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to qrencode, such as -l H for more error correction.
+
+Examples:
+  share https://example.com/r/8Kd2
+  share --wifi --png guest-wifi.png
+  share ~/Pictures/trip
+  share -t 30m report.pdf
+
+Needs: qrencode. python3 to serve a folder. nmcli for --wifi.
+       See man share.
+Exit: 0 ok, 1 failed, 2 bad usage or too long for a code, 3 missing tool,
+      4 refused.
+EOF
+}
+
+QR_MAX=2953
+SERVER_PID=""
+STOP=0
+
+# ---------------------------------------------------------------- QR codes
+
+# Draw a QR code for the text on stdin, in the terminal or into --png.
+# The text never goes on a command line, so a password stays out of ps and -v.
+qr_draw() {
+    local text_file=$1 shown=("${@:2}") out px mods
+    tb_need qrencode
+    if [[ -n $png ]]; then
+        out=$png
+        if [[ -e $out ]]; then
+            out=$(tb_free_name "$out" file)
+            tb_warn "$png exists, writing $out instead"
+        fi
+        tb_show qrencode -o "$out" -s 10 -m 4 ${TB_PASS[@]+"${TB_PASS[@]}"} ${shown[@]+"${shown[@]}"}
+        qrencode -o "$out" -s 10 -m 4 ${TB_PASS[@]+"${TB_PASS[@]}"} < "$text_file" || tb_die 1 "qrencode could not write $out"
+        px=$(png_width "$out")
+        if [[ -n $px ]]; then
+            mods=$(( px / 10 - 8 ))
+            echo "wrote $out, $mods x $mods modules, $px x $px px"
+        else
+            echo "wrote $out"
+        fi
+        return 0
+    fi
+    local type=UTF8
+    [[ -t 1 && -z ${NO_COLOR:-} ]] && type=ANSIUTF8
+    tb_show qrencode -t "$type" -m 2 ${TB_PASS[@]+"${TB_PASS[@]}"} ${shown[@]+"${shown[@]}"}
+    qrencode -t "$type" -m 2 ${TB_PASS[@]+"${TB_PASS[@]}"} < "$text_file" || tb_die 1 "qrencode could not draw the code"
+}
+
+# The width in pixels of a PNG, from its header.
+png_width() {
+    od -An -tu1 -j16 -N4 "$1" 2>/dev/null | awk 'NF == 4 { print $1 * 16777216 + $2 * 65536 + $3 * 256 + $4 }'
+}
+
+# Refuse text too long for one QR code, with exit 2.
+check_length() {
+    local n=$1
+    if (( n > QR_MAX )); then
+        tb_err "$(tb_commas "$n") bytes is too long for one QR code, the limit is $(tb_commas "$QR_MAX")."
+        printf '%*s Share it as a file instead: share FILE\n' "$(( ${#TB_CMD} + 1 ))" "" >&2
+        exit "$E_USAGE"
+    fi
+    (( n > 0 )) || tb_usage_error "nothing to share, the text is empty"
+}
+
+share_text() {
+    local work f n
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    f=$work/text
+    printf '%s' "$1" > "$f"
+    n=$(wc -c < "$f")
+    check_length "$n"
+    qr_draw "$f" "$1"
+}
+
+share_stdin() {
+    local work f n rest
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    f=$work/text
+    # Read one byte past the limit, and only count the rest, so a big
+    # input never sits in memory.
+    head -c $(( QR_MAX + 1 )) > "$f"
+    n=$(wc -c < "$f")
+    if (( n > QR_MAX )); then
+        rest=$(wc -c)
+        n=$(( n + rest ))
+    fi
+    check_length "$n"
+    qr_draw "$f"
+}
+
+# ---------------------------------------------------------------- Wi-Fi
+
+# nmcli -g escapes colons and backslashes. Undo that.
+nm_get() {
+    local field=$1 conn=$2 secret=${3:-}
+    local args=(-g "$field" connection show id "$conn")
+    [[ -n $secret ]] && args=(-s "${args[@]}")
+    nmcli "${args[@]}" 2>/dev/null | head -n1 | sed 's/\\\(.\)/\1/g'
+}
+
+# Backslash the characters the WIFI: format reserves.
+wifi_escape() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//;/\\;}
+    s=${s//,/\\,}
+    s=${s//:/\\:}
+    s=${s//\"/\\\"}
+    printf '%s' "$s"
+}
+
+share_wifi() {
+    local conn=$wifi_name ssid km psk hidden t label work f
+    tb_need nmcli
+    if [[ -z $conn ]]; then
+        tb_show nmcli -t -f TYPE,NAME connection show --active
+        conn=$(nmcli -t -f TYPE,NAME connection show --active 2>/dev/null |
+            awk -F: '$1 == "802-11-wireless" { sub(/^[^:]*:/, ""); print; exit }' | sed 's/\\\(.\)/\1/g')
+        [[ -n $conn ]] || tb_die 1 "not connected to any Wi-Fi. Name a saved network: share --wifi NAME"
+    fi
+    tb_show nmcli -g 802-11-wireless.ssid connection show id "$conn"
+    ssid=$(nm_get 802-11-wireless.ssid "$conn")
+    [[ -n $ssid ]] || tb_die 1 "NetworkManager has no Wi-Fi network called $conn. List them with: nmcli connection show"
+    km=$(nm_get 802-11-wireless-security.key-mgmt "$conn")
+    hidden=$(nm_get 802-11-wireless.hidden "$conn")
+    case $km in
+        ""|--) t=nopass; label="open, no password" ;;
+        none) t=WEP; label=WEP ;;
+        sae) t=WPA; label=WPA3 ;;
+        wpa-psk) t=WPA; label=WPA2 ;;
+        *) tb_die 1 "$ssid uses $km, which a phone cannot join from a QR code" ;;
+    esac
+    psk=""
+    if [[ $t != nopass ]]; then
+        tb_say "reading the password with: nmcli -s -g 802-11-wireless-security.psk connection show id '$conn'"
+        if [[ $t == WEP ]]; then
+            psk=$(nm_get 802-11-wireless-security.wep-key0 "$conn" secret)
+        else
+            psk=$(nm_get 802-11-wireless-security.psk "$conn" secret)
+        fi
+        [[ -n $psk ]] || tb_die 1 "NetworkManager did not give the password for $ssid. It may be kept in a keyring. Try: sudo share --wifi '$conn'"
+    fi
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    f=$work/wifi
+    (umask 077 && printf 'WIFI:T:%s;S:%s;' "$t" "$(wifi_escape "$ssid")" > "$f")
+    [[ $t != nopass ]] && printf 'P:%s;' "$(wifi_escape "$psk")" >> "$f"
+    [[ $hidden == yes ]] && printf 'H:true;' >> "$f"
+    printf ';' >> "$f"
+    if [[ $t == nopass ]]; then
+        tb_info "Wi-Fi $ssid, $label"
+    else
+        tb_info "Wi-Fi $ssid, $label, password from NetworkManager"
+    fi
+    qr_draw "$f"
+    [[ $t != nopass && -n $png ]] && tb_info "The password is in the code and is not printed here."
+    return 0
+}
+
+# ---------------------------------------------------------------- serving
+
+# Stop the server when share exits, however it exits.
+stop_server() {
+    if [[ -n $SERVER_PID ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null
+    fi
+    SERVER_PID=""
+}
+trap 'stop_server; tb_cleanup' EXIT
+
+# A time such as 90, 90s, 30m, 2h or 1d in seconds.
+parse_duration() {
+    [[ $1 =~ ^([0-9]+)([smhd]?)$ ]] || return 1
+    local n=${BASH_REMATCH[1]}
+    case ${BASH_REMATCH[2]} in
+        m) n=$(( n * 60 )) ;; h) n=$(( n * 3600 )) ;; d) n=$(( n * 86400 )) ;;
+    esac
+    (( n > 0 )) || return 1
+    echo "$n"
+}
+
+# The LAN address other devices use to reach this machine.
+lan_ip() {
+    local ip=""
+    if tb_has ip; then
+        ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')
+    fi
+    [[ -n $ip ]] || ip=$(hostname -I 2>/dev/null | awk '{ print $1 }')
+    echo "$ip"
+}
+
+# The Wi-Fi network name, when this machine is on Wi-Fi.
+network_name() {
+    local dev name
+    tb_has nmcli && tb_has ip || return 0
+    dev=$(ip route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+    [[ -n $dev ]] || return 0
+    [[ $(nmcli -t -g GENERAL.TYPE device show "$dev" 2>/dev/null) == wifi ]] || return 0
+    name=$(nmcli -t -g GENERAL.CONNECTION device show "$dev" 2>/dev/null | head -n1)
+    echo "$name"
+}
+
+# Files that should not go to every device on the network.
+find_secrets() {
+    find "$1" -maxdepth 3 \( -name .ssh -o -name .gnupg -o -name .aws -o -name .kube -o -name .password-store \
+        -o -name .env -o -name '.env.*' -o -name .netrc -o -name .git-credentials -o -name 'id_rsa' \
+        -o -name 'id_ed25519' -o -name 'id_ecdsa' -o -name '*.pem' -o -name '*.key' -o -name '*.kdbx' \) \
+        -print 2>/dev/null | head -n 5
+}
+
+# Refuse / outright, and ask before sharing secrets or the home folder.
+check_safe() {
+    local abs=$1 found
+    [[ $abs == / ]] && tb_die "$E_SAFE" "refused, sharing / would put the whole system on the network"
+    if [[ -d $abs ]]; then
+        found=$(find_secrets "$abs")
+        if [[ $abs == "$HOME" && -z $found ]]; then
+            found="$abs is your home folder"
+        fi
+    else
+        found=$(find_secrets "$abs")
+    fi
+    [[ -n $found ]] || return 0
+    tb_warn "this shares files that look like keys or secrets:"
+    sed 's/^/  /' <<<"$found" >&2
+    tb_confirm "Anyone on the network can download them. Share anyway?"
+}
+
+# Percent-encode a file name for a URL path.
+url_name() {
+    local LC_ALL=C s=$1 out="" c i
+    for ((i = 0; i < ${#s}; i++)); do
+        c=${s:i:1}
+        case $c in
+            [A-Za-z0-9._~-]) out+=$c ;;
+            *) out+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+    echo "$out"
+}
+
+# Decode %XX in a URL path.
+url_decode() {
+    local s=${1//+/ }
+    printf '%b' "${s//%/\\x}"
+}
+
+# One line of the download log, from one python http.server log line.
+log_line() {
+    local line=$1 ip t method path code size="" file
+    [[ $line =~ ^([0-9a-fA-F.:]+)\ -\ -\ \[[^\ ]+\ ([0-9:]+)\]\ \"([A-Z]+)\ ([^ ]*)\ HTTP/[0-9.]+\"\ ([0-9]{3}) ]] || return 0
+    ip=${BASH_REMATCH[1]}
+    t=${BASH_REMATCH[2]}
+    method=${BASH_REMATCH[3]}
+    path=${BASH_REMATCH[4]}
+    code=${BASH_REMATCH[5]}
+    if [[ $method == GET && $code == 200 ]]; then
+        file=$root$(url_decode "${path%%\?*}")
+        if [[ -f $file ]]; then
+            local bytes
+            bytes=$(stat -L -c %s -- "$file" 2>/dev/null || echo 0)
+            size=$(tb_human "$bytes" " ")
+            SENT_BYTES=$(( SENT_BYTES + bytes ))
+            ((SENT_FILES++))
+        fi
+    fi
+    [[ " $DEVICES " == *" $ip "* ]] || DEVICES+=" $ip"
+    local shown=$path
+    (( ${#shown} > 40 )) && shown="...${shown: -37}"
+    printf '%s  %s  %s %-20s %s%s\n' "$t" "$ip" "$method" "$shown" "$code" "${size:+  $size}"
+}
+
+serve() {
+    local abs=$1 name count bytes ip url net work fifo line rc deadline=0 i err server
+    abs=$(readlink -f -- "$abs")
+    check_safe "$abs"
+    if [[ -n $opt_port ]]; then
+        port=$opt_port
+        tb_port_used "$port" && tb_die 1 "port $port is in use. See who holds it with: port $port"
+    else
+        port=$(tb_free_port 8000) || tb_die 1 "no free port from 8000 up"
+    fi
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    tb_need_any server python3 busybox
+    if [[ -d $abs ]]; then
+        root=$abs
+        path_part=/
+        count=$(find "$abs" -type f 2>/dev/null | wc -l)
+        bytes=$(tb_bytes "$abs")
+        tb_info "sharing $abs, $(tb_plural "$count" file), $(tb_human "$bytes" " ")"
+    else
+        [[ -r $abs ]] || tb_die 1 "$abs: cannot read it"
+        # Serve a folder that holds only this file, so nothing next to it leaks.
+        root=$work/root
+        mkdir -p "$root" || tb_die 1 "could not make a temp folder"
+        name=$(basename -- "$abs")
+        ln -s "$abs" "$root/$name" || tb_die 1 "could not link $abs"
+        path_part=/$(url_name "$name")
+        tb_info "sharing $abs, $(tb_human "$(tb_bytes "$abs")" " ")"
+    fi
+    ip=$(lan_ip)
+    if [[ -z $ip ]]; then
+        tb_warn "no network address found, so only this machine can open the link"
+        ip=127.0.0.1
+    fi
+    url="http://$ip:$port$path_part"
+
+    fifo=$work/log
+    mkfifo "$fifo" || tb_die 1 "could not make a pipe in $work"
+    if [[ $server == python3 ]]; then
+        tb_show python3 -m http.server --bind 0.0.0.0 --directory "$root" "$port"
+        python3 -u -m http.server --bind 0.0.0.0 --directory "$root" "$port" > "$fifo" 2>&1 &
+    else
+        tb_show busybox httpd -f -v -p "0.0.0.0:$port" -h "$root"
+        busybox httpd -f -v -p "0.0.0.0:$port" -h "$root" > "$fifo" 2>&1 &
+        tb_info "busybox httpd does not log downloads, so there is no download log"
+    fi
+    SERVER_PID=$!
+    exec 3< "$fifo"
+
+    # Wait for the port to open, or for the server to die and say why.
+    for ((i = 0; i < 50; i++)); do
+        tb_port_used "$port" && break
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            err=$(timeout 1 cat <&3 | grep -E 'Error|error' | tail -n1)
+            SERVER_PID=""
+            tb_die 1 "the server did not start${err:+: $err}"
+        fi
+        sleep 0.1
+    done
+    tb_port_used "$port" || tb_die 1 "the server did not open port $port in 5s"
+
+    net=$(network_name)
+    echo "open $url on any device on ${net:-this network}"
+    if tb_has qrencode; then
+        local qf=$work/url
+        printf '%s' "$url" > "$qf"
+        if [[ -z $png ]]; then
+            echo
+            qr_draw "$qf"
+            echo
+        else
+            qr_draw "$qf"
+        fi
+    else
+        tb_hint qrencode "a QR code for the link needs qrencode"
+    fi
+    if [[ -n $opt_time ]]; then
+        deadline=$(( $(tb_now_ms) + time_s * 1000 ))
+        tb_info "Stops in $opt_time, or on Ctrl+C."
+    else
+        tb_info "Ctrl+C stops it."
+    fi
+
+    SENT_FILES=0 SENT_BYTES=0 DEVICES=""
+    local why=stopped
+    trap 'STOP=1' INT
+    while :; do
+        IFS= read -r -t 1 -u 3 line
+        rc=$?
+        (( STOP )) && break
+        if (( rc == 0 )); then
+            log_line "$line"
+        elif (( rc <= 128 )); then
+            # The pipe closed, so the server is gone.
+            SERVER_PID=""
+            tb_err "the server stopped on its own"
+            why=failed
+            break
+        fi
+        if (( deadline > 0 && $(tb_now_ms) >= deadline )); then
+            why="stopped after $opt_time"
+            break
+        fi
+    done
+    trap 'exit 130' INT
+    # Show what the server logged before it stops.
+    while IFS= read -r -t 0.2 -u 3 line; do
+        log_line "$line"
+    done
+    stop_server
+    local ndev=0 d
+    for d in $DEVICES; do ((ndev++)); done
+    if (( STOP )); then printf '\n' >&2; fi
+    echo "share: ${why}. $(tb_plural "$ndev" device), $(tb_plural "$SENT_FILES" file), $(tb_human "$SENT_BYTES" " ") sent."
+    [[ $why == failed ]] && return 1
+    return 0
+}
+
+main() {
+    if (( wifi )); then
+        (( ${#args[@]} == 0 )) || tb_usage_error "--wifi takes one network name, got more: ${args[*]}"
+        share_wifi
+        return
+    fi
+    if (( ${#args[@]} == 1 )) && [[ -e ${args[0]} ]]; then
+        [[ -n $png && -d ${args[0]} ]] && tb_info "share: --png writes the code for the folder's link"
+        serve "${args[0]}"
+        return
+    fi
+    if [[ -n $opt_port || -n $opt_time ]]; then
+        tb_usage_error "--port and --time only go with a folder or a file${args[0]:+, and ${args[0]} is neither}"
+    fi
+    if (( ${#args[@]} )); then
+        share_text "${args[*]}"
+    elif [[ ! -t 0 ]]; then
+        share_stdin
+    else
+        tb_usage_error "name text, a URL, a folder or a file to share"
+    fi
+}
+
+args=()
+wifi=0
+wifi_name=""
+png=""
+opt_port=""
+opt_time=""
+time_s=0
+tb_expand "Pt" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --wifi)
+            wifi=1
+            if [[ $# -ge 2 && $2 != -* ]]; then
+                wifi_name=$2
+                shift
+            fi
+            ;;
+        -P|--port) tb_optarg "$@"; opt_port=$2; shift ;;
+        -t|--time) tb_optarg "$@"; opt_time=$2; shift ;;
+        --png)     tb_optarg "$@"; png=$2; shift ;;
+        --)        shift; TB_PASS=("$@"); break ;;
+        -*)        tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)         args+=("$1") ;;
+    esac
+    shift
+done
+if [[ -n $opt_port ]]; then
+    [[ $opt_port =~ ^[0-9]+$ ]] && (( opt_port >= 1 && opt_port <= 65535 )) || tb_usage_error "--port needs a number from 1 to 65535, got $opt_port"
+fi
+if [[ -n $opt_time ]]; then
+    time_s=$(parse_duration "$opt_time") || tb_usage_error "--time needs a time such as 90s, 30m or 2h, got $opt_time"
+fi
+
+main
+exit $?
