@@ -244,7 +244,7 @@ check_updates() {
 # place. Files it cannot read go to UNREADABLE. It runs in this shell, not
 # in $(...), so both arrays survive.
 ssh_lines() {
-    local file=$1 line key rest pat f inmatch=0
+    local file=$1 line key rest pat f inmatch=0 pats
     if [[ ! -r $file ]]; then
         UNREADABLE+=("$file")
         return
@@ -258,7 +258,10 @@ ssh_lines() {
             match) inmatch=1 ;;
             include)
                 (( inmatch )) && continue
-                for pat in $rest; do
+                # read -a splits without globbing. An unquoted $rest would
+                # expand the pattern here, against the wrong folder.
+                read -ra pats <<<"$rest"
+                for pat in "${pats[@]}"; do
                     [[ $pat == /* ]] || pat=/etc/ssh/$pat
                     for f in "$ROOT"$pat; do
                         [[ -e $f ]] && ssh_lines "$f"

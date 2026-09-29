@@ -219,6 +219,16 @@ EOF'
     [ "${lines[0]}" = "SKIP  secure boot   this machine boots with BIOS, not UEFI" ]
 }
 
+@test "an Include pattern is matched under /etc/ssh, not the current folder" {
+    sed -i 's|^Include .*|Include sshd_config.d/*.conf|' "$TB_ROOTFS/etc/ssh/sshd_config"
+    echo "PasswordAuthentication no" > "$TB_ROOTFS/etc/ssh/sshd_config.d/10-cloud.conf"
+    mkdir -p here/sshd_config.d
+    echo "PasswordAuthentication yes" > here/sshd_config.d/05-decoy.conf
+    cd here
+    run seccheck --only ssh
+    [ "${lines[0]}" = "PASS  ssh password  PasswordAuthentication no" ]
+}
+
 @test "-q prints only the summary line" {
     echo "PasswordAuthentication no" > "$TB_ROOTFS/etc/ssh/sshd_config.d/10-cloud.conf"
     run seccheck -q --only ssh,sudo
