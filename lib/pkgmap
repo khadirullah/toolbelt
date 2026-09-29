@@ -121,6 +121,7 @@ id             coreutils            coreutils            coreutils            co
 ls             coreutils            coreutils            coreutils            coreutils            coreutils
 cut            coreutils            coreutils            coreutils            coreutils            coreutils
 paccache       -                    -                    pacman-contrib       -                    -
+tput           ncurses-bin          ncurses              ncurses              ncurses-utils        ncurses
 getent         libc-bin             glibc-common         glibc                glibc                musl-utils
 apt-get        apt                  -                    -                    -                    -
 dnf            -                    dnf                  -                    -                    -
@@ -130,4 +131,5 @@ apk            -                    -                    -                    - 
 tail           coreutils            coreutils            coreutils            coreutils            coreutils
 basename       coreutils            coreutils            coreutils            coreutils            coreutils
 sleep          coreutils            coreutils            coreutils            coreutils            coreutils
+fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils

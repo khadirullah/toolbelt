@@ -1,0 +1,588 @@
+#!/usr/bin/env bash
+# logs: errors and warnings from the journal, grouped by unit.
+set -uo pipefail
+TB_CMD=logs
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: logs [options] [UNIT ...] [-- journalctl options]
+       logs [options] -f FILE
+
+Errors and warnings from the journal, grouped by unit.
+
+Options:
+  -s, --since TIME    start here instead of at boot, such as 2h or today
+  -b, --boot N        an earlier boot, -1 is the one before this
+      --priority P    err for errors only, warning by default
+  -k, --kernel        kernel messages only
+  -g, --grep PATTERN  only lines that match, an extended regex
+  -n, --lines N       sample lines per unit, 1 by default
+      --user          your user journal instead of the system one
+  -f, --file FILE     read a syslog file instead of the journal
+  -q, --quiet         only the tables
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to journalctl, such as --facility=auth.
+
+Examples:
+  logs
+  logs -b -1 --priority err
+  logs --since 2h NetworkManager
+  logs -f /var/log/nginx/error.log
+
+Needs: journalctl, or a syslog file in /var/log. See man logs.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# Tests point this at a fake tree with proc/, var/log/ and so on in it.
+ROOT=${TB_ROOTFS:-}
+
+# The fields logs needs from each journal entry.
+FIELDS=PRIORITY,_SYSTEMD_UNIT,_SYSTEMD_USER_UNIT,SYSLOG_IDENTIFIER,_COMM,_TRANSPORT,MESSAGE
+
+# ---------------------------------------------------------------- time
+
+# Epoch seconds as "15:40" for today, or "Sep 28 22:17" for another day.
+when() {
+    local t today day
+    printf -v today '%(%Y-%m-%d)T' -1
+    printf -v day '%(%Y-%m-%d)T' "$1"
+    if [[ $day == "$today" ]]; then
+        printf -v t '%(%H:%M)T' "$1"
+    else
+        printf -v t '%(%b %d %H:%M)T' "$1"
+    fi
+    echo "$t"
+}
+
+# The epoch second this machine booted, from /proc/uptime.
+boot_epoch() {
+    local up now
+    read -r up _ 2>/dev/null <"$ROOT/proc/uptime" || return 1
+    printf -v now '%(%s)T' -1
+    echo $(( now - ${up%.*} ))
+}
+
+# Turn what the user typed after --since into SINCE_EPOCH and SINCE_ARG,
+# the value journalctl gets. Exits 2 when it cannot read the time.
+parse_since() {
+    local s=$1 n unit mult now
+    printf -v now '%(%s)T' -1
+    if [[ $s =~ ^-?([0-9]+)[[:space:]]*(s|sec|m|min|h|hour|hours|d|day|days|w|week|weeks)$ ]]; then
+        n=${BASH_REMATCH[1]}
+        unit=${BASH_REMATCH[2]}
+        case $unit in
+            s|sec) mult=1; unit=s ;;
+            m|min) mult=60; unit=min ;;
+            h|hour|hours) mult=3600; unit=h ;;
+            d|day|days) mult=86400; unit=d ;;
+            w|week|weeks) mult=604800; unit=w ;;
+        esac
+        SINCE_EPOCH=$(( now - n * mult ))
+        SINCE_ARG="-$n$unit"
+        return 0
+    fi
+    case $s in
+        today|yesterday|now) SINCE_EPOCH=$(date -d "$s 00:00" +%s 2>/dev/null) ;;
+        *) SINCE_EPOCH=$(date -d "$s" +%s 2>/dev/null) ;;
+    esac
+    [[ $s == now ]] && SINCE_EPOCH=$now
+    if [[ ! $SINCE_EPOCH =~ ^[0-9]+$ ]]; then
+        tb_err "cannot read the time $s. Try 2h, today, yesterday or 2026-09-28 18:00."
+        exit "$E_USAGE"
+    fi
+    printf -v SINCE_ARG '%(%Y-%m-%d %H:%M:%S)T' "$SINCE_EPOCH"
+}
+
+# ---------------------------------------------------------------- reading
+
+# Read journal JSON lines or syslog lines on stdin and print one record per
+# group: class, count, last time, name, samples. Class is E or W, the time
+# is epoch seconds or a "YYYY-MM-DD HH:MM:SS" key, and the samples are
+# joined by \037.
+group_awk() {
+    awk -v mode="$1" -v keep="$lines" -v prio="$prio_num" -v since="${2:-}" -v kernel="$kernel" \
+        -v fprog="$(file_prog)" '
+    function jv(line, key,    i, s) {
+        i = index(line, "\"" key "\":")
+        if (!i) return ""
+        s = substr(line, i + length(key) + 3)
+        if (substr(s, 1, 1) == "[") return "(binary data)"
+        if (substr(s, 1, 1) != "\"") return ""
+        if (!match(s, /^"([^"\\]|\\.)*"/)) return ""
+        return unesc(substr(s, 2, RLENGTH - 2))
+    }
+    function unesc(s,    n, parts, i, out) {
+        gsub(/\\\\/, "\001", s)
+        gsub(/\\u001[bB]\[[0-9;]*[A-Za-z]/, "", s)
+        gsub(/\\"/, "\"", s)
+        gsub(/\\\//, "/", s)
+        gsub(/\\[nrt]/, " ", s)
+        gsub(/\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]/, "?", s)
+        n = split(s, parts, "\001")
+        out = parts[1]
+        for (i = 2; i <= n; i++) out = out "\\" parts[i]
+        return out
+    }
+    function ends(s, suf) { return length(s) >= length(suf) && substr(s, length(s) - length(suf) + 1) == suf }
+    function add(name, cls, t, msg,    k, i, n, dup) {
+        if (pat != "") {
+            if (fold) { if (tolower(msg) !~ pat) return }
+            else if (msg !~ pat) return
+        }
+        gsub(/^[ \t]+|[ \t]+$/, "", msg)
+        if (length(msg) > 400) msg = substr(msg, 1, 400)
+        k = cls SUBSEP name
+        if (!(k in count)) { order[++groups] = k; gname[k] = name; gcls[k] = cls }
+        count[k]++
+        if (t > last[k]) last[k] = t
+        # Keep the newest distinct messages, up to keep of them.
+        n = ns[k]
+        dup = 0
+        for (i = 1; i <= n; i++) if (samp[k, i] == msg) dup = i
+        if (dup) {
+            for (i = dup; i < n; i++) samp[k, i] = samp[k, i + 1]
+            samp[k, n] = msg
+        } else if (n < keep) {
+            ns[k] = n + 1
+            samp[k, n + 1] = msg
+        } else {
+            for (i = 1; i < n; i++) samp[k, i] = samp[k, i + 1]
+            samp[k, n] = msg
+        }
+    }
+    function journal(line,    p, unit, uunit, ident, name, t) {
+        p = jv(line, "PRIORITY")
+        if (p == "" || p + 0 > prio) return
+        t = jv(line, "__REALTIME_TIMESTAMP")
+        if (t == "") { if (match(line, /"__REALTIME_TIMESTAMP":"[0-9]+"/)) t = substr(line, RSTART + 24, RLENGTH - 25) }
+        t = int(substr(t, 1, length(t) - 6))
+        ident = jv(line, "SYSLOG_IDENTIFIER")
+        if (ident == "") ident = jv(line, "_COMM")
+        unit = jv(line, "_SYSTEMD_UNIT")
+        uunit = jv(line, "_SYSTEMD_USER_UNIT")
+        if (jv(line, "_TRANSPORT") == "kernel") name = "kernel"
+        else if (uunit != "") {
+            name = uunit
+            if (ends(name, ".scope") || ends(name, ".slice")) name = ident
+            sub(/\.service$/, "", name)
+            name = name " (user)"
+        } else if (unit != "" && unit !~ /^user@[0-9]+\.service$/ && !ends(unit, ".scope") && !ends(unit, ".slice")) {
+            name = unit
+            sub(/\.service$/, "", name)
+        } else name = ident
+        if (name == "" || name == " (user)") name = "unknown"
+        add(name, (p + 0 <= 3) ? "E" : "W", t, jv(line, "MESSAGE"))
+    }
+    # nginx and Apache error logs carry their own level, and no program name.
+    function leveled(key, lvl, msg,    cls) {
+        if (since != "" && key < since) return
+        if (kernel) return
+        if (lvl ~ /^(emerg|alert|crit|error|err)$/) cls = "E"
+        else if (lvl ~ /^warn/) cls = "W"
+        else return
+        if (cls == "W" && prio < 4) return
+        add(fprog, cls, key, msg)
+    }
+    function syslog(line,    key, rest, prog, msg, i, cls, low, lvl, mon) {
+        # nginx: 2026/09/29 09:12:01 [error] 812#812: *5 connect() failed
+        if (match(line, /^[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] \[[a-z]+\] /)) {
+            key = substr(line, 1, 4) "-" substr(line, 6, 2) "-" substr(line, 9, 2) " " substr(line, 12, 8)
+            rest = substr(line, 21)
+            i = index(rest, "]")
+            lvl = substr(rest, 2, i - 2)
+            msg = substr(rest, i + 2)
+            sub(/^[0-9]+#[0-9]+: /, "", msg)
+            sub(/^\*[0-9]+ /, "", msg)
+            leveled(key, lvl, msg)
+            return
+        }
+        # Apache 2.4: [Tue Sep 29 09:12:01.123456 2026] [proxy:error] [pid 812] AH00957: ...
+        if (match(line, /^\[[A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9][.0-9]* [0-9][0-9][0-9][0-9]\] \[[a-z_0-9:]+\] /)) {
+            mon = index("JanFebMarAprMayJunJulAugSepOctNovDec", substr(line, 6, 3))
+            if (!mon) return
+            i = index(line, "] ")
+            key = sprintf("%s-%02d-%02d %s", substr(line, i - 4, 4), (mon + 2) / 3, substr(line, 10, 2) + 0, substr(line, 13, 8))
+            rest = substr(line, i + 2)
+            i = index(rest, "]")
+            lvl = substr(rest, 2, i - 2)
+            sub(/^.*:/, "", lvl)
+            msg = substr(rest, i + 2)
+            while (substr(msg, 1, 1) == "[" && index(msg, "] ")) msg = substr(msg, index(msg, "] ") + 2)
+            leveled(key, lvl, msg)
+            return
+        }
+        if (match(line, /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][T ][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
+            key = substr(line, 1, 10) " " substr(line, 12, 8)
+            rest = substr(line, RLENGTH + 1)
+            sub(/^[^ ]* /, "", rest)
+        } else if (match(line, /^[A-Z][a-z][a-z] [ 0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] /)) {
+            i = index("JanFebMarAprMayJunJulAugSepOctNovDec", substr(line, 1, 3))
+            if (!i) return
+            key = sprintf("%s-%02d-%02d %s", year, (i + 2) / 3, substr(line, 5, 2) + 0, substr(line, 8, 8))
+            rest = substr(line, RLENGTH + 1)
+        } else return
+        if (since != "" && key < since) return
+        sub(/^[^ ]+ /, "", rest)
+        i = index(rest, ": ")
+        if (!i) return
+        prog = substr(rest, 1, i - 1)
+        msg = substr(rest, i + 2)
+        sub(/\[[0-9]+\]$/, "", prog)
+        sub(/^.*\//, "", prog)
+        if (kernel && prog != "kernel") return
+        low = tolower(msg)
+        if (low ~ /(emerg|panic|fatal|critical|error|fail|segfault|denied|refused)/) cls = "E"
+        else if (low ~ /warn/) cls = "W"
+        else return
+        if (cls == "W" && prio < 4) return
+        add(prog, cls, key, msg)
+    }
+    BEGIN {
+        pat = ENVIRON["LOGS_GREP"]
+        fold = (pat != "" && pat == tolower(pat))
+        "date +%Y" | getline year
+    }
+    mode == "journal" { journal($0); next }
+    { syslog($0) }
+    END {
+        for (g = 1; g <= groups; g++) {
+            k = order[g]
+            s = samp[k, ns[k]]
+            for (i = ns[k] - 1; i >= 1; i--) s = s "\037" samp[k, i]
+            printf "%s\t%d\t%s\t%s\t%s\n", gcls[k], count[k], last[k], gname[k], s
+        }
+    }'
+}
+
+# Can this user read the system journal, or only their own entries?
+can_read_system_journal() {
+    (( EUID == 0 )) && return 0
+    local f
+    for f in "$ROOT"/var/log/journal/*/system.journal "$ROOT"/run/log/journal/*/system.journal; do
+        [[ -r $f ]] && return 0
+    done
+    return 1
+}
+
+# "N first last" for a boot from journalctl --list-boots, times as epoch.
+boot_span() {
+    local want=$1 line idx first last
+    tb_show journalctl --list-boots --no-pager -q
+    line=$(journalctl --list-boots --no-pager -q 2>/dev/null |
+        awk -v w="$want" '$1 == w || $2 == w { print; exit }')
+    [[ -n $line ]] || return 1
+    read -r idx _ <<<"$line"
+    first=$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' <<<"$line" | sed -n 1p)
+    last=$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' <<<"$line" | sed -n 2p)
+    first=$(date -d "$first" +%s 2>/dev/null) || return 1
+    last=$(date -d "$last" +%s 2>/dev/null) || last=$first
+    echo "$idx $first $last"
+}
+
+# True when an earlier boot ends with the usual shutdown messages.
+clean_shutdown() {
+    tb_show journalctl -b "$1" -n 40 -o cat --no-pager -q
+    journalctl -b "$1" -n 40 -o cat --no-pager -q 2>/dev/null |
+        grep -qE 'Journal stopped|systemd-shutdown|Reached target .*(shutdown|Shutdown|Power.Off|Reboot|Halt|reboot|poweroff)'
+}
+
+# A length of time in days, hours or minutes, for the boot line.
+span_text() {
+    local s=$1
+    if (( s >= 86400 )); then tb_plural $(( s / 86400 )) day
+    elif (( s >= 3600 )); then tb_plural $(( s / 3600 )) hour
+    else tb_plural $(( s / 60 )) minute; fi
+}
+
+# Wrap text to fit the width, first line after `first` columns and the
+# rest indented by `indent`. With no width, the text stays on one line.
+wrap() {
+    local text=$1 first=$2 indent=$3 line="" w room pad
+    if (( width <= 0 )); then
+        printf '%s\n' "$text"
+        return
+    fi
+    printf -v pad '%*s' "$indent" ""
+    room=$(( width - first ))
+    for w in $text; do
+        if [[ -z $line ]]; then
+            line=$w
+        elif (( ${#line} + 1 + ${#w} <= room )); then
+            line+=" $w"
+        else
+            printf '%s\n' "$line"
+            printf '%s' "$pad"
+            line=$w
+            room=$(( width - indent ))
+        fi
+    done
+    printf '%s\n' "$line"
+}
+
+# Print the ERRORS and WARNINGS tables from the sorted records file. The
+# name column is 22 wide, or as wide as the longest name up to 34.
+print_tables() {
+    local cls count t name samples section="" s sample rest when_s head nw ind
+    nw=$(awk -F '\t' '{ n = length($4); if (n > m) m = n } END { m = (m < 22) ? 22 : m; print (m > 34) ? 34 : m }' "$1")
+    ind=$(( nw + 7 ))
+    while IFS=$'\t' read -r cls count t name samples; do
+        (( ${#name} > nw )) && name="${name:0:nw-3}..."
+        if [[ $cls != "$section" ]]; then
+            section=$cls
+            if [[ $cls == E ]]; then echo "${C_RED}ERRORS${C_OFF}"; else echo "${C_YEL}WARNINGS${C_OFF}"; fi
+        fi
+        if [[ $t =~ ^[0-9]+$ ]]; then
+            when_s=$(when "$t")
+        else
+            when_s=$(key_when "$t")
+        fi
+        rest=$samples
+        sample=${rest%%$'\037'*}
+        if [[ $cls == E ]]; then
+            printf '%-*s %3sx  last %s\n' "$nw" "$name" "$count" "$when_s"
+            while :; do
+                printf '  '
+                wrap "$sample" 2 2
+                [[ $rest == *$'\037'* ]] || break
+                rest=${rest#*$'\037'}
+                sample=${rest%%$'\037'*}
+            done
+        else
+            printf -v head '%-*s %3sx  ' "$nw" "$name" "$count"
+            printf '%s' "$head"
+            wrap "$sample" "$ind" "$ind"
+            while [[ $rest == *$'\037'* ]]; do
+                rest=${rest#*$'\037'}
+                s=${rest%%$'\037'*}
+                printf '%*s' "$ind" ""
+                wrap "$s" "$ind" "$ind"
+            done
+        fi
+    done <"$1"
+}
+
+# "2026-09-28 22:17:05" as "22:17" today or "Sep 28 22:17".
+key_when() {
+    local k=$1 today months=(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec) m
+    printf -v today '%(%Y-%m-%d)T' -1
+    if [[ ${k:0:10} == "$today" ]]; then
+        echo "${k:11:5}"
+    else
+        m=$(( 10#${k:5:2} - 1 ))
+        echo "${months[m]} ${k:8:2} ${k:11:5}"
+    fi
+}
+
+# The name for entries from a log file with no program names in it, such
+# as nginx for /var/log/nginx/error.log, or app for /tmp/app.log.
+file_prog() {
+    local base=${file##*/} dir=${file%/*}
+    base=${base%.log}
+    [[ $dir == "$file" ]] && dir=.
+    dir=${dir##*/}
+    case $base in
+        error|error_log|errors|access|access_log) [[ -n $dir && $dir != . && $dir != log ]] && base=$dir ;;
+    esac
+    echo "$base"
+}
+
+# The syslog files to read when there is no journal.
+syslog_files() {
+    local f
+    if (( kernel )) && [[ -r $ROOT/var/log/kern.log ]]; then
+        echo "$ROOT/var/log/kern.log"
+        return
+    fi
+    for f in "$ROOT/var/log/syslog" "$ROOT/var/log/messages"; do
+        [[ -r $f ]] && { echo "$f"; return; }
+    done
+    return 1
+}
+
+main() {
+    local recs scope start errs=0 warns=0 span idx first last since_key="" rc label
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    recs=$work/records
+
+    if [[ -z $file ]] && ! tb_has journalctl; then
+        if file=$(syslog_files); then
+            tb_say "no journalctl here, reading $file"
+        else
+            tb_need journalctl
+        fi
+    fi
+
+    if [[ -n $since ]]; then
+        parse_since "$since"
+        scope="since $(when "$SINCE_EPOCH")"
+    fi
+
+    if [[ -n $file ]]; then
+        [[ -r $file ]] || tb_die 1 "cannot read $file"
+        [[ $boot == 0 ]] || tb_usage_error "--boot needs the journal, a log file has no boots"
+        (( ${#units[@]} == 0 )) || tb_usage_error "units need the journal, use -g to filter a log file"
+        (( ${#TB_PASS[@]} == 0 )) || tb_usage_error "options after -- go to journalctl, which a log file does not use"
+        if [[ -z $since ]]; then
+            if start=$(boot_epoch); then
+                SINCE_EPOCH=$start
+                scope="this boot, since $(when "$start")"
+            else
+                SINCE_EPOCH=0
+                scope="the whole file"
+            fi
+        fi
+        (( SINCE_EPOCH > 0 )) && printf -v since_key '%(%Y-%m-%d %H:%M:%S)T' "$SINCE_EPOCH"
+        scope="$(basename "$file"), $scope"
+        tb_say "reading $file from ${since_key:-the start}"
+        tb_show_text "awk ... $file | sort"
+        group_awk syslog "$since_key" <"$file" | sort -t $'\t' -k1,1 -k2,2nr -k4,4 >"$recs"
+    else
+        local args=(--no-pager -q -o json "--output-fields=$FIELDS" -p "$prio_num")
+        (( user )) && args=(--user "${args[@]}")
+        if [[ -n $since ]]; then
+            args+=(--since "$SINCE_ARG")
+            [[ $boot == 0 ]] || args+=(-b "$boot")
+        else
+            args+=(-b "$boot")
+        fi
+        (( kernel )) && args+=(-k)
+        local u
+        for u in ${units[@]+"${units[@]}"}; do
+            if (( user )); then args+=(--user-unit "$u"); else args+=(-u "$u"); fi
+        done
+        args+=(${TB_PASS[@]+"${TB_PASS[@]}"})
+
+        if [[ -z $since && $boot == 0 ]]; then
+            if start=$(boot_epoch); then scope="this boot, since $(when "$start")"; else scope="this boot"; fi
+        elif [[ $boot != 0 ]]; then
+            if span=$(boot_span "$boot"); then
+                read -r idx first last <<<"$span"
+                label="boot $idx, $(when "$first") to $(when "$last"), $(span_text $(( last - first )))"
+            else
+                label="boot $boot"
+            fi
+            if [[ -n $since ]]; then scope="$label, $scope"; else scope=$label; fi
+        fi
+
+        if (( ! user )) && ! can_read_system_journal; then
+            tb_info "logs: you can read only your own entries. To see the system ones, run:"
+            tb_info "  sudo usermod -aG systemd-journal $(id -un), then log in again"
+        fi
+
+        tb_show journalctl "${args[@]}"
+        journalctl "${args[@]}" 2>"$work/err" | group_awk journal | sort -t $'\t' -k1,1 -k2,2nr -k4,4 >"$recs"
+        rc=${PIPESTATUS[0]}
+        if (( rc != 0 )) && [[ ! -s $recs ]]; then
+            local msg
+            msg=$(head -n 1 "$work/err")
+            tb_die 1 "journalctl failed${msg:+, $msg}"
+        fi
+    fi
+
+    errs=$(awk -F '\t' '$1 == "E"' "$recs" | wc -l)
+    warns=$(awk -F '\t' '$1 == "W"' "$recs" | wc -l)
+    local levels=(emerg alert crit err warning) level
+    level=${levels[prio_num]}
+    if (( errs + warns == 0 )); then
+        (( TB_QUIET )) || echo "nothing at $level or above, $scope."
+        after_boot_note
+        return 0
+    fi
+    if (( ! TB_QUIET )); then
+        if (( prio_num <= 3 )); then
+            echo "$scope. $(tb_plural "$errs" unit) with errors."
+        else
+            echo "$scope. $(tb_plural "$errs" unit) with errors, $warns with warnings."
+        fi
+        after_boot_note
+    fi
+    print_tables "$recs"
+}
+
+# For an earlier boot, say whether it ended with a clean shutdown.
+after_boot_note() {
+    [[ -z $file && $boot != 0 && $boot != -0 ]] || return 0
+    (( TB_QUIET )) && return 0
+    [[ -n ${last:-} ]] || return 0
+    if clean_shutdown "$boot"; then
+        echo "it shut down cleanly."
+    else
+        local t
+        printf -v t '%(%b %d %H:%M:%S)T' "$last"
+        echo "it did not shut down cleanly, the last entry is $t"
+    fi
+}
+
+# The priority as a number, 0 to 4.
+prio_number() {
+    case ${1,,} in
+        0|emerg) echo 0 ;; 1|alert) echo 1 ;; 2|crit) echo 2 ;; 3|err|error) echo 3 ;;
+        4|warning|warn) echo 4 ;;
+        *) return 1 ;;
+    esac
+}
+
+since=""
+boot=0
+prio_num=4
+kernel=0
+lines=1
+user=0
+file=""
+units=()
+width=0
+
+# "-b -10" would split into -1 -0, so join a negative boot to its option first.
+pre=()
+while (( $# )); do
+    if [[ $1 == -- ]]; then pre+=("$@"); break; fi
+    if [[ ($1 == -b || $1 == --boot) && ${2:-} =~ ^-[0-9]+$ ]]; then
+        pre+=("--boot=$2")
+        shift 2
+        continue
+    fi
+    pre+=("$1")
+    shift
+done
+tb_expand "sbgnf" ${pre[@]+"${pre[@]}"}
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -s|--since)    tb_optarg "$@"; since=$2; shift ;;
+        -b|--boot)     tb_optarg "$@"; boot=$2; shift
+                       [[ $boot =~ ^-?[0-9]+$ ]] || tb_usage_error "-b needs a boot number such as -1, not $boot"
+                       ;;
+        --priority)    tb_optarg "$@"; prio_num=$(prio_number "$2") ||
+                           tb_usage_error "--priority takes err or warning, or emerg, alert, crit, not $2"
+                       shift ;;
+        -k|--kernel)   kernel=1 ;;
+        -g|--grep)     tb_optarg "$@"; export LOGS_GREP=$2; shift ;;
+        -n|--lines)    tb_optarg "$@"; lines=$2; shift
+                       [[ $lines =~ ^[0-9]+$ ]] && (( lines >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                       ;;
+        --user)        user=1 ;;
+        -f|--file)     tb_optarg "$@"; file=$2; shift ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)             units+=("$1") ;;
+    esac
+    shift
+done
+[[ -n ${LOGS_GREP:-} ]] || export LOGS_GREP=""
+
+# Wrap long lines to the terminal, or to COLUMNS when it is set.
+if [[ -n ${COLUMNS:-} && $COLUMNS =~ ^[0-9]+$ ]]; then
+    width=$COLUMNS
+elif [[ -t 1 ]]; then
+    width=$(tput cols 2>/dev/null || echo 80)
+fi
+tb_color_stdout
+
+main
+exit $?

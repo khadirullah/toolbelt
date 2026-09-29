@@ -1,0 +1,304 @@
+.TH "LOGS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+logs \- errors and warnings from the journal, grouped by unit
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+logs [options] [UNIT ...] [-- journalctl options]
+logs [options] -f FILE
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBlogs\fR answers one question. What went wrong on this machine, and where? It reads the systemd journal for the current boot, keeps the entries at warning level or worse, and groups them by the unit that wrote them. You get one short table of units with errors and one of units with warnings, each with a count, the time of the last entry and the newest message.
+.PP
+A plain \fBjournalctl \-p warning \-b\fR on a desktop prints hundreds of lines, most of them the same message again and again. \fBlogs\fR folds those repeats into one row with a count, so a unit that failed 40 times takes one line, not 40. The unit that failed most sits at the top of its table.
+.PP
+Without a journal, \fBlogs\fR reads a classic syslog file instead, such as \fB/var/log/syslog\fR on Debian or \fB/var/log/messages\fR on older Red Hat systems. With \fB\-f\fR it reads any log file you name, such as the nginx error log, in the same way.
+.PP
+\fBlogs\fR only reads. It never clears, rotates or vacuums the journal, and it never changes a setting.
+.SS How it groups entries
+.PP
+Each journal entry names the service it came from in the \fB_SYSTEMD_UNIT\fR field. \fBlogs\fR uses that name with \fB.service\fR taken off, so \fBNetworkManager.service\fR shows as \fBNetworkManager\fR. Other unit kinds keep their suffix, such as \fBdev\-sda.device\fR or \fBbackup.timer\fR.
+.PP
+Some entries come from places that are not a useful unit name.
+.IP \(bu 2
+Programs in your desktop session run under \fBuser@1000.service\fR. \fBlogs\fR uses the user unit instead, such as \fBpipewire.service\fR, and marks the row with \fB(user)\fR, as in \fBpipewire (user)\fR.
+.IP \(bu 2
+Programs in a scope or slice, such as an app started from the desktop, have a random scope name. \fBlogs\fR uses the program name from \fBSYSLOG_IDENTIFIER\fR instead.
+.IP \(bu 2
+Kernel messages have no unit. They all go in one row named \fBkernel\fR.
+.SS How it decides what is an error
+.PP
+The journal gives every entry a priority from 0 to 7. \fBlogs\fR counts priorities 0 to 3 (emerg, alert, crit and err) as errors and priority 4 (warning) as a warning. It asks journalctl for priority 4 and worse only, so the lower levels (notice, info, debug) never reach it.
+.PP
+A syslog file has no priority field. There \fBlogs\fR looks at the words in each message. A line that says error, fail, fatal, panic, critical, segfault, denied or refused counts as an error. A line that says warn counts as a warning. Other lines are skipped.
+.SS Log files it reads with `\-f`
+.TP
+syslog, RFC 3339
+A line looks like: \fB2026\-09\-29T09:12:01+00:00 host sshd[5]: error: ...\fR. Group name: the program, \fBsshd\fR. Level from: the words
+.TP
+syslog, classic
+A line looks like: \fBSep 29 09:12:01 host sshd[5]: error: ...\fR. Group name: the program, \fBsshd\fR. Level from: the words
+.TP
+nginx error log
+A line looks like: \fB2026/09/29 09:12:01 [error] 812#812: *5 connect() failed ...\fR. Group name: the folder, \fBnginx\fR. Level from: \fB[error]\fR
+.TP
+Apache 2.4 error log
+A line looks like: \fB[Tue Sep 29 09:12:01.123456 2026] [proxy:error] [pid 812] ...\fR. Group name: the folder, \fBapache2\fR. Level from: \fB[proxy:error]\fR
+.PP
+For nginx and Apache the level in brackets decides. emerg, alert, crit and error are errors, warn is a warning, and notice, info and debug are skipped. The group name is the folder the log sits in, such as \fBnginx\fR, \fBapache2\fR or \fBhttpd\fR, when the file has a plain name such as \fBerror.log\fR or \fBerror_log\fR. Otherwise it is the file name without \fB.log\fR, so \fB/srv/app/worker.log\fR groups as \fBworker\fR.
+.PP
+Lines in any other format are skipped, so a JSON log or a Java stack trace gives "nothing at warning or above". Classic syslog lines have no year. \fBlogs\fR takes them as this year.
+.SS What it shows for each unit
+.PP
+For a unit with errors, the row shows the count and the time of the last entry, then the newest message on the next line, indented. With \fB\-n 3\fR it shows the 3 newest different messages. The same message repeated counts once toward that number, so you see 3 different lines, not the same line 3 times.
+.PP
+For a unit with warnings, the row shows the count and the newest message on the same line, to keep the warnings table short. With \fB\-n\fR, the other messages go on the lines under it.
+.PP
+Times from today show as \fB17:27\fR. Older times show the date, as \fBSep 28 21:42\fR.
+.PP
+Long messages wrap to the width of the terminal. When the output goes to a file or a pipe, lines stay whole, unless the \fBCOLUMNS\fR variable sets a width.
+.SS The first line
+.PP
+The first line says which part of the journal \fBlogs\fR read and how many units it found.
+.PP
+.RS 4
+.nf
+this boot, since 00:16. 1 unit with errors, 5 with warnings.
+.fi
+.RE
+.PP
+With \fB\-\-since\fR, the line says \fBsince 15:40\fR instead. With \fB\-b\fR it names the boot and when it ran. With \fB\-\-priority err\fR it leaves out the warnings count.
+.SS Earlier boots
+.PP
+\fB\-b \-1\fR reads the boot before this one, \fB\-b \-2\fR the one before that, and so on. For an earlier boot, \fBlogs\fR adds one line that says whether the boot ended with a clean shutdown. It reads the last 40 entries of that boot and looks for the lines systemd writes on the way down, such as \fBReached target shutdown.target\fR or \fBJournal stopped\fR.
+.PP
+.RS 4
+.nf
+it did not shut down cleanly, the last entry is Sep 28 21:42:08
+.fi
+.RE
+.PP
+A boot that did not shut down cleanly lost power, froze, or crashed hard enough that the journal could not write its last lines. The errors just before that last entry are often the cause.
+.SS Reading only your own entries
+.PP
+On most distros a normal user reads only their own part of the journal. The system part needs membership of the \fBsystemd\-journal\fR group, or root. When \fBlogs\fR sees that you cannot read the system journal, it says so and shows the command that fixes it for good.
+.PP
+.RS 4
+.nf
+logs: you can read only your own entries. To see the system ones, run:
+  sudo usermod -aG systemd-journal khadir, then log in again
+.fi
+.RE
+.PP
+It still shows what you can read. Run \fBsudo logs\fR for a one\-off look instead.
+.SH OPTIONS
+.TP
+\fB\-s\fR, \fB\-\-since TIME\fR
+Start at this time instead of at boot. TIME is a count and a unit, such as \fB30m\fR, \fB2h\fR, \fB3d\fR or \fB1w\fR, or a word or date that \fBdate \-d\fR reads, such as \fBtoday\fR, \fByesterday\fR or \fB2026\-09\-28 18:00\fR.
+.TP
+\fB\-b\fR, \fB\-\-boot N\fR
+Read an earlier boot. \fB0\fR is this boot, \fB\-1\fR the one before, \fB\-2\fR the one before that. A positive number counts from the oldest boot the journal holds, as in journalctl.
+.TP
+\fB\-\-priority P\fR
+The lowest level to show. \fBwarning\fR is the default. \fBerr\fR shows errors only. \fBemerg\fR, \fBalert\fR and \fBcrit\fR narrow it further. The numbers 0 to 4 work too.
+.TP
+\fB\-k\fR, \fB\-\-kernel\fR
+Kernel messages only, the same as \fBjournalctl \-k\fR.
+.TP
+\fB\-g\fR, \fB\-\-grep PATTERN\fR
+Keep only messages that match PATTERN, an extended regular expression. A pattern in lower case matches any case. A pattern with a capital letter matches case exactly.
+.TP
+\fB\-n\fR, \fB\-\-lines N\fR
+How many different messages to show per unit. 1 by default.
+.TP
+\fB\-\-user\fR
+Read your user journal instead of the system one.
+.TP
+\fB\-f\fR, \fB\-\-file FILE\fR
+Read a log file instead of the journal.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the tables, without the first line or the shutdown line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and the journalctl command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+Any word that is not an option is a unit name. \fBlogs NetworkManager sshd\fR reads only those two units. With \fB\-\-user\fR, the names are user units.
+.PP
+Priority is a long option only. In toolbelt \fB\-p\fR always means password, so \fBlogs \-p err\fR is an unknown option and exits with status 2.
+.PP
+\fB\-f\fR works with \fB\-\-since\fR, \fB\-\-priority\fR, \fB\-k\fR, \fB\-g\fR and \fB\-n\fR. It does not work with \fB\-b\fR, unit names or options after \fB\-\-\fR, because a plain log file has no boots and no units.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to journalctl as they are, after the options \fBlogs\fR sets itself. Use them for journal fields that \fBlogs\fR has no option for.
+.PP
+.RS 4
+.nf
+logs -- --facility=auth
+logs -- _UID=1000
+logs -- --identifier=sudo
+.fi
+.RE
+.PP
+\fBlogs\fR still asks for JSON output and still groups the result, so options that change the output format, such as \fB\-o short\fR, have no effect.
+.SH PER\-DISTRO NOTES
+.IP \(bu 2
+\fBDebian and Ubuntu.\fR The journal is on disk in \fB/var/log/journal\fR on Debian 12 and later and on Ubuntu. On Debian 11 and older it lives in \fB/run/log/journal\fR and is lost at every reboot, so \fB\-b \-1\fR finds nothing. To keep it, run \fBsudo mkdir \-p /var/log/journal\fR and reboot. Debian 12 and later no longer install rsyslog, so there is no \fB/var/log/syslog\fR unless you add it.
+.IP \(bu 2
+\fBFedora, RHEL and CentOS Stream.\fR The journal is on disk. \fB/var/log/messages\fR exists only when rsyslog is installed.
+.IP \(bu 2
+\fBArch.\fR The journal is on disk. There is no syslog file by default.
+.IP \(bu 2
+\fBopenSUSE.\fR The journal is on disk on current releases. Older Leap versions kept it in memory, like old Debian.
+.IP \(bu 2
+\fBAlpine.\fR Alpine uses OpenRC and busybox syslog, not systemd, so there is no journalctl. \fBlogs\fR reads \fB/var/log/messages\fR instead, by the message words.
+.IP \(bu 2
+\fBContainers.\fR Most containers have no journal and no syslog file. \fBlogs\fR exits with status 3 and says it needs journalctl. Read the container's output with \fBdocker logs\fR or \fBpodman logs\fR on the host.
+.SH NEEDS
+.IP \(bu 2
+\fBjournalctl\fR, from systemd. Every systemd distro has it.
+.IP \(bu 2
+Without journalctl, a readable \fB/var/log/syslog\fR, \fB/var/log/messages\fR or, with \fB\-k\fR, \fB/var/log/kern.log\fR.
+.IP \(bu 2
+\fBawk\fR, \fBsort\fR and \fBdate\fR, which every system has.
+.SH EXAMPLES
+.SS What went wrong since boot
+.PP
+.RS 4
+.nf
+$ logs
+this boot, since 00:16. 1 unit with errors, 5 with warnings.
+ERRORS
+sudo (user)                   4x  last 17:27
+  pam_unix(sudo:auth): auth could not identify password for [test]
+WARNINGS
+MiniBrowser (user)           28x  Libgcrypt warning: missing initialization - please fix the
+                                  application
+spice-vdagent                20x  error message: Cannot invoke method; proxy is for the well-known
+                                  name org.gnome.Mutter.DisplayConfig without an owner, and proxy
+                                  was constructed with the G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START flag
+gnome-keyring-daemon          3x  discover_other_daemon: 1
+gnome-keyring-daemon (user)   2x  asked to register item
+                                  /org/freedesktop/secrets/collection/login/1, but it's already
+                                  registered
+wireplumber (user)            2x  wp-node: failed to create node from factory 'spa-node-factory'
+.fi
+.RE
+.PP
+The name column grows to fit the longest unit name, up to 34 characters. The four sudo errors came from a script that ran \fBsudo\fR with no terminal to ask for the password.
+.SS Errors only, with more lines per unit
+.PP
+.RS 4
+.nf
+$ logs --priority err -n 2
+this boot, since 11:14. 2 units with errors.
+ERRORS
+dnf-makecache            3x  last 12:13
+  Failed to download metadata
+  Curl error (6): Couldn't resolve host name
+kernel                   1x  last 12:13
+  iwlwifi 0000:03:00.0: Microcode SW error detected. Restarting.
+.fi
+.RE
+.PP
+The cache refresh failed 3 times with 2 different messages. The Curl error came first, so the network was down, and the metadata failure followed from it.
+.SS The boot before this one
+.PP
+.RS 4
+.nf
+$ logs -b -1 --priority err
+boot -1, Sep 27 10:59 to Sep 28 21:42, 1 day. 2 units with errors.
+it did not shut down cleanly, the last entry is Sep 28 21:42:08
+ERRORS
+dnf-makecache            1x  last Sep 28 21:40
+  Failed to download metadata
+kernel                   1x  last Sep 28 21:42
+  i915 0000:00:02.0: [drm] *ERROR* CPU pipe A FIFO underrun
+.fi
+.RE
+.PP
+The machine froze. The last kernel error came 6 seconds before the end and names the graphics driver.
+.SS The last two hours of one unit
+.PP
+.RS 4
+.nf
+$ logs --since 2h NetworkManager
+since 15:40. 0 units with errors, 1 with warnings.
+WARNINGS
+NetworkManager           2x  dhcp4 (wlp3s0): request timed out
+.fi
+.RE
+.SS A web server's own log
+.PP
+.RS 4
+.nf
+$ logs -f /var/log/nginx/error.log --since today
+error.log, since 00:00. 1 unit with errors, 1 with warnings.
+ERRORS
+nginx                    1x  last 09:12
+  connect() failed (111: Connection refused) while connecting to upstream, client: 127.0.0.1
+WARNINGS
+nginx                    1x  an upstream response is buffered to a temporary file
+.fi
+.RE
+.PP
+nginx writes its own format with a level in brackets, and no program name. \fBlogs\fR takes the level from the line and names the group after the log's folder, here \fBnginx\fR.
+.SS See the journalctl command
+.PP
+.RS 4
+.nf
+$ logs -v --since 1h
++ journalctl --no-pager -q -o json --output-fields=PRIORITY,_SYSTEMD_UNIT,_SYSTEMD_USER_UNIT,SYSLOG_IDENTIFIER,_COMM,_TRANSPORT,MESSAGE -p 4 --since -1h
+since 16:40. 1 unit with errors, 0 with warnings.
+ERRORS
+sudo (user)                   2x  last 17:27
+  pam_unix(sudo:auth): auth could not identify password for [test]
+.fi
+.RE
+.PP
+Copy the command without the JSON options to read the full entries yourself.
+.SS A quiet journal
+.PP
+.RS 4
+.nf
+$ logs --since 10m
+nothing at warning or above, since 17:34.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBIt shows only a few entries, all marked (user).\fR You cannot read the system journal. \fBlogs\fR prints the fix at the top. Add yourself to the \fBsystemd\-journal\fR group with \fBsudo usermod \-aG systemd\-journal $USER\fR, then log out and in again. Until then, \fBsudo logs\fR reads everything.
+.PP
+\fB`\-b \-1` says the boot is not available.\fR The journal holds only the current boot. Either it lives in memory (see the Debian note above) or it was vacuumed. \fBjournalctl \-\-list\-boots\fR shows the boots it has.
+.PP
+\fB`logs: cannot read the time ...`\fR \fB\-\-since\fR did not understand the time. Use a count and unit such as \fB2h\fR, a word such as \fByesterday\fR, or a full date and time such as \fB2026\-09\-28 18:00\fR. Put quotes around a value with a space in it.
+.PP
+\fB`logs: needs journalctl.`\fR There is no journalctl and no syslog file. This is normal in a container. On Alpine, start the syslog service with \fBrc\-service syslog start\fR so \fB/var/log/messages\fR exists.
+.PP
+\fBA unit you expect is missing.\fR It may log at notice or info level, which \fBlogs\fR does not read. Look at everything it wrote with \fBjournalctl \-u NAME \-b\fR.
+.PP
+\fBThe same problem shows under two names.\fR A program started by hand and the same program started as a service write different unit fields. Search both with \fB\-g\fR, as in \fBlogs \-g 'connection refused'\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked, whether or not it found errors.
+.TP
+1
+journalctl failed, such as for a boot the journal does not hold, or a \fB\-f\fR file could not be read.
+.TP
+2
+Bad usage, such as an unknown priority, \fB\-n 0\fR, a time it cannot read, or \fB\-b\fR with \fB\-f\fR.
+.TP
+3
+No journalctl and no syslog file to read instead.
+.PP
+\fBlogs\fR exits 0 when it finds errors. It reports, it does not judge. Use \fBsvc\fR for a check that exits 1 when a service has failed.
+.SH SEE ALSO
+.PP
+\fBsvc\fR, \fBboottime\fR, \fBschedules\fR, \fBjournalctl(1)\fR, \fBsystemd.journal\-fields(7)\fR
