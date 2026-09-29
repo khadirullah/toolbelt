@@ -1,0 +1,223 @@
+.TH "NOTE" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+note \- jot a line into today's notes file
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+note [options] text ...
+note [options] [-l days | -s pattern [-- grep options] | -e]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBnote\fR writes one line, with the time, into a notes file for today. You type \fBnote\fR and the thought, and go back to work. No editor opens and no app starts.
+.PP
+.RS 4
+.nf
+$ note api crashloop was a missing DATABASE_URL
+note: added to ~/notes/2026-09-29.md
+.fi
+.RE
+.PP
+With no text, \fBnote\fR prints today's notes. \fB\-l\fR prints the last few days, \fB\-s\fR searches every note you have ever written, and \fB\-e\fR opens today's file in your editor.
+.SS The files
+.PP
+Notes live in \fB~/notes\fR, one Markdown file per day, named by the date:
+.PP
+.RS 4
+.nf
+~/notes/2026-09-28.md
+~/notes/2026-09-29.md
+.fi
+.RE
+.PP
+Each file starts with the date as a heading, then one bullet per note, with the time it was written:
+.PP
+.RS 4
+.nf
+# 2026-09-29
+
+- 09:14 renew the example.com cert before 2026-10-11
+- 11:02 api crashloop was a missing DATABASE_URL
+.fi
+.RE
+.PP
+They are plain text. \fBgrep\fR, \fBgit\fR, any editor and any Markdown viewer work on them. You can edit or delete lines by hand, add headings or paragraphs, and \fBnote\fR keeps working. Put the folder in a git repository, or in a synced folder, and your notes follow you.
+.PP
+\fB\-d\fR or the \fBNOTES_DIR\fR variable moves the folder. \fBnote\fR makes it on the first note. It reads only files named \fBYYYY\-MM\-DD.md\fR and leaves anything else in the folder alone.
+.SS Adding
+.PP
+All words after the options become one note, joined with spaces, so you rarely need quotes. Quote the text when it holds characters your shell treats specially, such as \fB#\fR, \fB*\fR, \fB?\fR, \fB;\fR, \fB&\fR, \fB(\fR, \fB$\fR or a quote:
+.PP
+.RS 4
+.nf
+$ note 'check why $PATH lost /usr/local/bin'
+.fi
+.RE
+.PP
+A note is always one line. Line breaks in the text become spaces. \fBnote\fR appends, so it never changes or removes a line that is already there.
+.PP
+Text that starts with a dash goes after \fB\-\-\fR: \fBnote \-\- \-5 degrees in the server room\fR.
+.SS Searching
+.PP
+\fB\-s\fR searches every day file with \fBgrep\fR, newest day first, and newest note first within a day. Each match prints as the date, the time and the text, one line each, so the result reads well and pipes well:
+.PP
+.RS 4
+.nf
+2026-09-29 11:02 api crashloop was a missing DATABASE_URL
+2026-09-17 16:40 grafana crashloop, data dir not writable
+.fi
+.RE
+.PP
+The pattern is a \fBgrep\fR basic regular expression, and it matches case as you typed it. Options after \fB\-\-\fR go to \fBgrep\fR, so \fB\-\- \-i\fR ignores case, \fB\-\- \-w\fR matches whole words and \fB\-\- \-E\fR takes an extended pattern.
+.SH OPTIONS
+.TP
+\fB\-l\fR, \fB\-\-last DAYS\fR
+Print the notes of the last DAYS days, today included, oldest first. \fB\-l 1\fR is today, \fB\-l 7\fR the last week.
+.TP
+\fB\-s\fR, \fB\-\-search PAT\fR
+Search every note, newest first. Exits 1 when nothing matches.
+.TP
+\fB\-e\fR, \fB\-\-edit\fR
+Open today's file in your editor. \fBnote\fR makes the file first when it is new.
+.TP
+\fB\-d\fR, \fB\-\-dir PATH\fR
+Keep notes in this folder instead of \fB~/notes\fR.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print no lines of its own. The notes and search results still print.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the file it reads or writes, in full.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+Only one of \fB\-l\fR, \fB\-s\fR and \fB\-e\fR at a time, and none of them with text to add.
+.SH ENVIRONMENT
+.TP
+\fBNOTES_DIR\fR
+The notes folder, when \fB\-d\fR is not given. \fB~/notes\fR by default.
+.TP
+\fBVISUAL\fR, \fBEDITOR\fR
+The editor \fB\-e\fR opens, in that order. It may have options, such as \fBcode \-w\fR. Without either, \fBnote\fR tries \fBnano\fR, then \fBvi\fR.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBgrep\fR for \fB\-s\fR:
+.PP
+.RS 4
+.nf
+$ note -s kind -- -i
+.fi
+.RE
+.PP
+Without \fB\-s\fR, the words after \fB\-\-\fR are text for a new note.
+.SH NEEDS
+.PP
+\fBgrep\fR, and \fBdate\fR and \fBawk\fR, which every Linux system has, BusyBox included. \fB\-l\fR works out the dates with \fBdate \-d\fR, which BusyBox reads too.
+.SH EXAMPLES
+.SS Add a note
+.PP
+.RS 4
+.nf
+$ note renew the example.com cert before 2026-10-11
+note: added to ~/notes/2026-09-29.md
+.fi
+.RE
+.SS Read today's notes
+.PP
+.RS 4
+.nf
+$ note
+# 2026-09-29
+
+- 09:14 renew the example.com cert before 2026-10-11
+- 11:02 api crashloop was a missing DATABASE_URL
+.fi
+.RE
+.SS The last two days
+.PP
+.RS 4
+.nf
+$ note -l 2
+# 2026-09-28
+
+- 17:05 kind cluster needs 4 GB for 3 nodes
+
+# 2026-09-29
+
+- 09:14 renew the example.com cert before 2026-10-11
+- 11:02 api crashloop was a missing DATABASE_URL
+.fi
+.RE
+.SS Search every note
+.PP
+.RS 4
+.nf
+$ note -s crashloop
+2026-09-29 11:02 api crashloop was a missing DATABASE_URL
+2026-09-17 16:40 grafana crashloop, data dir not writable
+.fi
+.RE
+.SS Search with any case
+.PP
+.RS 4
+.nf
+$ note -s CRASH -- -i
+2026-09-29 11:02 api crashloop was a missing DATABASE_URL
+2026-09-17 16:40 grafana crashloop, data dir not writable
+.fi
+.RE
+.SS Nothing found
+.PP
+.RS 4
+.nf
+$ note -s nothing
+note: nothing matches nothing
+$ echo $?
+1
+.fi
+.RE
+.SS Notes for one project
+.PP
+.RS 4
+.nf
+$ note -d ~/work/eks-notes node group needs the AmazonEKS_CNI_Policy
+note: added to ~/work/eks-notes/2026-09-29.md
+.fi
+.RE
+.PP
+Put \fBexport NOTES_DIR=~/work/eks\-notes\fR in a project's \fB.envrc\fR to make it the default there.
+.SS Write more in the editor
+.PP
+.RS 4
+.nf
+$ note -e
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBnote: no editor found, set EDITOR, such as EDITOR=nano\fR : \fBVISUAL\fR and \fBEDITOR\fR are empty, and neither \fBnano\fR nor \fBvi\fR is installed. Add \fBexport EDITOR=nano\fR, or the editor you use, to \fB~/.bashrc\fR.
+.PP
+My note lost a word such as \fB$HOME\fR or \fB*\fR : The shell expanded it before \fBnote\fR saw it. Put the text in single quotes.
+.PP
+\fBnote \-l 7\fR shows fewer days than 7 : It shows only the days that have a file. Days with no notes have none.
+.PP
+A note has the wrong time : \fBnote\fR uses the time zone of the machine. Check it with \fBdate\fR. On a server, \fBTZ=Asia/Kolkata note ...\fR sets it for one note.
+.SH EXIT STATUS
+.TP
+0
+It worked, including when there are no notes to show.
+.TP
+1
+A search found nothing, or a file could not be written.
+.TP
+2
+Bad usage, such as \fB\-l 0\fR or \fB\-s\fR together with text.
+.TP
+3
+\fBgrep\fR is missing, for \fB\-s\fR.
+.SH SEE ALSO
+.PP
+\fBrecent\fR, \fBgrep(1)\fR

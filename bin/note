@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# note: jot a line into today's notes file.
+set -uo pipefail
+TB_CMD=note
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: note [options] text ...
+       note [options] [-l days | -s pattern [-- grep options] | -e]
+
+Jot a line into today's notes file.
+
+Options:
+  -l, --last DAYS     print the notes of the last DAYS days
+  -s, --search PAT    search every note, newest first
+  -e, --edit          open today's file in your editor
+  -d, --dir PATH      keep notes here, ~/notes by default
+  -q, --quiet         no lines of its own
+  -v, --verbose       the file it reads or writes
+  -h, --help          this help
+
+With no text it prints today's notes. NOTES_DIR sets the folder too.
+
+Pass-through:
+  Options after -- go to grep for --search, such as -i.
+
+Examples:
+  note kind needs 4 GB for 3 nodes on this VM
+  note
+  note -l 7
+  note -s crashloop -- -i
+
+Needs: grep. See man note.
+Exit: 0 ok, 1 a search found nothing, 2 bad usage.
+EOF
+}
+
+# A path with the home folder shown as ~.
+pretty() {
+    if [[ $1 == "$HOME"/* ]]; then echo "~/${1#"$HOME"/}"; else echo "$1"; fi
+}
+
+# The file for a day, made with its heading when it is new.
+day_file() {
+    local f=$dir/$1.md
+    if [[ ! -e $f ]]; then
+        mkdir -p -- "$dir" || tb_die 1 "cannot make $(pretty "$dir")"
+        printf '# %s\n\n' "$1" > "$f" || tb_die 1 "cannot write $(pretty "$f")"
+    fi
+    echo "$f"
+}
+
+add() {
+    local text=$1 f
+    # One note is one line, so the file stays one bullet per note.
+    text=${text//$'\r'/}
+    text=${text//$'\n'/ }
+    f=$(day_file "$today") || exit 1
+    tb_say "adding to $f"
+    printf -- '- %s %s\n' "$(date +%H:%M)" "$text" >> "$f" || tb_die 1 "cannot write $(pretty "$f")"
+    tb_info "$TB_CMD: added to $(pretty "$f")"
+}
+
+show_today() {
+    local f=$dir/$today.md
+    tb_say "reading $f"
+    if [[ ! -s $f ]]; then
+        tb_info "$TB_CMD: no notes yet today, add one with: note some text"
+        return 0
+    fi
+    cat -- "$f"
+}
+
+# The day files, oldest first.
+day_files() {
+    local f
+    for f in "$dir"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md; do
+        [[ -f $f ]] && echo "$f"
+    done
+}
+
+show_last() {
+    local days=$1 noon cutoff f d n=0
+    noon=$(date -d "$today 12:00" +%s) || tb_die 1 "date cannot count days back on this system"
+    cutoff=$(date -d "@$(( noon - (days - 1) * 86400 ))" +%F)
+    tb_say "reading notes from $cutoff to $today in $dir"
+    while IFS= read -r f; do
+        d=${f##*/}
+        d=${d%.md}
+        [[ $d < $cutoff || $d > $today ]] && continue
+        (( n++ )) && echo
+        cat -- "$f"
+    done < <(day_files)
+    (( n )) || tb_info "$TB_CMD: no notes in the last $(tb_plural "$days" day)"
+    return 0
+}
+
+# Every note line that matches, as "2026-09-29 11:02 text", newest first.
+search() {
+    local pat=$1 f d found=0 line
+    tb_need grep
+    tb_say "searching $dir"
+    while IFS= read -r f; do
+        d=${f##*/}
+        d=${d%.md}
+        while IFS= read -r line; do
+            [[ -z $line || $line == "#"* ]] && continue
+            line=${line#- }
+            printf '%s %s\n' "$d" "$line"
+            found=1
+        done < <(grep ${TB_PASS[@]+"${TB_PASS[@]}"} -e "$pat" -- "$f" | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
+    done < <(day_files | sort -r)
+    (( found )) && return 0
+    tb_err "nothing matches $pat"
+    return 1
+}
+
+edit() {
+    local f ed
+    f=$(day_file "$today") || exit 1
+    ed=${VISUAL:-${EDITOR:-}}
+    if [[ -z $ed ]]; then
+        for ed in nano vi ""; do [[ -n $ed ]] && tb_has "$ed" && break; done
+    fi
+    [[ -n $ed ]] && tb_has "${ed%% *}" || tb_die 1 "no editor found, set EDITOR, such as EDITOR=nano"
+    tb_show "$ed" "$f"
+    # The editor may be a command with options, such as "code -w".
+    # shellcheck disable=SC2086
+    $ed "$f"
+}
+
+last="" pat="" do_edit=0 dir=${NOTES_DIR:-$HOME/notes} words=() searching=0
+tb_expand "lsd" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -l|--last)   tb_optarg "$@"; last=$2; shift
+                     [[ $last =~ ^[0-9]{1,5}$ ]] && (( 10#$last > 0 )) || tb_usage_error "--last needs a number of days, not $last"
+                     last=$(( 10#$last )) ;;
+        -s|--search) tb_optarg "$@"; pat=$2; searching=1; shift ;;
+        -e|--edit)   do_edit=1 ;;
+        -d|--dir)    tb_optarg "$@"; dir=$2; shift ;;
+        --)          shift
+                     if (( searching )); then TB_PASS=("$@"); else words+=("$@"); fi
+                     break ;;
+        -*)          tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)           words+=("$1") ;;
+    esac
+    shift
+done
+
+modes=$(( ${#last} > 0 ? 1 : 0 ))
+(( modes += searching + do_edit ))
+(( modes > 1 )) && tb_usage_error "use one of --last, --search and --edit"
+(( modes && ${#words[@]} )) && tb_usage_error "text goes in a note on its own, not with --last, --search or --edit"
+today=$(date +%F)
+if (( ${#words[@]} )); then
+    add "${words[*]}"
+elif [[ -n $last ]]; then
+    show_last "$last"
+elif (( searching )); then
+    search "$pat"
+elif (( do_edit )); then
+    edit
+else
+    show_today
+fi
+exit $?
