@@ -99,6 +99,19 @@ SH
     [ "$(printf 'line one\nline two\n' | sha256sum)" = "$(sha256sum < out)" ]
 }
 
+@test "a binary key is refused on a terminal and piped as is" {
+    command -v script >/dev/null || skip "no script command to make a terminal"
+    run script -qec "ksecret db-creds blob" /dev/null
+    [ "$status" -eq 1 ]
+    [[ $output == *"ksecret: blob is binary, 4 bytes. Save it with:"* ]]
+    [[ $output == *"  ksecret -n shop db-creds blob > file"* ]]
+    run script -qec "ksecret db-creds DB_USER" /dev/null
+    [ "$status" -eq 0 ]
+    [[ $output == *"shop"* && $output != *"binary"* ]]
+    ksecret db-creds blob > "$BATS_TEST_TMPDIR/blob"
+    [ "$(wc -c < "$BATS_TEST_TMPDIR/blob")" -eq 4 ]
+}
+
 @test "a missing key exits 1 and lists the keys" {
     run ksecret db-creds nope
     [ "$status" -eq 1 ]

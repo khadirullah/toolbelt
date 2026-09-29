@@ -25,6 +25,8 @@ not want in your scrollback or a screen share. `--show-keys` prints it.
 
 With a KEY, `ksecret` prints that one value and nothing else, byte for byte. That makes it safe in scripts and
 pipes, such as `ksecret db-creds DB_PASSWORD | psql ...`. A newline is added only when the output is a terminal.
+A binary value is not printed to a terminal, since its raw bytes can garble it. `ksecret` exits 1 and prints the
+command that saves it to a file instead. A pipe or a redirect still gets the bytes.
 `-c` copies the value to the clipboard with `clip` and prints only how many bytes it copied, so the value never
 shows on screen.
 
@@ -170,7 +172,7 @@ postgres.shop.svc.cluster.local
 | Code | Meaning |
 |---|---|
 | 0 | It printed or copied the values. |
-| 1 | No such Secret or key, `clip` failed, or kubectl failed. |
+| 1 | No such Secret or key, a binary value asked for on a terminal, `clip` failed, or kubectl failed. |
 | 2 | Bad usage, such as `-c` without a KEY. |
 | 3 | kubectl, jq or base64 is missing. |
 
