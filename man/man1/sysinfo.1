@@ -1,0 +1,201 @@
+.TH "SYSINFO" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+sysinfo \- the whole machine on one screen
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+sysinfo [-q | -v]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+When someone asks "what are you running?", the answer is spread over a dozen commands. \fBhostnamectl\fR, \fBcat /etc/os\-release\fR, \fBuname \-r\fR, \fBlscpu\fR, \fBfree \-h\fR, \fBdf \-h /\fR, \fBuptime\fR and \fBip addr\fR each give one piece, in their own layout, with lines you do not need. \fBsysinfo\fR reads the same sources and prints one labelled line for each fact, short enough to paste into a bug report or a chat.
+.TP
+host
+The host name, then the maker and model from \fB/sys/class/dmi/id\fR, then a VM or container type. Lenovo keeps the model name in \fBproduct_version\fR, so \fBsysinfo\fR reads it from there.
+.TP
+distro
+\fBPRETTY_NAME\fR from \fB/etc/os\-release\fR, or \fB/usr/lib/os\-release\fR.
+.TP
+kernel
+\fB/proc/sys/kernel/osrelease\fR, the same as \fBuname \-r\fR.
+.TP
+cpu
+The model name from \fBlscpu\fR, with \fB(R)\fR, \fB(TM)\fR and the clock speed taken out, then cores and threads.
+.TP
+ram
+Total and used from \fB/proc/meminfo\fR, then zram swap and other swap from \fB/proc/swaps\fR.
+.TP
+disk
+Size, filesystem and use of \fB/\fR, from \fBdf\fR and \fB/proc/mounts\fR.
+.TP
+uptime
+\fB/proc/uptime\fR, in days, hours and minutes.
+.TP
+ip
+Each IPv4 address on a real network card, and the gateway on the card with the default route.
+.TP
+pkg
+Every package manager it finds: apt, dnf, pacman, zypper, apk, then flatpak, snap, nix and brew.
+.TP
+init
+The name of process 1, and the systemd version when that is systemd.
+.TP
+session
+The desktop and whether it runs on Wayland or X11, or how you are logged in when there is no desktop.
+.PP
+The ip line leaves out loopback, docker bridges, veth pairs and VPN tunnels. It keeps a card only when it has a device in \fB/sys/class/net/NAME/device\fR, which only real and virtual hardware has, or when it carries the default route. That is why a laptop with docker shows one line and not six.
+.PP
+The host line says \fBvirtual machine, kvm\fR or \fBcontainer, docker\fR when \fBsystemd\-detect\-virt\fR says so. Without systemd it looks for \fB/.dockerenv\fR and \fB/run/.containerenv\fR. Makers leave placeholder text such as \fBTo Be Filled By O.E.M.\fR or \fBSystem Product Name\fR in the DMI fields, and \fBsysinfo\fR drops those.
+.PP
+Every source is optional. When a file cannot be read or a tool is missing, that line falls back or is left out, and the rest still prints. That makes \fBsysinfo\fR work in a minimal container, in a chroot and on Alpine.
+.PP
+\fBsysinfo\fR only reads. It needs no root and changes nothing.
+.SH OPTIONS
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+One line with host, distro, kernel, short CPU name, RAM and uptime.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each file it reads and each command it runs, in order, before its line.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+The labels are bold in a terminal and plain in a file or pipe, or when \fBNO_COLOR\fR is set.
+.SH PER\-DISTRO NOTES
+.PP
+Debian and Ubuntu : Everything works on a desktop or server install. The \fBdebian\fR and \fBubuntu\fR container images have neither \fBip\fR nor \fBlscpu\fR, so the ip line says so and the cpu line comes from \fB/proc/cpuinfo\fR.
+.PP
+Fedora : The ram line usually shows zram swap, which Fedora sets up at install.
+.PP
+Arch : \fBiproute2\fR and \fButil\-linux\fR come with the base install, so every line shows.
+.PP
+Alpine : BusyBox gives \fBdf\fR and a small \fBip\fR. Install \fButil\-linux\fR or \fBlscpu\fR for the cleaner CPU name, and \fBiproute2\fR for the ip line. The init line shows \fBinit\fR, since Alpine uses OpenRC and not systemd.
+.PP
+Raspberry Pi and other ARM boards : \fB/proc/cpuinfo\fR has no model name, so the cpu line uses the \fBHardware\fR field when lscpu gives no name.
+.SH NEEDS
+.PP
+\fB/proc\fR and \fB/sys\fR, which every Linux system has. The rest adds lines and is optional.
+.TP
+\fBlscpu\fR
+Package: \fButil\-linux\fR, or \fBlscpu\fR on Alpine. Adds: Cores per socket. Without it, \fB/proc/cpuinfo\fR gives the model and counts.
+.TP
+\fBip\fR
+Package: \fBiproute2\fR, or \fBiproute\fR on Fedora. Adds: The ip line. Without it, the line says so.
+.TP
+\fBdf\fR
+Package: \fBcoreutils\fR. Adds: The disk line.
+.TP
+\fBsystemd\-detect\-virt\fR
+Package: \fBsystemd\fR. Adds: The VM and container type.
+.TP
+\fBsystemctl\fR
+Package: \fBsystemd\fR. Adds: The systemd version on the init line.
+.SH EXAMPLES
+.SS A virtual machine
+.PP
+.RS 4
+.nf
+$ sysinfo
+host     debian, QEMU Standard PC (Q35 + ICH9, 2009), virtual machine, kvm
+distro   Debian GNU/Linux 13 (trixie)
+kernel   6.12.107+deb13-amd64
+cpu      12th Gen Intel Core i3-12100, 2 cores, 4 threads
+ram      7.7GB, 4.9GB used, swap 5.9GB
+disk     /  48GB ext4, 43GB used (95%)
+uptime   17 hours, 11 minutes
+ip       192.168.122.210/24 on enp2s0, gateway 192.168.122.1
+pkg      apt
+init     systemd 257
+session  Cinnamon on X11
+.fi
+.RE
+.SS A laptop with zram
+.PP
+.RS 4
+.nf
+$ sysinfo
+host     km-laptop, Lenovo ThinkPad T480
+distro   Fedora Linux 44 (Workstation Edition)
+kernel   6.19.8-200.fc44.x86_64
+cpu      Intel Core i5-8250U, 4 cores, 8 threads
+ram      7.6GB, 5.2GB used, zram swap 7.6GB
+disk     /  237GB btrfs, 214GB used (90%)
+uptime   3 days, 6 hours
+ip       192.168.1.24/24 on wlp3s0, gateway 192.168.1.1
+pkg      dnf, flatpak
+init     systemd 258
+session  GNOME on Wayland
+.fi
+.RE
+.SS One line
+.PP
+.RS 4
+.nf
+$ sysinfo -q
+debian  Debian 13  6.12.107+deb13-amd64  i3-12100  7.7GB  up 17h 11m
+.fi
+.RE
+.SS Inside a container
+.PP
+.RS 4
+.nf
+$ sysinfo
+host     km-laptop, container, docker
+distro   Debian GNU/Linux 13 (trixie)
+kernel   6.12.107+deb13-amd64
+cpu      Intel Core i5-8250U, 4 cores, 8 threads
+ram      7.6GB, 5.2GB used, no swap
+uptime   3 days, 6 hours
+ip       unknown, the ip command is not installed
+init     bash
+session  none, text console
+.fi
+.RE
+.PP
+A container shares the host's kernel, CPU and RAM, so those lines describe the host. The disk line is missing because the image has no \fBdf\fR.
+.SS See where each line comes from
+.PP
+.RS 4
+.nf
+$ sysinfo -v 2>&1 | head -8
++ cat /proc/sys/kernel/hostname
++ cat /sys/class/dmi/id/sys_vendor
++ cat /sys/class/dmi/id/product_name
++ cat /sys/class/dmi/id/product_version
++ systemd-detect-virt -c
++ systemd-detect-virt -v
+host     debian, QEMU Standard PC (Q35 + ICH9, 2009), virtual machine, kvm
+distro   Debian GNU/Linux 13 (trixie)
+.fi
+.RE
+.SS Keep it for a bug report
+.PP
+.RS 4
+.nf
+$ sysinfo > machine.txt
+.fi
+.RE
+.PP
+The file has no bold codes, since the output is not a terminal.
+.SH TROUBLESHOOTING
+.PP
+The host line has no model : The machine has no DMI table, as on a Raspberry Pi and most ARM boards, or the maker left placeholders. The host name still shows.
+.PP
+The ip line says \fBnone, no network card has an IPv4 address\fR : The machine has only IPv6, or the network is down. Check with \fBip addr\fR.
+.PP
+The distro line says only \fBLinux\fR : \fB/etc/os\-release\fR and \fB/usr/lib/os\-release\fR are both missing, as in some minimal images.
+.PP
+The session line says \fBnone, logged in over ssh\fR on a desktop : The desktop's variables are not passed to ssh sessions. That line describes the shell you run \fBsysinfo\fR from.
+.SH EXIT STATUS
+.TP
+0
+It worked, even when some lines were left out.
+.TP
+2
+Bad usage, such as an argument.
+.SH SEE ALSO
+.PP
+\fBmem\fR, \fBpkg\fR, \fBhostnamectl(1)\fR, \fBlscpu(1)\fR, \fBos\-release(5)\fR

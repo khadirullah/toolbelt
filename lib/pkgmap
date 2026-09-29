@@ -107,7 +107,11 @@ dpkg-query     dpkg                 dpkg                 dpkg                 dp
 rpm            rpm                  rpm                  rpm-tools            rpm                  rpm
 fwupdmgr       fwupd                fwupd                fwupd                fwupd                fwupd
 snap           snapd                snapd                -                    -                    -
+lscpu          util-linux           util-linux           util-linux           util-linux           lscpu
+ip             iproute2             iproute              iproute2             iproute2             iproute2
 getconf        libc-bin             glibc-common         glibc                glibc                musl-utils
+hostname       hostname             hostname             inetutils            hostname             -
+systemd-detect-virt systemd         systemd              systemd              systemd              -
 readlink       coreutils            coreutils            coreutils            coreutils            coreutils
 uname          coreutils            coreutils            coreutils            coreutils            coreutils
 grep           grep                 grep                 grep                 grep                 grep

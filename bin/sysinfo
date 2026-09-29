@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# sysinfo: the whole machine on one screen.
+set -uo pipefail
+TB_CMD=sysinfo
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: sysinfo [-q | -v]
+
+The whole machine on one screen.
+
+Options:
+  -q, --quiet         one line with host, distro, kernel, CPU, RAM and uptime
+  -v, --verbose       show each file and command it reads
+  -h, --help          this help
+
+Examples:
+  sysinfo
+  sysinfo -q
+  sysinfo > machine.txt
+
+Needs: /proc and /sys. ip and df add the network and disk lines, and
+lscpu gives a cleaner CPU name. See man sysinfo.
+Exit: 0 ok, 2 bad usage.
+EOF
+}
+
+# Tests point this at a fake tree with etc/, proc/ and sys/ in it.
+ROOT=${TB_ROOTFS:-}
+
+# The first line of a file, trimmed. Returns 1 when it cannot be read.
+first_line() {
+    local f=$ROOT$1 line
+    [[ -r $f ]] || return 1
+    tb_show cat "$1"
+    IFS= read -r line <"$f" || [[ -n $line ]] || return 1
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [[ -n $line ]] || return 1
+    echo "$line"
+}
+
+# One key from os-release, without quotes.
+os_value() {
+    local key=$1 f line
+    for f in "$ROOT/etc/os-release" "$ROOT/usr/lib/os-release"; do
+        [[ -r $f ]] || continue
+        while IFS= read -r line; do
+            if [[ $line == "$key="* ]]; then
+                line=${line#*=}
+                line=${line#[\"\']}
+                echo "${line%[\"\']}"
+                return 0
+            fi
+        done <"$f"
+        return 1
+    done
+    return 1
+}
+
+# A value from /sys/class/dmi/id, empty when it is a firmware placeholder.
+dmi() {
+    local v
+    v=$(first_line "/sys/class/dmi/id/$1") || return 1
+    case ${v,,} in
+        "to be filled by o.e.m."|"system product name"|"system manufacturer"|"default string"|\
+        "not applicable"|"none"|"o.e.m."|"oem"|"not specified"|"system version"|"type1productconfigid"|"123456789")
+            return 1 ;;
+    esac
+    echo "$v"
+}
+
+# The maker and model, such as "Lenovo ThinkPad T480".
+model() {
+    local vendor name version
+    vendor=$(dmi sys_vendor) || vendor=""
+    name=$(dmi product_name) || name=""
+    version=$(dmi product_version) || version=""
+    case $vendor in
+        LENOVO) vendor=Lenovo
+            # Lenovo keeps the model name in product_version.
+            [[ -n $version ]] && name=$version ;;
+        "Dell Inc.") vendor=Dell ;;
+        "Hewlett-Packard"|HP) vendor=HP ;;
+        "ASUSTeK COMPUTER INC.") vendor=ASUS ;;
+        "Micro-Star International Co., Ltd.") vendor=MSI ;;
+        "Apple Inc.") vendor=Apple ;;
+    esac
+    [[ -n $vendor && $name == "$vendor"* ]] && vendor=""
+    echo "${vendor:+$vendor }$name"
+}
+
+# "virtual machine, kvm" or "container, docker", or nothing on real hardware.
+virt() {
+    local v
+    if tb_has systemd-detect-virt; then
+        tb_show systemd-detect-virt -c
+        v=$(systemd-detect-virt -c 2>/dev/null) && [[ $v != none ]] && { echo "container, $v"; return 0; }
+        tb_show systemd-detect-virt -v
+        v=$(systemd-detect-virt -v 2>/dev/null) && [[ $v != none ]] && { echo "virtual machine, $v"; return 0; }
+        return 0
+    fi
+    if [[ -e $ROOT/.dockerenv ]]; then echo "container, docker"
+    elif [[ -e $ROOT/run/.containerenv ]]; then echo "container, podman"
+    fi
+}
+
+host_line() {
+    local h m v
+    h=$(first_line /proc/sys/kernel/hostname) || h=$(uname -n 2>/dev/null) || h=unknown
+    HOST=$h
+    m=$(model)
+    v=$(virt)
+    if [[ $v == container* ]]; then
+        m=$v
+    elif [[ -n $v ]]; then
+        m=${m:+$m, }$v
+    fi
+    row host "$h${m:+, $m}"
+}
+
+distro_line() {
+    local pretty name ver
+    pretty=$(os_value PRETTY_NAME) || pretty=""
+    name=$(os_value NAME) || name=Linux
+    ver=$(os_value VERSION_ID) || ver=""
+    [[ -n $pretty ]] || pretty="$name${ver:+ $ver}"
+    name=${name% GNU/Linux}
+    name=${name% Linux}
+    DISTRO_SHORT="$name${ver:+ $ver}"
+    row distro "$pretty"
+}
+
+kernel_line() {
+    KERNEL=$(first_line /proc/sys/kernel/osrelease) || KERNEL=$(uname -r)
+    row kernel "$KERNEL"
+}
+
+# "Intel Core i5-8250U" from "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz".
+clean_cpu() {
+    sed -E 's/\((R|r|TM|tm)\)//g; s/ CPU @.*//; s/ @ .*//; s/ [0-9]+-Core Processor//; s/ Processor$//; s/ +/ /g; s/^ //; s/ $//' <<<"$1"
+}
+
+cpu_line() {
+    local k v model="" sockets=1 per=0 threads=0 cores=0 text
+    if tb_has lscpu; then
+        tb_show lscpu
+        while IFS=: read -r k v; do
+            v=${v#"${v%%[![:space:]]*}"}
+            case $k in
+                "Model name")         [[ -z $model ]] && model=$v ;;
+                "Socket(s)")          [[ $v =~ ^[0-9]+$ ]] && sockets=$v ;;
+                "Core(s) per socket") [[ $v =~ ^[0-9]+$ ]] && per=$v ;;
+                "CPU(s)")             [[ $v =~ ^[0-9]+$ ]] && threads=$v ;;
+            esac
+        done < <(LC_ALL=C lscpu 2>/dev/null)
+        cores=$(( sockets * per ))
+    fi
+    if [[ -z $model || $threads == 0 ]] && [[ -r $ROOT/proc/cpuinfo ]]; then
+        tb_show cat /proc/cpuinfo
+        local out
+        out=$(awk -F': *' '
+            /^model name/ && m == "" { m = $2 }
+            /^Hardware/ && m == "" { m = $2 }
+            /^processor/ { t++ }
+            /^physical id/ { ids[$2] = 1 }
+            /^cpu cores/ && c == "" { c = $2 }
+            END { n = 0; for (i in ids) n++; if (n == 0) n = 1; printf "%d %d %s\n", t, c * n, m }' "$ROOT/proc/cpuinfo")
+        read -r threads cores model <<<"$out"
+    fi
+    [[ -n $model ]] || model="unknown CPU"
+    CPU=$(clean_cpu "$model")
+    text=$CPU
+    (( cores > 0 )) && text+=", $(tb_plural "$cores" core)"
+    (( threads > 0 )) && text+=", $(tb_plural "$threads" thread)"
+    row cpu "$text"
+}
+
+ram_line() {
+    local k v _ total=0 avail=0 file size zram=0 other=0 text
+    if [[ -r $ROOT/proc/meminfo ]]; then
+        tb_show cat /proc/meminfo
+        while read -r k v _; do
+            case $k in
+                MemTotal:) total=$v ;;
+                MemAvailable:) avail=$v ;;
+            esac
+        done <"$ROOT/proc/meminfo"
+    fi
+    if [[ -r $ROOT/proc/swaps ]]; then
+        tb_show cat /proc/swaps
+        while read -r file _ size _; do
+            [[ $file == Filename ]] && continue
+            if [[ $file == /dev/zram* ]]; then zram=$(( zram + size )); else other=$(( other + size )); fi
+        done <"$ROOT/proc/swaps"
+    fi
+    RAM=$(tb_human $(( total * 1024 )))
+    text="$RAM, $(tb_human $(( (total - avail) * 1024 ))) used"
+    (( zram > 0 )) && text+=", zram swap $(tb_human $(( zram * 1024 )))"
+    (( other > 0 )) && text+=", swap $(tb_human $(( other * 1024 )))"
+    (( zram + other == 0 )) && text+=", no swap"
+    row ram "$text"
+}
+
+disk_line() {
+    local line size used pct fstype="" mnt t _
+    tb_has df || return 0
+    tb_show df -Pk /
+    line=$(df -Pk / 2>/dev/null | awk 'NR == 2 { print $2, $3, $5 }')
+    [[ -n $line ]] || return 0
+    read -r size used pct <<<"$line"
+    if [[ -r $ROOT/proc/mounts ]]; then
+        while read -r _ mnt t _; do
+            [[ $mnt == / ]] && fstype=$t
+        done <"$ROOT/proc/mounts"
+    fi
+    row disk "/  $(tb_human $(( size * 1024 )))${fstype:+ $fstype}, $(tb_human $(( used * 1024 ))) used ($pct)"
+}
+
+uptime_line() {
+    local up s d h m text
+    up=$(first_line /proc/uptime) || return 0
+    s=${up%%[. ]*}
+    d=$(( s / 86400 )) h=$(( s % 86400 / 3600 )) m=$(( s % 3600 / 60 ))
+    if (( d > 0 )); then
+        text="$(tb_plural "$d" day), $(tb_plural "$h" hour)"
+        UP="up ${d}d ${h}h"
+    elif (( h > 0 )); then
+        text="$(tb_plural "$h" hour), $(tb_plural "$m" minute)"
+        UP="up ${h}h ${m}m"
+    else
+        text=$(tb_plural "$m" minute)
+        UP="up ${m}m"
+    fi
+    row uptime "$text"
+}
+
+# Addresses on real network cards, and on the card with the default route.
+ip_line() {
+    local gw="" gwdev="" name addr shown=0 text _
+    if ! tb_has ip; then
+        row ip "unknown, the ip command is not installed"
+        return 0
+    fi
+    tb_show ip route show default
+    read -r gw gwdev < <(ip route show default 2>/dev/null | awk '$1 == "default" {
+        g = "-"; d = "-"
+        for (i = 2; i < NF; i++) { if ($i == "via") g = $(i + 1); if ($i == "dev") d = $(i + 1) }
+        print g, d; exit }')
+    [[ $gw == - ]] && gw=""
+    [[ $gwdev == - ]] && gwdev=""
+    tb_show ip -brief -4 addr show up
+    while read -r name _ addr _; do
+        name=${name%%@*}
+        [[ $name == lo || -z $addr ]] && continue
+        [[ -e $ROOT/sys/class/net/$name/device || $name == "$gwdev" ]] || continue
+        text="$addr on $name"
+        [[ $name == "$gwdev" && -n $gw ]] && text+=", gateway $gw"
+        if (( shown )); then row "" "$text"; else row ip "$text"; fi
+        shown=1
+    done < <(ip -brief -4 addr show up 2>/dev/null)
+    (( shown )) || row ip "none, no network card has an IPv4 address"
+}
+
+pkg_line() {
+    local p found=()
+    for p in apt dnf pacman zypper apk; do
+        tb_has "$p" && found+=("$p")
+    done
+    [[ " ${found[*]} " == *" dnf "* ]] || { tb_has yum && found+=(yum); }
+    for p in flatpak snap nix brew; do
+        tb_has "$p" && found+=("$p")
+    done
+    if (( ${#found[@]} )); then
+        local IFS=,
+        row pkg "$(sed 's/,/, /g' <<<"${found[*]}")"
+    else
+        row pkg "none found"
+    fi
+}
+
+init_line() {
+    local comm ver
+    comm=$(first_line /proc/1/comm) || comm=unknown
+    if [[ $comm == systemd ]] && tb_has systemctl; then
+        tb_show systemctl --version
+        ver=$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+        row init "systemd${ver:+ $ver}"
+    else
+        row init "$comm"
+    fi
+}
+
+session_line() {
+    local desk=${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-}} type=${XDG_SESSION_TYPE:-}
+    desk=${desk##*:}
+    desk=${desk#X-}
+    case $type in
+        wayland) type=Wayland ;;
+        x11) type=X11 ;;
+        tty|"") type="" ;;
+    esac
+    [[ -z $type && -n ${WAYLAND_DISPLAY:-} ]] && type=Wayland
+    [[ -z $type && -n ${DISPLAY:-} ]] && type=X11
+    if [[ -n $desk ]]; then
+        row session "$desk${type:+ on $type}"
+    elif [[ -n $type ]]; then
+        row session "$type, no desktop named"
+    elif [[ -n ${SSH_CONNECTION:-} ]]; then
+        row session "none, logged in over ssh"
+    else
+        row session "none, text console"
+    fi
+}
+
+# A labelled line, with the label in bold in a terminal.
+row() {
+    (( TB_QUIET )) && return 0
+    printf '%s%-8s%s %s\n' "$C_BOLD" "$1" "$C_OFF" "$2"
+}
+
+main() {
+    tb_color_stdout
+    HOST="" DISTRO_SHORT="" KERNEL="" CPU="" RAM="" UP=""
+    host_line
+    distro_line
+    kernel_line
+    cpu_line
+    ram_line
+    if (( TB_QUIET )); then
+        uptime_line
+        local short=${CPU##*Core }
+        short=${short#Intel }
+        short=${short#AMD }
+        echo "$HOST  $DISTRO_SHORT  $KERNEL  $short  $RAM  ${UP:-up ?}"
+        return 0
+    fi
+    disk_line
+    uptime_line
+    ip_line
+    pkg_line
+    init_line
+    session_line
+}
+
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -y|--yes)  tb_unknown "$1" ;;
+        --)        shift; (( $# )) && tb_usage_error "sysinfo passes nothing to another tool, drop the options after --"; break ;;
+        -*)        tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)         tb_usage_error "sysinfo takes no arguments, not $1" ;;
+    esac
+    shift
+done
+
+main
+exit 0
