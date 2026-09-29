@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# proc: everything about one process.
+set -uo pipefail
+TB_CMD=proc
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: proc [-f] [-e] PID | NAME
+
+Everything about one process.
+
+Options:
+  -f, --files         list every open file and socket instead of a count
+  -e, --env           show the environment, with secret values as ***
+  -q, --quiet         only the pid and the command line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Examples:
+  proc syncthing
+  proc 4121 --files
+  proc -e 4121
+
+Needs: /proc. ss adds the ports, systemctl the unit state, and the
+package manager the package. See man proc.
+Exit: 0 ok, 1 no such process, 2 bad usage or a name that matches several.
+EOF
+}
+
+# The command line of a pid with spaces between the words, or [comm] for a
+# kernel thread.
+cmdline() {
+    local line c
+    line=$(tr '\0\n\t' '   ' <"/proc/$1/cmdline" 2>/dev/null)
+    line=${line% }
+    if [[ -z $line ]]; then
+        IFS= read -r c 2>/dev/null <"/proc/$1/comm" || c=unknown
+        line="[$c]"
+    fi
+    echo "$line"
+}
+
+# Pids whose name is NAME. Tries the kernel's name, then the program name,
+# then any part of the command line. Fills MATCHES.
+find_pids() {
+    local name=$1 d pid comm a0 line short=${1:0:15}
+    MATCHES=()
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        [[ $pid == "$$" ]] && continue
+        IFS= read -r comm 2>/dev/null <"$d/comm" || continue
+        [[ $comm == "$short" ]] && MATCHES+=("$pid")
+    done
+    (( ${#MATCHES[@]} )) && return 0
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        [[ $pid == "$$" ]] && continue
+        IFS= read -r -d '' a0 2>/dev/null <"$d/cmdline" || continue
+        [[ ${a0##*/} == "$name" ]] && MATCHES+=("$pid")
+    done
+    (( ${#MATCHES[@]} )) && return 0
+    # The last try matches any part of the command line. Our own parent may
+    # be sudo or a shell that has the name in its command line too.
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        [[ $pid == "$$" || $pid == "$PPID" ]] && continue
+        line=$(tr '\0' ' ' 2>/dev/null <"$d/cmdline") || continue
+        [[ $line == *"$name"* ]] && MATCHES+=("$pid")
+    done
+}
+
+# Read /proc/PID/status into ST_ variables.
+read_status() {
+    local k v _
+    ST_NAME="" ST_PPID=0 ST_UID="" ST_RSS=0 ST_SWAP=0 ST_THREADS=1
+    while IFS=$' \t' read -r k v _; do
+        case $k in
+            Name:)    ST_NAME=$v ;;
+            PPid:)    ST_PPID=$v ;;
+            Uid:)     ST_UID=$v ;;
+            VmRSS:)   ST_RSS=$v ;;
+            VmSwap:)  ST_SWAP=$v ;;
+            Threads:) ST_THREADS=$v ;;
+        esac
+    done <"/proc/$1/status"
+}
+
+# The fields of /proc/PID/stat after the name, which may hold spaces.
+read_stat() {
+    local line
+    IFS= read -r line 2>/dev/null <"/proc/$1/stat" || return 1
+    line=${line##*) }
+    # shellcheck disable=SC2206
+    STAT=($line)
+}
+
+# utime + stime in clock ticks.
+cpu_ticks() {
+    read_stat "$1" || return 1
+    echo $(( STAT[11] + STAT[12] ))
+}
+
+user_name() {
+    local n
+    n=$(getent passwd "$1" 2>/dev/null) || n=$(awk -F: -v u="$1" '$3 == u { print; exit }' /etc/passwd 2>/dev/null)
+    n=${n%%:*}
+    echo "${n:-uid $1}"
+}
+
+# An epoch time as "Sep 26 09:12".
+fmt_time() { date -d "@$1" '+%b %d %H:%M' 2>/dev/null || echo "at $1"; }
+
+row() { printf '%-8s %s\n' "$1" "$2"; }
+
+started_line() {
+    local pid=$1 btime k v start now user
+    read_stat "$pid" || return 0
+    while read -r k v; do
+        [[ $k == btime ]] && btime=$v
+    done </proc/stat
+    start=$(( btime + STAT[19] / HZ ))
+    now=$(date +%s)
+    user=$(user_name "$ST_UID")
+    row user "$user, started $(fmt_time "$start"), $(tb_age $(( now - start ))) ago"
+}
+
+tree_line() {
+    local parts=() p=$1 comm n=0 st k v
+    while [[ $p != 0 && -n $p ]] && (( n < 40 )); do
+        IFS= read -r comm 2>/dev/null <"/proc/$p/comm" || break
+        parts=("$comm($p)" ${parts[@]+"${parts[@]}"})
+        st=0
+        while IFS=$' \t' read -r k v; do
+            [[ $k == PPid: ]] && { st=$v; break; }
+        done 2>/dev/null <"/proc/$p/status"
+        p=$st
+        ((n++))
+    done
+    local out="" x
+    for x in ${parts[@]+"${parts[@]}"}; do
+        out+="${out:+ > }$x"
+    done
+    row tree "$out"
+}
+
+# The systemd unit from the cgroup path, such as sshd.service.
+unit_line() {
+    local pid=$1 line path="" unit="" part scope=system state="" args=()
+    [[ -r /proc/$pid/cgroup ]] || return 0
+    while IFS= read -r line; do
+        case $line in
+            0::*)               path=${line#0::} ;;
+            *:name=systemd:*)   [[ -z $path ]] && path=${line#*:name=systemd:} ;;
+        esac
+    done <"/proc/$pid/cgroup"
+    [[ -n $path ]] || return 0
+    local IFS=/
+    for part in $path; do
+        case $part in
+            *.service|*.scope|*.socket|*.mount|*.swap) unit=$part ;;
+        esac
+    done
+    unset IFS
+    [[ -n $unit ]] || return 0
+    [[ $path == */user@*.service/* ]] && scope=user
+    if tb_has systemctl; then
+        args=()
+        if [[ $scope == user ]]; then
+            # Only our own user manager can answer for a user unit.
+            if [[ $ST_UID == "$EUID" ]]; then args=(--user); else args=(skip); fi
+        fi
+        if [[ ${args[0]:-} != skip ]]; then
+            tb_show systemctl "${args[@]}" is-active "$unit"
+            state=$(systemctl "${args[@]}" is-active "$unit" 2>/dev/null)
+        fi
+    fi
+    row unit "$unit, $scope unit${state:+, $state}"
+}
+
+package_line() {
+    local pid=$1 exe a0 out
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || exe=""
+    if [[ -z $exe ]]; then
+        IFS= read -r -d '' a0 2>/dev/null <"/proc/$pid/cmdline" || return 0
+        if [[ $a0 == /* ]]; then exe=$a0; else exe=$(type -P -- "$a0") || return 0; fi
+    fi
+    [[ $exe == *" (deleted)" ]] && { row package "unknown, the program file was replaced or deleted"; return 0; }
+    [[ -e $exe ]] || return 0
+    tb_show pkg owner "$exe"
+    out=$("$TB_ROOT/bin/pkg" owner "$exe" 2>/dev/null)
+    case $? in
+        0|1) ;;
+        *) return 0 ;;
+    esac
+    out=${out#"$exe"}
+    out=${out#"${out%%[![:space:]]*}"}
+    [[ -n $out ]] && row package "$out"
+}
+
+memory_line() {
+    local score=""
+    IFS= read -r score 2>/dev/null <"/proc/$1/oom_score"
+    row memory "RSS $(tb_human $(( ST_RSS * 1024 ))), swap $(tb_human $(( ST_SWAP * 1024 )))${score:+, oom score $score}"
+}
+
+cpu_line() {
+    local pid=$1 t1 t2 pct
+    t1=$(cpu_ticks "$pid") || return 0
+    sleep 0.5
+    t2=$(cpu_ticks "$pid") || t2=$t1
+    pct=$(awk -v d=$(( t2 - t1 )) -v hz="$HZ" 'BEGIN { printf "%.1f", d / hz / 0.5 * 100 }')
+    row cpu "$pct% now, $(tb_elapsed $(( t2 * 1000 / HZ ))) in total, $(tb_plural "$ST_THREADS" thread)"
+}
+
+# Listening sockets of the pid, from ss.
+ports_line() {
+    local pid=$1 out
+    tb_has ss || { tb_say "ss is not installed, so no ports"; return 0; }
+    if ! (( can_read )); then
+        row ports "unknown, run it with sudo to see them"
+        return 0
+    fi
+    tb_show ss -H -l -t -u -n -p
+    out=$(ss -H -l -t -u -n -p 2>/dev/null | awk -v p="pid=$pid," 'index($0, p) { printf "%s%s %s", (n++ ? ", " : ""), $1, $5 } END { if (n) print "" }')
+    row ports "${out:-none listening}"
+}
+
+# "fd target" for each open file, from one ls call.
+fd_list() {
+    ls -l "/proc/$1/fd" 2>/dev/null | awk '/ -> / { i = index($0, " -> "); pre = substr($0, 1, i - 1); n = split(pre, w, " "); print w[n], substr($0, i + 4) }' | sort -n
+}
+
+files_line() {
+    local pid=$1 total=0 deleted=0 target
+    if ! (( can_read )); then
+        row files "unknown, run it with sudo to see them"
+        return 0
+    fi
+    while read -r _ target; do
+        ((total++))
+        [[ $target == *" (deleted)" ]] && ((deleted++))
+    done < <(fd_list "$pid")
+    if (( deleted )); then
+        row files "$total open, $deleted deleted but still open"
+    else
+        row files "$total open"
+    fi
+}
+
+# Every open file, with sockets named from ss.
+files_table() {
+    local pid=$1 fd target type name ino
+    declare -A socks=()
+    if ! (( can_read )); then
+        tb_die 1 "cannot read the open files of $pid, it belongs to $(user_name "$ST_UID"). Run it with sudo"
+    fi
+    if tb_has ss; then
+        tb_show ss -H -a -t -u -x -n -e
+        while read -r ino name; do
+            socks[$ino]=$name
+        done < <(ss -H -a -t -u -x -n -e 2>/dev/null | awk '
+            # Unix sockets keep their inode in the local port column, and
+            # the peer inode in the peer port column. A connected socket
+            # with no path of its own is named after the path of its peer.
+            $1 ~ /^u_/ {
+                n++; ux[n] = $6; st[n] = $2; loc[n] = $5; peer[n] = $8
+                if ($5 != "*") path[$6] = $5
+                next
+            }
+            {
+                ino = ""
+                for (i = 6; i <= NF; i++) if ($i ~ /^ino:/) { ino = substr($i, 5); break }
+                if (ino == "" || ino == "0") next
+                if ($2 == "LISTEN" || ($2 == "UNCONN" && $6 ~ /\*$/)) print ino, $1 " " $5 ", listening"
+                else print ino, $1 " " $5 " to " $6
+            }
+            END {
+                for (i = 1; i <= n; i++) {
+                    if (ux[i] == "" || ux[i] == "0") continue
+                    if (st[i] == "LISTEN") print ux[i], "unix " loc[i] ", listening"
+                    else if (loc[i] != "*") print ux[i], "unix " loc[i]
+                    else if (peer[i] in path) print ux[i], "unix to " path[peer[i]]
+                    else print ux[i], "unix socket"
+                }
+            }')
+    fi
+    printf '%-4s  %-5s %s\n' FD TYPE NAME
+    while read -r fd target; do
+        case $target in
+            socket:\[*)
+                ino=${target#socket:[}
+                ino=${ino%]}
+                name=${socks[$ino]:-$target}
+                type=${name%% *}
+                [[ $name == "$target" ]] && type=sock || name=${name#* } ;;
+            pipe:*)              type=pipe name=$target ;;
+            anon_inode:*)        type=anon name=${target#anon_inode:} ;;
+            /dev/pts/*|/dev/tty*) type=tty name=$target ;;
+            /dev/*)              type=dev name=$target ;;
+            *)
+                name=$target
+                if [[ -d $target ]]; then type=dir; else type=file; fi ;;
+        esac
+        printf '%-4s  %-5s %s\n' "$fd" "$type" "$name"
+    done < <(fd_list "$pid")
+}
+
+# The environment, one per line, with secret values as ***.
+env_table() {
+    local pid=$1
+    [[ -r /proc/$pid/environ ]] ||
+        tb_die 1 "cannot read the environment of $pid, it belongs to $(user_name "$ST_UID"). Run it with sudo"
+    tr '\0' '\n' <"/proc/$pid/environ" | sort | awk '
+        {
+            i = index($0, "=")
+            if (i == 0) { print; next }
+            k = substr($0, 1, i - 1); v = substr($0, i + 1)
+            if (toupper(k) ~ /KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL|COOKIE/) v = "***"
+            else if (v ~ /:\/\/[^:\/@]+:[^@\/]+@/) sub(/:[^:@\/]+@/, ":***@", v)
+            print k "=" v
+        }'
+}
+
+main() {
+    local target=$1 pid
+    if [[ $target =~ ^[0-9]+$ ]]; then
+        pid=$target
+        [[ -d /proc/$pid ]] || tb_die 1 "no process with pid $pid"
+    else
+        tb_say "looking for processes named $target"
+        find_pids "$target"
+        case ${#MATCHES[@]} in
+            0) tb_die 1 "no process matches $target" ;;
+            1) pid=${MATCHES[0]} ;;
+            *)
+                tb_err "${#MATCHES[@]} processes match $target. Give a pid."
+                local line
+                for pid in "${MATCHES[@]}"; do
+                    line=$(cmdline "$pid")
+                    (( ${#line} > 68 )) && line="${line:0:65}..."
+                    printf '  %6s  %s\n' "$pid" "$line" >&2
+                done
+                exit "$E_USAGE" ;;
+        esac
+    fi
+    read_status "$pid" 2>/dev/null || tb_die 1 "process $pid ended before it could be read"
+    HZ=$(getconf CLK_TCK 2>/dev/null) || HZ=100
+    [[ $HZ =~ ^[0-9]+$ ]] && (( HZ > 0 )) || HZ=100
+    can_read=0
+    [[ -r /proc/$pid/fd ]] && ls "/proc/$pid/fd" >/dev/null 2>&1 && can_read=1
+
+    if (( TB_QUIET )); then
+        echo "$pid  $(cmdline "$pid")"
+        return 0
+    fi
+    if (( show_files || show_env )); then
+        echo "pid $pid  $(cmdline "$pid")"
+        (( show_files )) && files_table "$pid"
+        (( show_files && show_env )) && echo
+        (( show_env )) && env_table "$pid"
+        return 0
+    fi
+    row pid "$pid  $(cmdline "$pid")"
+    started_line "$pid"
+    tree_line "$pid"
+    unit_line "$pid"
+    package_line "$pid"
+    memory_line "$pid"
+    cpu_line "$pid"
+    ports_line "$pid"
+    files_line "$pid"
+}
+
+show_files=0
+show_env=0
+target=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -f|--files) show_files=1 ;;
+        -e|--env)   show_env=1 ;;
+        -y|--yes)   tb_unknown "$1" ;;
+        --)         shift; (( $# )) && tb_usage_error "proc passes nothing to another tool, drop the options after --"; break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          [[ -z $target ]] || tb_usage_error "give one pid or name, not $target and $1"
+                    target=$1 ;;
+    esac
+    shift
+done
+[[ -n $target ]] || tb_usage_error "give a pid or a process name"
+
+main "$target"
+exit $?

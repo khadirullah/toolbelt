@@ -120,6 +120,7 @@ id             coreutils            coreutils            coreutils            co
 ls             coreutils            coreutils            coreutils            coreutils            coreutils
 cut            coreutils            coreutils            coreutils            coreutils            coreutils
 paccache       -                    -                    pacman-contrib       -                    -
+getent         libc-bin             glibc-common         glibc                glibc                musl-utils
 apt-get        apt                  -                    -                    -                    -
 dnf            -                    dnf                  -                    -                    -
 pacman         -                    -                    pacman               -                    -

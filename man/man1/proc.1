@@ -1,0 +1,262 @@
+.TH "PROC" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+proc \- everything about one process
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+proc [-f] [-e] PID | NAME
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBps\fR shows a line per process. To learn more about one of them you usually run five more commands. \fBpstree \-s\fR for its parents, \fBsystemctl show\fR for its unit, \fBdpkg \-S\fR for its package, \fBss \-ltnp\fR for its ports and \fBls \-l /proc/PID/fd\fR for its files. \fBproc\fR does all of that for one process and prints one line per answer.
+.TP
+pid
+What it shows: The pid and the full command line.. Where it comes from: \fB/proc/PID/cmdline\fR
+.TP
+user
+What it shows: Who runs it, when it started and how long ago.. Where it comes from: \fB/proc/PID/status\fR, \fB/proc/PID/stat\fR
+.TP
+tree
+What it shows: Every parent up to pid 1, as \fBname(pid) > name(pid)\fR.. Where it comes from: \fB/proc/PID/status\fR of each parent
+.TP
+unit
+What it shows: The systemd unit it belongs to, system or user, and whether that unit is active.. Where it comes from: \fB/proc/PID/cgroup\fR, \fBsystemctl is\-active\fR
+.TP
+package
+What it shows: The package that installed the program, with its version.. Where it comes from: \fBpkg owner\fR on \fB/proc/PID/exe\fR
+.TP
+memory
+What it shows: RSS, swap and the OOM score.. Where it comes from: \fB/proc/PID/status\fR, \fB/proc/PID/oom_score\fR
+.TP
+cpu
+What it shows: CPU use over half a second, total CPU time and the number of threads.. Where it comes from: \fB/proc/PID/stat\fR, two reads
+.TP
+ports
+What it shows: The TCP and UDP ports it listens on.. Where it comes from: \fBss \-l \-t \-u \-n \-p\fR
+.TP
+files
+What it shows: How many files it has open, and how many of those were deleted.. Where it comes from: \fB/proc/PID/fd\fR
+.PP
+The unit line matters for services. A process under \fBnginx.service\fR comes back when you kill it, because systemd restarts it. Stop the unit instead, with \fBsvc stop nginx\fR. A process under a \fB.scope\fR unit is an app you started, such as a terminal or a desktop program.
+.PP
+The package line tells you whether the program came from the distro or was installed by hand. When the program file was replaced on disk after the process started, as after an update, the line says so. The process still runs the old code until it restarts.
+.PP
+The files line counts files that were deleted while the process kept them open. Their space is only freed when the process closes them or ends. A big log file deleted under a running service is the usual reason \fBdf\fR shows a full disk that \fBdu\fR cannot explain.
+.PP
+\fBproc\fR only reads. It never signals, kills or changes a process.
+.SH FINDING THE PROCESS
+.PP
+Give a pid, or a name. For a name, \fBproc\fR tries three things in order and stops at the first that matches.
+.IP \(bu 2
+The kernel's name for the process, in \fB/proc/PID/comm\fR. The kernel cuts it to 15 characters, and \fBproc\fR cuts your name the same way, so \fBproc cinnamon\-session\-binary\fR finds \fBcinnamon\-sessio\fR.
+.IP \(bu 2
+The program name, the last part of the first word of the command line. That finds scripts, whose kernel name is \fBpython3\fR or \fBbash\fR.
+.IP \(bu 2
+Any part of the command line. That finds \fBjava \-jar app.jar\fR from \fBproc app.jar\fR.
+.PP
+When more than one process matches, \fBproc\fR lists them with their pids and exits 2, so you can pick one. It never guesses. \fBproc\fR leaves itself out of the search, and its parent shell out of the command line search, since that shell has the name in its own command line.
+.SH OPTIONS
+.TP
+\fB\-f\fR, \fB\-\-files\fR
+List every open file and socket, one per line, instead of the count.
+.TP
+\fB\-e\fR, \fB\-\-env\fR
+Show the process's environment, sorted, with secret values hidden.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the pid and the command line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each file it reads and each command it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH OPEN FILES
+.PP
+With \fB\-f\fR, each open file descriptor gets a line with its number, a type and a name.
+.TP
+\fBfile\fR
+A regular file. A deleted one ends in \fB(deleted)\fR.
+.TP
+\fBdir\fR
+A folder, such as the working folder a program keeps open.
+.TP
+\fBdev\fR
+A device, such as \fB/dev/null\fR or a disk.
+.TP
+\fBtty\fR
+A terminal.
+.TP
+\fBpipe\fR
+A pipe to another process.
+.TP
+\fBtcp\fR, \fBudp\fR
+A network socket, with its address and whether it listens or where it connects to.
+.TP
+\fBunix\fR
+A local socket, with its path. A connected socket with no path of its own shows its peer's path.
+.TP
+\fBanon\fR
+A kernel object with no file, such as \fBeventfd\fR or \fBeventpoll\fR.
+.TP
+\fBsock\fR
+A socket \fBss\fR does not know about.
+.PP
+Socket names come from \fBss \-e\fR, which shows each socket's inode, the number \fB/proc/PID/fd\fR points to.
+.SH HIDDEN VALUES
+.PP
+With \fB\-e\fR, a variable whose name contains \fBKEY\fR, \fBTOKEN\fR, \fBSECRET\fR, \fBPASS\fR, \fBAUTH\fR, \fBCREDENTIAL\fR or \fBCOOKIE\fR shows as \fB***\fR. A URL with a password in it, such as \fBpostgres://app:hunter2@db/app\fR, shows as \fBpostgres://app:***@db/app\fR. Everything else shows as it is. That makes \fB\-e\fR safe to paste into a chat, but read it once before you do, since a secret can hide under any name.
+.SH OTHER USERS' PROCESSES
+.PP
+Anyone can read most of \fB/proc\fR for any process. The open files, the environment and the ports of another user's process need root. For those \fBproc\fR prints \fBunknown, run it with sudo to see them\fR and shows the rest. With \fB\-f\fR or \fB\-e\fR it stops with a message, since there is nothing else to show.
+.SH PER\-DISTRO NOTES
+.PP
+Debian, Ubuntu, Fedora, Arch and openSUSE : Everything works. The unit line needs systemd and cgroup v2, which all of them use by default. On older releases with cgroup v1, \fBproc\fR reads the \fBname=systemd\fR line of the cgroup file instead.
+.PP
+Alpine : There is no systemd, so there is no unit line. BusyBox has no \fBss\fR, so install \fBiproute2\fR for the ports line. The package line uses \fBapk info \-W\fR.
+.PP
+Containers : A container sees only its own processes, and pid 1 is the container's first program. The tree ends there.
+.PP
+WSL : WSL 2 runs a real Linux kernel, so \fBproc\fR works. Windows programs do not show up.
+.SH NEEDS
+.PP
+\fB/proc\fR, which every Linux system has. The rest adds lines and is optional.
+.TP
+\fBss\fR
+Package: \fBiproute2\fR, or \fBiproute\fR on Fedora. Adds: The ports line, and socket names with \fB\-f\fR.
+.TP
+\fBsystemctl\fR
+Package: \fBsystemd\fR. Adds: Whether the unit is active.
+.TP
+\fBpkg\fR
+Package: this toolbelt. Adds: The package line, through dpkg, rpm, pacman or apk.
+.SH EXAMPLES
+.SS A service
+.PP
+.RS 4
+.nf
+$ proc cron
+pid      1003  /usr/sbin/cron -f
+user     root, started Sep 29 00:17, 17h ago
+tree     systemd(1) > cron(1003)
+unit     cron.service, system unit, active
+package  cron 3.0pl1-197
+memory   RSS 2.4MB, swap 152KB, oom score 666
+cpu      0.0% now, 0.1s in total, 1 thread
+ports    unknown, run it with sudo to see them
+files    unknown, run it with sudo to see them
+.fi
+.RE
+.PP
+cron runs as root, so its ports and files need \fBsudo proc cron\fR.
+.SS A user service with deleted files
+.PP
+.RS 4
+.nf
+$ proc 1449
+pid      1449  /usr/bin/pipewire
+user     test, started Sep 29 00:17, 17h ago
+tree     systemd(1) > systemd(1426) > pipewire(1449)
+unit     pipewire.service, user unit, active
+package  pipewire-bin 1.4.2-1
+memory   RSS 9MB, swap 2.9MB, oom score 800
+cpu      0.0% now, 12s in total, 3 threads
+ports    none listening
+files    54 open, 5 deleted but still open
+.fi
+.RE
+.PP
+The second \fBsystemd\fR in the tree is the user's own service manager, which starts the user units.
+.SS A name that matches several
+.PP
+.RS 4
+.nf
+$ proc pipewire
+proc: 2 processes match pipewire. Give a pid.
+    1449  /usr/bin/pipewire
+    1450  /usr/bin/pipewire -c filter-chain.conf
+$ echo $?
+2
+.fi
+.RE
+.SS Every open file and socket
+.PP
+.RS 4
+.nf
+$ proc -f 1449 | head -8
+pid 1449  /usr/bin/pipewire
+FD    TYPE  NAME
+0     dev   /dev/null
+1     unix  to /run/systemd/journal/stdout
+2     unix  to /run/systemd/journal/stdout
+3     unix  /run/user/1000/pipewire-0, listening
+4     unix  /run/user/1000/pipewire-0-manager, listening
+5     anon  [eventpoll]
+.fi
+.RE
+.PP
+Its output goes to the journal, and it listens on two sockets in \fB/run/user/1000\fR.
+.SS A program installed by hand
+.PP
+.RS 4
+.nf
+$ proc demo-worker
+pid      1745412  ./demo-worker 60
+user     test, started Sep 29 17:28, 1s ago
+tree     systemd(1) > lightdm(1007) > cinnamon(1751) > bash(587807) > demo-worker(1745412)
+unit     app-code-2115.scope, user unit, active
+package  no package, installed by hand
+memory   RSS 1.7MB, swap 0B, oom score 666
+cpu      0.0% now, 0.0s in total, 1 thread
+ports    none listening
+files    4 open
+.fi
+.RE
+.SS The environment, with secrets hidden
+.PP
+.RS 4
+.nf
+$ proc -e demo-worker | grep -E 'TOKEN|URL|LANG'
+APP_TOKEN=***
+DATABASE_URL=postgres://app:***@db:5432/app
+LANG=C.UTF-8
+.fi
+.RE
+.SS Just the command line
+.PP
+.RS 4
+.nf
+$ proc -q demo-worker
+1745412  ./demo-worker 60
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBproc: no process matches NAME\fR : No kernel name, program name or command line contains NAME. Check the spelling with \fBps \-e | grep NAME\fR. The process may have ended.
+.PP
+\fBproc: no process with pid PID\fR : The process ended, or the pid is from another machine or container. A process inside a container has a different pid on the host.
+.PP
+\fBports    unknown, run it with sudo to see them\fR : The process belongs to another user. Run \fBsudo proc NAME\fR.
+.PP
+\fBproc: cannot read the open files of PID, it belongs to root. Run it with sudo\fR : \fB\-f\fR and \fB\-e\fR need to read files only the owner and root can read.
+.PP
+The package line is missing : \fBpkg\fR found no package manager, or the program file could not be found. For a script the line names the package of its interpreter, such as \fBpython3\fR, since that is the program the kernel runs.
+.PP
+\fBpackage  unknown, the program file was replaced or deleted\fR : An update replaced the program while it ran. Restart it to run the new version. \fBsvc restart NAME\fR does that for a service.
+.PP
+The cpu line says \fB0.0% now\fR for a busy process : \fBproc\fR measures over half a second. A process that works in short bursts can be idle in that window. Run it again, or watch it with \fBtop \-p PID\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked.
+.TP
+1
+No such process, or its files or environment could not be read.
+.TP
+2
+Bad usage, or a name that matches more than one process.
+.SH SEE ALSO
+.PP
+\fBmem\fR, \fBsvc\fR, \fBpkg\fR, \fBps(1)\fR, \fBss(8)\fR, \fBproc(5)\fR
