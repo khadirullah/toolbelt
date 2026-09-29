@@ -1,0 +1,481 @@
+#!/usr/bin/env bash
+# cleanup: see what fills the disk, then clean it safely.
+set -uo pipefail
+TB_CMD=cleanup
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: cleanup [--clean] [--only ITEM[,ITEM]] [-y] [-- tool options]
+
+See what fills the disk, then clean it safely.
+
+Options:
+  --clean             run the cleans, asking before each one
+  --only ITEMS        only these items, comma separated
+  -y, --yes           do not ask before each clean
+  -q, --quiet         only the table, or only the freed line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Items:
+  journal             shrink the systemd journal to 200M
+  pkgcache            empty the package manager's download cache
+  containers          prune stopped podman and docker leftovers
+  trash               empty your trash for good
+  kernels             remove old kernels, keep the running and newest
+  thumbnails          delete cached thumbnails, they come back as needed
+
+Pass-through:
+  With --only and one item, options after -- go to its tool: journalctl,
+  the package manager, or podman and docker.
+
+Examples:
+  cleanup
+  cleanup --clean
+  cleanup --clean --only journal,thumbnails --yes
+  cleanup --clean --only containers -- --volumes
+
+Needs: du and df. journalctl, podman, docker and the package manager
+for their items, and sudo for the system ones. See man cleanup.
+Exit: 0 ok, 1 failed, 2 bad usage, 4 refused, 5 answered no.
+EOF
+}
+
+ALL_ITEMS=(journal pkgcache containers trash kernels thumbnails)
+JOURNAL_KEEP=200M
+
+# Tests point this at a fake tree with var/, boot/ and lib/modules in it.
+ROOT=${TB_ROOTFS:-}
+
+# Where the trash and the thumbnails live, and how to show them.
+trash_dir() { echo "${XDG_DATA_HOME:-$HOME/.local/share}/Trash"; }
+thumb_dir() { echo "${XDG_CACHE_HOME:-$HOME/.cache}/thumbnails"; }
+tilde() { local p=$1; [[ $p == "$HOME"/* ]] && p="~${p#"$HOME"}"; echo "$p"; }
+
+# Bytes under some paths, skipping the ones we cannot read.
+size_of() {
+    local total=0 p k
+    for p in "$@"; do
+        [[ -e $p ]] || continue
+        k=$(du -sk -- "$p" 2>/dev/null | awk '{ print $1; exit }')
+        total=$(( total + ${k:-0} * 1024 ))
+    done
+    echo "$total"
+}
+
+# "2.1GB (45%)" or "512.3kB" from podman or docker, which count in 1000s.
+decimal_bytes() {
+    awk '{
+        s = $1; n = s + 0; u = s; sub(/^[0-9.]+/, "", u); u = toupper(u)
+        m = 1
+        if (u ~ /^K/) m = 1e3; else if (u ~ /^M/) m = 1e6; else if (u ~ /^G/) m = 1e9; else if (u ~ /^T/) m = 1e12
+        t += n * m
+    } END { printf "%.0f\n", t }'
+}
+
+# sudo in front of a command for the system, unless we are root.
+need_sudo() {
+    SUDO=()
+    (( EUID == 0 )) && return 0
+    tb_need sudo
+    SUDO=(sudo)
+}
+
+# ---------------------------------------------------------------- items
+# Each measure_ function sets SIZE, WHAT and SKIP (a reason, when the item
+# does not apply). Each clean_ function runs the clean and returns its code.
+
+measure_journal() {
+    local out
+    tb_has journalctl || { SKIP="journalctl is not installed"; return; }
+    tb_show journalctl --disk-usage
+    out=$(journalctl --disk-usage 2>/dev/null)
+    if [[ $out =~ up\ ([0-9.]+[BKMGT]?) ]]; then
+        SIZE=$(tb_parse_size "${BASH_REMATCH[1]}") || SIZE=0
+    else
+        SKIP="journalctl did not say how big the journal is"
+        return
+    fi
+    if (( SIZE <= $(tb_parse_size "$JOURNAL_KEEP") )); then
+        WHAT="under $JOURNAL_KEEP already, nothing to do"
+        NOTHING=1
+    else
+        WHAT="journalctl --vacuum-size=$JOURNAL_KEEP"
+    fi
+    QUESTION="Shrink the journal to $JOURNAL_KEEP?"
+}
+
+clean_journal() {
+    need_sudo
+    tb_run "${SUDO[@]}" journalctl --vacuum-size="$JOURNAL_KEEP" ${TB_PASS[@]+"${TB_PASS[@]}"} >&2
+}
+
+# The package cache folders and the clean command, per package manager.
+pkgcache_cmds() {
+    PC_DIRS=() PC_CMD=()
+    case $(tb_pm) in
+        apt)    PC_DIRS=("$ROOT/var/cache/apt/archives"); PC_CMD=(apt-get clean) ;;
+        dnf)    PC_DIRS=("$ROOT/var/cache/dnf" "$ROOT/var/cache/libdnf5")
+                if tb_has dnf; then PC_CMD=(dnf clean packages); else PC_CMD=(yum clean packages); fi ;;
+        pacman) PC_DIRS=("$ROOT/var/cache/pacman/pkg")
+                if tb_has paccache; then PC_CMD=(paccache -rk1); else PC_CMD=(pacman -Sc --noconfirm); fi ;;
+        zypper) PC_DIRS=("$ROOT/var/cache/zypp/packages"); PC_CMD=(zypper clean) ;;
+        apk)    PC_DIRS=("$ROOT/var/cache/apk"); PC_CMD=(apk cache clean) ;;
+        *)      return 1 ;;
+    esac
+}
+
+measure_pkgcache() {
+    pkgcache_cmds || { SKIP="no known package manager"; return; }
+    tb_show du -sk "${PC_DIRS[@]}"
+    SIZE=$(size_of "${PC_DIRS[@]}")
+    WHAT="${PC_CMD[*]}"
+    (( SIZE > 0 )) || { WHAT="empty, nothing to do"; NOTHING=1; }
+    QUESTION="Clean the ${PC_CMD[0]} package cache?"
+}
+
+clean_pkgcache() {
+    pkgcache_cmds
+    need_sudo
+    tb_run "${SUDO[@]}" "${PC_CMD[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} >&2
+}
+
+# podman and docker, each when it is installed and answers.
+container_engines() {
+    ENGINES=() ENGINE_NOTES=()
+    local e
+    for e in podman docker; do
+        if ! tb_has "$e"; then
+            ENGINE_NOTES+=("$e is not installed")
+            continue
+        fi
+        tb_show "$e" system df --format '{{.Reclaimable}}'
+        if "$e" system df --format '{{.Reclaimable}}' >/dev/null 2>&1; then
+            ENGINES+=("$e")
+        else
+            ENGINE_NOTES+=("$e is not reachable")
+        fi
+    done
+}
+
+measure_containers() {
+    local e b what=""
+    container_engines
+    if (( ${#ENGINES[@]} == 0 )); then
+        SKIP="podman and docker are not installed or not reachable"
+        return
+    fi
+    for e in "${ENGINES[@]}"; do
+        b=$("$e" system df --format '{{.Reclaimable}}' 2>/dev/null | decimal_bytes)
+        SIZE=$(( SIZE + ${b:-0} ))
+        what+=", $e system prune"
+    done
+    for e in ${ENGINE_NOTES[@]+"${ENGINE_NOTES[@]}"}; do
+        what+=", $e"
+    done
+    WHAT=${what#, }
+    (( SIZE > 0 )) || { WHAT="nothing to reclaim, nothing to do"; NOTHING=1; }
+    QUESTION="Remove stopped containers, unused networks, dangling images and build cache?"
+}
+
+clean_containers() {
+    local e rc=0
+    container_engines
+    for e in "${ENGINES[@]}"; do
+        tb_run "$e" system prune -f ${TB_PASS[@]+"${TB_PASS[@]}"} >&2 || rc=$?
+    done
+    return "$rc"
+}
+
+measure_trash() {
+    local t n
+    t=$(trash_dir)
+    [[ -d $t ]] || { WHAT="no trash folder, nothing to do"; NOTHING=1; return; }
+    SIZE=$(size_of "$t/files" "$t/info" "$t/expunged")
+    n=$(find "$t/files" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+    local files="$(tb_commas "$n") file"
+    (( n == 1 )) || files+=s
+    WHAT="empties $(tilde "$t"), $files"
+    (( n > 0 )) || { WHAT="empty, nothing to do"; NOTHING=1; SIZE=0; }
+    QUESTION="Empty the trash for good, $files?"
+}
+
+# Emptying the trash cannot go to the trash, so this is a real delete.
+clean_trash() {
+    local t d
+    t=$(trash_dir)
+    for d in files info expunged; do
+        [[ -d $t/$d ]] || continue
+        tb_show find "$t/$d" -mindepth 1 -maxdepth 1 -exec rm -rf -- '{}' +
+        find "$t/$d" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
+    done
+    rm -f -- "$t/directorysizes"
+}
+
+# The installed kernels, oldest first, in KERNELS. Returns 1 when this
+# distro keeps one kernel per package and there is nothing to choose.
+kernel_list() {
+    local line
+    KERNELS=()
+    case $(tb_pm) in
+        apt)
+            tb_has dpkg-query || return 1
+            while read -r line; do
+                KERNELS+=("${line#linux-image-}")
+            done < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'linux-image-[0-9]*' 2>/dev/null |
+                awk '$1 == "ii" { print $2 }' | sort -V) ;;
+        dnf)
+            tb_has rpm || return 1
+            local pkg=kernel-core
+            rpm -q kernel-core >/dev/null 2>&1 || pkg=kernel
+            while read -r line; do
+                KERNELS+=("${line#"$pkg"-}")
+            done < <(rpm -q "$pkg" 2>/dev/null | grep -v 'not installed' | sort -V) ;;
+        zypper)
+            while read -r line; do
+                KERNELS+=("$line")
+            done < <(ls -1 "$ROOT/lib/modules" 2>/dev/null | sort -V) ;;
+        pacman|apk) return 2 ;;
+        *) return 1 ;;
+    esac
+}
+
+measure_kernels() {
+    local running newest k old=() paths=()
+    running=$(uname -r)
+    kernel_list
+    case $? in
+        1) SKIP="cannot list the installed kernels"; return ;;
+        2) WHAT="$(tb_pm) keeps one kernel per package, nothing to do"; NOTHING=1; return ;;
+    esac
+    local have_running=0
+    for k in ${KERNELS[@]+"${KERNELS[@]}"}; do
+        [[ $k == "$running" ]] && have_running=1
+    done
+    # In a container uname shows the host's kernel. Leave kernels alone then.
+    if (( ! have_running )); then
+        SKIP="the running kernel $running is not installed here, so kernels are left alone"
+        return
+    fi
+    newest=${KERNELS[-1]}
+    for k in "${KERNELS[@]}"; do
+        [[ $k == "$running" || $k == "$newest" ]] && continue
+        old+=("$k")
+        paths+=("$ROOT/lib/modules/$k" "$ROOT"/boot/*-"$k" "$ROOT"/boot/*-"$k".img)
+    done
+    OLD_KERNELS=(${old[@]+"${old[@]}"})
+    local keep="$running (running)"
+    [[ $newest != "$running" ]] && keep+=", $newest"
+    if (( ${#old[@]} == 0 )); then
+        WHAT="keeps $keep, nothing to do"
+        NOTHING=1
+        return
+    fi
+    SIZE=$(size_of "${paths[@]}")
+    local list=${old[0]}
+    (( ${#old[@]} > 1 )) && list="$(IFS=,; echo "${old[*]:0:${#old[@]}-1}" | sed 's/,/, /g') and ${old[-1]}"
+    WHAT="removes $list, keeps $keep"
+    QUESTION="Remove kernel $list? $running is running."
+}
+
+clean_kernels() {
+    local k pkgs=()
+    need_sudo
+    case $(tb_pm) in
+        apt)
+            for k in "${OLD_KERNELS[@]}"; do pkgs+=("linux-image-$k"); done
+            tb_run "${SUDO[@]}" apt-get purge -y ${TB_PASS[@]+"${TB_PASS[@]}"} "${pkgs[@]}" >&2 ;;
+        dnf)
+            for k in "${OLD_KERNELS[@]}"; do pkgs+=("kernel-core-$k"); done
+            local dnf=dnf
+            tb_has dnf || dnf=yum
+            tb_run "${SUDO[@]}" "$dnf" remove -y ${TB_PASS[@]+"${TB_PASS[@]}"} "${pkgs[@]}" >&2 ;;
+        zypper)
+            tb_run "${SUDO[@]}" zypper --non-interactive purge-kernels ${TB_PASS[@]+"${TB_PASS[@]}"} >&2 ;;
+    esac
+}
+
+measure_thumbnails() {
+    local t
+    t=$(thumb_dir)
+    SIZE=$(size_of "$t")
+    WHAT="rm -r $(tilde "$t")/*"
+    (( SIZE > 0 )) && [[ -n $(ls -A "$t" 2>/dev/null) ]] || { WHAT="empty, nothing to do"; NOTHING=1; SIZE=0; }
+    QUESTION="Delete cached thumbnails? They come back as needed."
+}
+
+# Thumbnails are a cache the desktop rebuilds, so they are deleted, not
+# moved to the trash, which would free nothing.
+clean_thumbnails() {
+    local t
+    t=$(thumb_dir)
+    tb_show find "$t" -mindepth 1 -maxdepth 1 -exec rm -rf -- '{}' +
+    find "$t" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+}
+
+# ---------------------------------------------------------------- main
+
+measure() {
+    SIZE=0 WHAT="" SKIP="" QUESTION="" NOTHING=0
+    tb_say "measuring $1"
+    "measure_$1"
+}
+
+# "/ is ext4, 48GB, 43GB used, 4GB free (95%)"
+disk_header() {
+    local line size used avail pct fstype="" mnt t
+    line=$(df -Pk "$ROOT/" 2>/dev/null | awk 'NR == 2 { print $2, $3, $4, $5 }')
+    [[ -n $line ]] || return 0
+    read -r size used avail pct <<<"$line"
+    if [[ -r $ROOT/proc/mounts ]]; then
+        while read -r _ mnt t _; do
+            [[ $mnt == / ]] && fstype=$t
+        done <"$ROOT/proc/mounts"
+    fi
+    echo "/ is ${fstype:+$fstype, }$(tb_human $(( size * 1024 ))), $(tb_human $(( used * 1024 ))) used, $(tb_human $(( avail * 1024 ))) free ($pct)"
+}
+
+free_now() {
+    local k
+    k=$(tb_free_kb "$ROOT/")
+    tb_human $(( ${k:-0} * 1024 ))
+}
+
+# The biggest folders straight under your home.
+home_folders() {
+    tb_show du -x -k -d 1 "$HOME"
+    du -x -k -d 1 -- "$HOME" 2>/dev/null | sort -nr | awk -F '\t' -v h="$HOME" '$2 != h' | head -n 4 |
+        while IFS=$'\t' read -r k p; do
+            printf '%6s  %s\n' "$(tb_human $(( k * 1024 )))" "${p#"$HOME"/}"
+        done
+}
+
+report() {
+    local item total=0 size
+    if (( ! TB_QUIET )); then
+        disk_header
+        echo
+    fi
+    printf '%-10s %6s  %s\n' ITEM SIZE "WHAT --clean DOES"
+    for item in "${items[@]}"; do
+        measure "$item"
+        if [[ -n $SKIP ]]; then
+            printf '%-10s %6s  %s\n' "$item" - "skipped, $SKIP"
+            continue
+        fi
+        size=$(tb_human "$SIZE")
+        printf '%-10s %6s  %s\n' "$item" "$size" "$WHAT"
+        (( NOTHING )) || total=$(( total + SIZE ))
+    done
+    printf '%-10s %6s  %s\n' total "$(tb_human "$total")" "nothing changed. Run cleanup --clean to choose."
+    if (( ! TB_QUIET )) && [[ -d $HOME ]]; then
+        echo
+        echo "largest folders in $HOME"
+        home_folders
+    fi
+}
+
+clean() {
+    local item before freed total_freed=0 total_seen=0 asked=0 yes=0 failed=0 rc lead
+    if (( ! TB_YES )) && ! tb_is_tty; then
+        tb_die "$E_SAFE" "not asking without a terminal, pass --yes to go ahead"
+    fi
+    for item in "${items[@]}"; do
+        measure "$item"
+        if [[ -n $SKIP ]] || (( NOTHING )); then
+            [[ -n $only ]] && printf '%-11s %s\n' "$item" "${SKIP:+skipped, }${SKIP:-$WHAT}"
+            continue
+        fi
+        before=$SIZE
+        total_seen=$(( total_seen + before ))
+        # "journal     freed 1.7GB" with --yes, the result under the question without.
+        lead=$(printf '%-11s ' "$item")
+        if (( ! TB_YES )); then
+            ((asked++))
+            if ! tb_ask "$(printf '%-11s %-5s %s' "$item" "$(tb_human "$before")" "$QUESTION")"; then
+                (( TB_QUIET )) || printf '%12s%s\n' "" skipped
+                continue
+            fi
+            lead=$(printf '%12s' "")
+        fi
+        ((yes++))
+        "clean_$item"
+        rc=$?
+        if (( rc != 0 )); then
+            printf '%s%s\n' "$lead" "failed with exit $rc, see its message above" >&2
+            failed=1
+            continue
+        fi
+        measure "$item"
+        freed=$(( before - SIZE ))
+        (( freed < 0 )) && freed=0
+        total_freed=$(( total_freed + freed ))
+        (( TB_QUIET )) || printf '%s%s\n' "$lead" "freed $(tb_human "$freed")"
+    done
+    if (( total_seen == 0 )); then
+        echo "cleanup: nothing to clean."
+        return 0
+    fi
+    if (( asked > 0 && yes == 0 )); then
+        tb_info "Nothing changed."
+        exit "$E_NO"
+    fi
+    if (( TB_YES )); then
+        echo "cleanup: freed $(tb_human "$total_freed"). / now has $(free_now) free."
+    else
+        echo "cleanup: freed $(tb_human "$total_freed") of $(tb_human "$total_seen"). / now has $(free_now) free."
+    fi
+    return "$failed"
+}
+
+main() {
+    local i
+    tb_need du df
+    if [[ -n $only ]]; then
+        items=()
+        IFS=, read -r -a picked <<<"$only"
+        for i in "${picked[@]}"; do
+            [[ " ${ALL_ITEMS[*]} " == *" $i "* ]] ||
+                tb_usage_error "unknown item $i. Use journal, pkgcache, containers, trash, kernels or thumbnails."
+        done
+        # Keep the usual order, whatever order they were named in.
+        for i in "${ALL_ITEMS[@]}"; do
+            [[ ,$only, == *",$i,"* ]] && items+=("$i")
+        done
+    else
+        items=("${ALL_ITEMS[@]}")
+    fi
+    if (( ${#TB_PASS[@]} )); then
+        (( ${#items[@]} == 1 )) && [[ -n $only ]] ||
+            tb_usage_error "options after -- need --only with one item, so they go to one tool"
+        case ${items[0]} in
+            trash|thumbnails) tb_usage_error "${items[0]} has no tool to pass options to" ;;
+        esac
+    fi
+    if (( do_clean )); then
+        clean
+    else
+        report
+    fi
+}
+
+do_clean=0
+only=""
+items=()
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --clean) do_clean=1 ;;
+        --only)  tb_optarg "$@"; only=${2// /}; shift ;;
+        --)      shift; TB_PASS=("$@"); break ;;
+        -*)      tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)       tb_usage_error "cleanup takes no arguments, not $1. Name items with --only" ;;
+    esac
+    shift
+done
+
+main
+exit $?

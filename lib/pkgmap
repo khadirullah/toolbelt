@@ -115,6 +115,7 @@ date           coreutils            coreutils            coreutils            co
 id             coreutils            coreutils            coreutils            coreutils            coreutils
 ls             coreutils            coreutils            coreutils            coreutils            coreutils
 cut            coreutils            coreutils            coreutils            coreutils            coreutils
+paccache       -                    -                    pacman-contrib       -                    -
 apt-get        apt                  -                    -                    -                    -
 dnf            -                    dnf                  -                    -                    -
 pacman         -                    -                    pacman               -                    -
