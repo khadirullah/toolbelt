@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# recent: list the files changed lately, newest first.
+set -uo pipefail
+TB_CMD=recent
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: recent [options] [time] [path ...] [-- find tests]
+
+List the files changed lately, newest first.
+
+Options:
+  --since WHEN        changed since a time or a date, such as 2026-09-01
+  -n, --count N       show N entries, 50 by default
+  -a, --all           include hidden files and folders, .git and the trash
+  -t, --type f|d      files, the default, or folders
+  --only PATTERN      only names that match, such as '*.conf', can repeat
+  -x, --exclude PAT   leave out names that match, can repeat
+  -q, --quiet         only the list
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+The time is 30m, 2h, 3d or 1w, and 1h by default.
+
+Pass-through:
+  Options after -- go to find as extra tests, such as -size +10M.
+
+Examples:
+  recent
+  recent 2d ~/projects
+  recent --since 2026-09-01 -n 10
+  sudo recent 30m /etc
+  recent 1d /var/log -- -size +10M
+
+Needs: find, stat and sort. See man recent.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused.
+EOF
+}
+
+# A time such as 30m, 2h, 3d or 1w as seconds. Returns 1 when it is not one.
+parse_span() {
+    [[ $1 =~ ^([0-9]+)([smhdw]?)$ ]] || return 1
+    local n=$((10#${BASH_REMATCH[1]})) mult=60
+    case ${BASH_REMATCH[2]} in
+        s) mult=1 ;; m|"") mult=60 ;; h) mult=3600 ;; d) mult=86400 ;; w) mult=604800 ;;
+    esac
+    (( n > 0 )) || return 1
+    echo $(( n * mult ))
+}
+
+# True when text looks like a time or a date rather than a path.
+looks_like_time() {
+    [[ $1 =~ ^[0-9]+[A-Za-z]*$ || $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]
+}
+
+# Set SINCE (epoch seconds) and SINCE_TEXT from a span or a date.
+set_since() {
+    local t=$1 secs
+    if secs=$(parse_span "$t"); then
+        SINCE=$(( now - secs ))
+        SINCE_TEXT="in the last $t"
+    elif [[ ! $t =~ ^[0-9]+[A-Za-z]+$ ]] && secs=$(date -d "$t" +%s 2>/dev/null); then
+        SINCE=$secs
+        SINCE_TEXT="since $t"
+    else
+        tb_usage_error "$t is not a time. Use 10m, 2h, 3d, 1w or a date such as 2026-09-28"
+    fi
+    (( SINCE <= now )) || tb_usage_error "$t is in the future"
+}
+
+# find actions that could change files have no place in a listing.
+check_pass() {
+    local a
+    for a in ${TB_PASS[@]+"${TB_PASS[@]}"}; do
+        case $a in
+            -delete|-exec|-execdir|-ok|-okdir|-fprint|-fprint0|-fprintf|-fls)
+                tb_die "$E_SAFE" "refused, $a after -- would act on files, and recent only lists them" ;;
+        esac
+    done
+}
+
+# The -name and -path tests for a list of patterns, joined with -o.
+name_tests() {
+    local pat first=1
+    NAME_TESTS=()
+    for pat in "$@"; do
+        (( first )) || NAME_TESTS+=(-o)
+        first=0
+        if [[ $pat == */* ]]; then NAME_TESTS+=(-path "$pat"); else NAME_TESTS+=(-name "$pat"); fi
+    done
+}
+
+# Print "mtime size path" for every match under one path, unsorted.
+scan() {
+    local p=$1 args=(-P "$p") skip=() mins trash
+    trash=${XDG_DATA_HOME:-$HOME/.local/share}/Trash
+    # find -mmin is whole minutes, so ask for one more and cut exactly later.
+    mins=$(( (now - SINCE) / 60 + 2 ))
+    [[ -d $p ]] && args+=(-mindepth 1)
+    args+=(-xdev)
+    skip=(-path /proc -o -path /sys)
+    if (( ! all )); then
+        skip+=(-o -name '.*' -o -name node_modules -o -path "$trash")
+    fi
+    if (( ${#excludes[@]} )); then
+        name_tests "${excludes[@]}"
+        skip+=(-o "${NAME_TESTS[@]}")
+    fi
+    args+=( \( "${skip[@]}" \) -prune -o -type "$type" -mmin "-$mins")
+    if (( ${#onlys[@]} )); then
+        name_tests "${onlys[@]}"
+        args+=( \( "${NAME_TESTS[@]}" \) )
+    fi
+    args+=(${TB_PASS[@]+"${TB_PASS[@]}"} -exec stat -c '%Y %s %n' -- {} +)
+    tb_show find "${args[@]}"
+    find "${args[@]}" 2>>"$errf"
+}
+
+# The clock time of a change: 14:31 when the window starts today, and
+# 09-28 20:15 when it reaches back further.
+clock() {
+    if (( today )); then date -d "@$1" +%H:%M; else date -d "@$1" '+%m-%d %H:%M'; fi
+}
+
+main() {
+    local p mt size path shown=0 total=0 what word
+    (( ${#paths[@]} )) || paths=(.)
+    for p in "${paths[@]}"; do
+        [[ -e $p ]] || tb_die 1 "$p: no such file or folder"
+    done
+    check_pass
+    tb_need find stat sort
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    errf=$work/errors
+    : > "$errf"
+    today=0
+    [[ $(date -d "@$SINCE" +%F) == $(date -d "@$now" +%F) ]] && today=1
+    what=file
+    [[ $type == d ]] && what=folder
+    tb_say "looking for ${what}s changed since $(date -d "@$SINCE" '+%F %H:%M:%S')"
+    tb_line "looking in ${paths[*]}"
+    for p in "${paths[@]}"; do
+        scan "$p"
+    done | awk -v s="$SINCE" '$1 >= s' | sort -k1,1nr > "$work/list"
+    tb_line_end
+    total=$(wc -l < "$work/list")
+    while read -r mt size path; do
+        (( shown >= count )) && break
+        path=${path#./}
+        printf '%s  %7s  %7s  %s\n' "$(clock "$mt")" "$(tb_age $(( now - mt ))) ago" "$(tb_human "$size")" "$path"
+        ((shown++))
+    done < "$work/list"
+    if [[ -s $errf ]]; then
+        tb_info "recent: could not read $(tb_plural "$(wc -l <"$errf")" path), run it with sudo to include them"
+    fi
+    word=$(tb_plural "$total" "$what")
+    if (( total == 0 )); then
+        echo "No ${what}s changed $SINCE_TEXT."
+    elif (( shown < total )); then
+        echo "$shown of $word changed $SINCE_TEXT, use -n for more"
+    else
+        echo "$word changed $SINCE_TEXT"
+    fi
+    return 0
+}
+
+paths=()
+onlys=()
+excludes=()
+count=50
+all=0
+type=f
+since_arg=""
+now=$(date +%s)
+tb_expand "ntx" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --since)      tb_optarg "$@"; since_arg=$2; shift ;;
+        -n|--count)   tb_optarg "$@"; count=$2; shift
+                      [[ $count =~ ^[0-9]+$ ]] && (( count >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                      ;;
+        -a|--all)     all=1 ;;
+        -t|--type)    tb_optarg "$@"; type=$2; shift
+                      [[ $type == f || $type == d ]] || tb_usage_error "--type is f for files or d for folders, not $type"
+                      ;;
+        --only)       tb_optarg "$@"; onlys+=("$2"); shift ;;
+        -x|--exclude) tb_optarg "$@"; excludes+=("$2"); shift ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            # The first word that looks like a time, and is not a
+                      # file of that name, is the time.
+                      if [[ -z $since_arg && ${#paths[@]} -eq 0 && ! -e $1 ]] && looks_like_time "$1"; then
+                          since_arg=$1
+                      else
+                          paths+=("$1")
+                      fi
+                      ;;
+    esac
+    shift
+done
+
+set_since "${since_arg:-1h}"
+main
+exit $?

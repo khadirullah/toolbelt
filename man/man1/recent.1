@@ -1,0 +1,241 @@
+.TH "RECENT" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+recent \- list the files changed lately, newest first
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+recent [options] [time] [path ...] [-- find tests]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBrecent\fR answers the question "what did I just touch?" It lists the files under a folder that changed in the last hour, newest first, with the clock time, the age, the size and the path. With no path it looks in the current folder.
+.PP
+.RS 4
+.nf
+17:10   3m ago     360B  src/app.py
+17:01  12m ago     600B  tests/test_app.py
+16:44  29m ago    1.3KB  README.md
+16:27  46m ago     600B  pyproject.toml
+4 files changed in the last 1h
+.fi
+.RE
+.PP
+The time can be any window. \fBrecent 30m\fR looks back 30 minutes, \fBrecent 2d\fR two days. \fB\-\-since\fR takes a date or a time of day instead, such as \fB\-\-since 2026\-09\-01\fR or \fB\-\-since "yesterday 18:00"\fR.
+.PP
+The clock time shows only the hour and minute when the whole window falls on today. When the window reaches back into an earlier day, every line shows the month and day too, as in \fB09\-28 20:15\fR.
+.PP
+"Changed" means the content changed. \fBrecent\fR reads the modification time, the one \fBls \-l\fR shows. Reading a file does not count, and neither does a change of owner or permissions.
+.PP
+\fBrecent\fR only reads. It never deletes, moves or changes a file.
+.SH OPTIONS
+.TP
+\fBtime\fR
+How far back to look, as a number and a unit. The default is \fB1h\fR.
+.TP
+\fB\-\-since WHEN\fR
+Look back to a date or a time, anything \fBdate \-d\fR understands, such as \fB2026\-09\-01\fR, \fB"2026\-09\-01 14:00"\fR or \fByesterday\fR. A window such as \fB3d\fR works here too.
+.TP
+\fB\-n\fR, \fB\-\-count N\fR
+Show at most N entries. The default is 50. The last line says how many there were in all.
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Include hidden files and folders, \fB.git\fR, \fBnode_modules\fR, \fB.cache\fR and the trash.
+.TP
+\fB\-t\fR, `\-\-type f\e
+d`
+.TP
+\fB\-\-only PATTERN\fR
+Show only names that match, such as \fB'*.conf'\fR. Can repeat.
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave out names that match. A folder that matches is skipped whole. Can repeat.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the list and the summary line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show the start of the window and the \fBfind\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+A pattern without a \fB/\fR matches a name, the way \fBfind \-name\fR does. A pattern with a \fB/\fR matches the whole path, the way \fBfind \-path\fR does. Quote patterns that hold \fB*\fR, so the shell does not expand them first.
+.SH TIMES
+.TP
+\fB45s\fR
+the last 45 seconds
+.TP
+\fB30m\fR or \fB30\fR
+the last 30 minutes
+.TP
+\fB2h\fR
+the last 2 hours
+.TP
+\fB3d\fR
+the last 3 days
+.TP
+\fB1w\fR
+the last 7 days
+.TP
+\fB2026\-09\-28\fR
+since midnight at the start of that day
+.PP
+A bare number counts minutes. A date as the first word works like \fB\-\-since\fR.
+.PP
+The first word that looks like a time is the time, unless a file or folder of that name exists. When you have a folder called \fB2d\fR, \fBrecent 2d\fR lists what changed inside it in the last hour. Write \fBrecent 1h 2d\fR or \fBrecent \-\-since 2d 2d\fR to mean both.
+.SH WHAT IT SKIPS
+.PP
+By default \fBrecent\fR leaves out:
+.IP \(bu 2
+Every hidden file and folder, whose name starts with a dot. That covers \fB.git\fR, \fB.cache\fR, \fB.venv\fR, \fB.local\fR and the rest.
+.IP \(bu 2
+\fBnode_modules\fR.
+.IP \(bu 2
+Your trash, \fB~/.local/share/Trash\fR, even when you run \fBrecent\fR on \fB~/.local/share\fR.
+.PP
+A build or a \fBgit pull\fR rewrites hundreds of files in those places, and they would push your own edits off the list. \fB\-a\fR brings them all back.
+.PP
+\fBrecent\fR also stays on one filesystem. \fBrecent /\fR looks at your root filesystem and skips \fB/home\fR when that is a separate partition, along with USB drives and network shares. \fB/proc\fR and \fB/sys\fR are always skipped. They hold no real files.
+.SH SAFETY CHECKS
+.IP \(bu 2
+\fBrecent\fR never changes anything.
+.IP \(bu 2
+It never follows symlinks.
+.IP \(bu 2
+Options after \fB\-\-\fR go to \fBfind\fR as extra tests. The ones that act on files, \fB\-delete\fR, \fB\-exec\fR, \fB\-execdir\fR, \fB\-ok\fR, \fB\-okdir\fR, \fB\-fprint\fR, \fB\-fprint0\fR, \fB\-fprintf\fR and \fB\-fls\fR, are refused with exit 4.
+.IP \(bu 2
+Folders you cannot read are skipped. At the end, \fBrecent\fR says how many it could not read, so a short list is never a silent one.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBfind\fR as extra tests. This lists files in \fB/var/log\fR that changed today and are over 10 MB:
+.PP
+.RS 4
+.nf
+$ recent 1d /var/log -- -size +10M
+.fi
+.RE
+.PP
+Other useful tests are \fB\-user www\-data\fR, \fB\-perm \-o+w\fR and \fB\-newer file\fR.
+.SH NEEDS
+.PP
+\fBfind\fR, \fBstat\fR and \fBsort\fR, from findutils and coreutils, plus \fBdate\fR and \fBawk\fR. Every distro ships them, and BusyBox has them too. BusyBox \fBdate \-d\fR reads fewer date formats than GNU date, so on Alpine use plain dates such as \fB2026\-09\-01\fR or \fB"2026\-09\-01 14:00"\fR with \fB\-\-since\fR.
+.SH EXAMPLES
+.SS What changed in the last hour
+.PP
+.RS 4
+.nf
+$ recent
+17:10   3m ago     360B  src/app.py
+17:01  12m ago     600B  tests/test_app.py
+16:44  29m ago    1.3KB  README.md
+16:27  46m ago     600B  pyproject.toml
+4 files changed in the last 1h
+.fi
+.RE
+.SS Hidden files too
+.PP
+.RS 4
+.nf
+$ recent -a 4h
+17:10   3m ago     360B  src/app.py
+17:01  12m ago     600B  tests/test_app.py
+16:44  29m ago    1.3KB  README.md
+16:27  46m ago     600B  pyproject.toml
+14:13   3h ago       1B  .git/index
+5 files changed in the last 4h
+.fi
+.RE
+.SS A longer window, with the command it runs
+.PP
+.RS 4
+.nf
+$ recent -v 2d
+recent: looking for files changed since 2026-09-27 17:13:23
++ find -P . -mindepth 1 -xdev '(' -path /proc -o -path /sys -o -name '.*' -o -name node_modules -o -path /home/me/.local/share/Trash ')' -prune -o -type f -mmin -2882 -exec stat -c '%Y %s %n' -- '{}' +
+09-29 17:10   3m ago     360B  src/app.py
+09-29 17:01  12m ago     600B  tests/test_app.py
+09-29 16:44  29m ago    1.3KB  README.md
+09-29 16:27  46m ago     600B  pyproject.toml
+4 files changed in the last 2d
+.fi
+.RE
+.SS Only a few
+.PP
+.RS 4
+.nf
+$ recent -n 2
+17:10   3m ago     360B  src/app.py
+17:01  12m ago     600B  tests/test_app.py
+2 of 4 files changed in the last 1h, use -n for more
+.fi
+.RE
+.SS What changed in /etc after an upgrade
+.PP
+.RS 4
+.nf
+$ sudo recent 30m /etc
+15:02   4m ago     44KB  ld.so.cache
+15:01   5m ago      98B  apt/sources.list.d/debian.sources
+15:01   5m ago      31B  ssh/sshd_config.d/50-cloud-init.conf
+3 files changed in the last 30m
+.fi
+.RE
+.SS Folders that gained or lost files
+.PP
+.RS 4
+.nf
+$ recent --since 2026-09-01 -t d
+09-27 17:13   2d ago      60B  src
+09-27 17:13   2d ago      60B  tests
+2 folders changed since 2026-09-01
+.fi
+.RE
+.PP
+A folder's time changes when a name inside it is added, removed or renamed. Editing a file inside does not change it.
+.SS Only Python, without the tests
+.PP
+.RS 4
+.nf
+$ recent --only '*.py' -x tests
+17:10   3m ago     360B  src/app.py
+1 file changed in the last 1h
+.fi
+.RE
+.SS Nothing new
+.PP
+.RS 4
+.nf
+$ recent 5s
+No files changed in the last 5s.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBrecent: 2x is not a time. Use 10m, 2h, 3d, 1w or a date such as 2026\-09\-28\fR : The first word looked like a time but was not one. Use a number and one of \fBs\fR, \fBm\fR, \fBh\fR, \fBd\fR or \fBw\fR.
+.PP
+\fBrecent: could not read 3 paths, run it with sudo to include them\fR : Some folders belong to root or another user. Run \fBsudo recent\fR for system folders such as \fB/etc\fR or \fB/var\fR.
+.PP
+A file I just saved is missing : It may sit in a hidden folder, or in a folder a pattern skipped. Try \fBrecent \-a\fR. Some editors also keep the old time when they save, and some copy tools such as \fBcp \-p\fR and \fBrsync \-a\fR keep the time of the original.
+.PP
+A file shows up with an age of \fB0s\fR but I did not touch it : Its time is in the future, for example a file unpacked from an archive made on a machine with a wrong clock. \fBrecent\fR counts a future time as now.
+.SH EXIT STATUS
+.TP
+0
+It worked, including when nothing changed.
+.TP
+1
+It failed, for example a path does not exist.
+.TP
+2
+Bad usage, such as a time it cannot read or \fB\-n 0\fR.
+.TP
+3
+\fBfind\fR, \fBstat\fR or \fBsort\fR is missing.
+.TP
+4
+Refused. An action such as \fB\-delete\fR after \fB\-\-\fR.
+.SH SEE ALSO
+.PP
+\fBbigfiles\fR, \fBfind(1)\fR, \fBstat(1)\fR
