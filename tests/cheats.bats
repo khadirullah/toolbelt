@@ -83,14 +83,14 @@ urls() { cat "$BATS_TEST_TMPDIR/urls" 2>/dev/null; }
     cheats tar
     run cheats -u tar
     [ "$(urls | wc -l)" -eq 2 ]
-    touch -d '40 days ago' "$CACHE/tar"
+    touch -d "$(tb_ago 3456000)" "$CACHE/tar"
     run cheats tar
     [ "$(urls | wc -l)" -eq 3 ]
 }
 
 @test "an old page is still shown when the network is down" {
     cheats tar
-    touch -d '40 days ago' "$CACHE/tar"
+    touch -d "$(tb_ago 3456000)" "$CACHE/tar"
     MODE=down run cheats tar
     [ "$status" -eq 0 ]
     [[ $output == *"tar -czf"* ]]

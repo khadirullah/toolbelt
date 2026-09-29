@@ -10,7 +10,7 @@ setup() {
     head -c 20480 /dev/zero > dl/debian.iso
     head -c 8192 /dev/zero > 'my docs/tax 2025.pdf'
     printf 'hi\n' > small.txt
-    touch -d '10 days ago' dl/debian.iso
+    touch -d "$(tb_ago 864000)" dl/debian.iso
 }
 
 @test "help prints usage and exits 0" {

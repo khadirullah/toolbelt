@@ -14,12 +14,12 @@ setup() {
     printf 'js\n' > node_modules/pkg/index.js
     printf 'c\n' > .cache/blob
     printf 'h\n' > .hidden
-    touch -d '5 minutes ago' src/app.py .git/HEAD node_modules/pkg/index.js .cache/blob .hidden
-    touch -d '20 minutes ago' tests/test_app.py
-    touch -d '40 minutes ago' README.md
-    touch -d '3 days ago' old.txt
+    touch -d "$(tb_ago 300)" src/app.py .git/HEAD node_modules/pkg/index.js .cache/blob .hidden
+    touch -d "$(tb_ago 1200)" tests/test_app.py
+    touch -d "$(tb_ago 2400)" README.md
+    touch -d "$(tb_ago 259200)" old.txt
     # Folders changed when the files went in. Set them apart from the files.
-    touch -d '2 hours ago' src tests
+    touch -d "$(tb_ago 7200)" src tests
 }
 
 @test "help prints usage and exits 0" {
@@ -89,7 +89,7 @@ setup() {
     [[ ${lines[3]} =~ ^[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}\ +3d\ ago.*old.txt$ ]]
     run recent 30m
     [ "${lines[-1]}" = "2 files changed in the last 30m" ]
-    run recent --since "$(date -d '2 days ago' +%F)"
+    run recent --since "$(date -d "$(tb_ago 172800)" +%F)"
     [[ ${lines[-1]} == "3 files changed since "* ]]
     run recent 10s
     [ "$output" = "No files changed in the last 10s." ]

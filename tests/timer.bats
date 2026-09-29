@@ -66,7 +66,7 @@ notices() { cat "$BATS_TEST_TMPDIR/notices" 2>/dev/null; }
 }
 
 @test "--at counts to a clock time" {
-    at=$(date -d '+2 hours' +%H:%M)
+    at=$(date -d "$(tb_ago -7200)" +%H:%M)
     run timeout 1 timer --at "$at" call
     [ "$status" -eq 124 ]
     [[ ${lines[0]} =~ ^timer:\ 1:5[89]:[0-9]{2}\ left,\ ends\ at\ $at,\ call$ ]]
@@ -74,7 +74,7 @@ notices() { cat "$BATS_TEST_TMPDIR/notices" 2>/dev/null; }
 }
 
 @test "a time that has passed means tomorrow" {
-    at=$(date -d '-2 hours' +%H:%M)
+    at=$(date -d "$(tb_ago 7200)" +%H:%M)
     run timeout 1 timer --at "$at"
     [[ ${lines[0]} =~ ^timer:\ 2[12]:[0-9]{2}:[0-9]{2}\ left ]]
 }

@@ -41,6 +41,12 @@ tb_without() {
     export PATH=$d
 }
 
+# Print a time N seconds ago as @EPOCH, for touch -d and date -d. BusyBox
+# reads @EPOCH but not words like "3 days ago". A negative N is in the future.
+tb_ago() {
+    echo "@$(( $(date +%s) - $1 ))"
+}
+
 # Skip the test unless every named tool is installed. CI installs only the
 # common ones, so tests that run a real 7z, gpg or kubectl use this.
 tb_needs() {

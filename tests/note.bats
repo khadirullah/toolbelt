@@ -61,8 +61,8 @@ setup() {
 
 @test "-l prints the last days, oldest first" {
     mkdir -p "$N"
-    old=$(date -d '-10 days' +%F)
-    y=$(date -d '-1 day' +%F)
+    old=$(date -d "$(tb_ago 864000)" +%F)
+    y=$(date -d "$(tb_ago 86400)" +%F)
     printf '# %s\n\n- 09:00 old\n' "$old" > "$N/$old.md"
     printf '# %s\n\n- 09:00 yesterday\n' "$y" > "$N/$y.md"
     note today

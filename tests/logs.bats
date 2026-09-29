@@ -164,7 +164,7 @@ esac"
 @test "-f reads a syslog file, from boot or --since" {
     local today old
     today=$(date +%Y-%m-%dT%H:%M:%S)
-    old=$(date -d '-3 days' +%Y-%m-%dT%H:%M:%S)
+    old=$(date -d "$(tb_ago 259200)" +%Y-%m-%dT%H:%M:%S)
     {
         echo "$old+00:00 host nginx[12]: old error, before boot"
         echo "$today+00:00 host nginx[12]: connect() failed (111: Connection refused)"

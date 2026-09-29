@@ -10,7 +10,7 @@ setup() {
     head -c 2048 /dev/urandom > photos/2026/b.jpg
     printf 'album one\n' > photos/albums.txt
     printf 'album\n' > usb/photos/albums.txt
-    touch -d '1 day ago' usb/photos/albums.txt
+    touch -d "$(tb_ago 86400)" usb/photos/albums.txt
     head -c 3072 /dev/urandom > usb/photos/old/export.zip
     printf 'stale\n' > usb/photos/stale.txt
 }
