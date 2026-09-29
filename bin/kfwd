@@ -11,13 +11,15 @@ usage() {
     cat <<'EOF'
 usage: kfwd [-n NAMESPACE] [--local PORT] [--port PORT] [--open] SERVICE
             [-- kubectl port-forward options]
+       kfwd [options] deploy/NAME | sts/NAME | pod/NAME
 
 Port-forward a service to a spare local port.
 
 Options:
   -n, --namespace NS  the service's namespace, the context's own by default
   --local PORT        use this local port instead of a spare one
-  --port PORT         the service port, by number or name, when it has several
+  --port PORT         the service or container port, by number or name,
+                      when it has several
   --open              open the URL in your browser
   -q, --quiet         print only the URL
   -v, --verbose       every step, and each kubectl command before it runs
@@ -32,6 +34,7 @@ Examples:
   kfwd -n monitoring prometheus-server --port 9090
   kfwd --local 3000 --open -n monitoring grafana
   kfwd grafana -- --address 0.0.0.0
+  kfwd -n shop deploy/api --port 8080
 
 Needs: kubectl and jq. xdg-open for --open. See man kfwd.
 Exit: 0 stopped with Ctrl+C, 1 port taken, no such service or kubectl
@@ -46,12 +49,20 @@ port_owner() {
         sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1 (pid \2)/p' | head -n 1
 }
 
-# The service ports as "name port" lines, TCP only.
+# Pick the remote port from the service ports, or the container ports of a
+# pod or a pod template, TCP only.
 pick_port() {
     local lines n=0 pname pnum list=() opts=()
     RPORT="" RNAME=""
-    lines=$(jq -r '.spec.ports[]? | select((.protocol // "TCP") == "TCP") | "\(.name // "-")\t\(.port)"' "$TMP/svc")
-    [[ -n $lines ]] || tb_die 1 "svc/$name has no TCP ports to forward"
+    lines=$(jq -r '(if .kind == "Service" then [.spec.ports[]? | {name, port, protocol}]
+        else [(.spec.template.spec // .spec).containers[]?.ports[]? | {name, port: .containerPort, protocol}] end)[]
+        | select((.protocol // "TCP") == "TCP") | "\(.name // "-")\t\(.port)"' "$TMP/svc")
+    if [[ -z $lines ]]; then
+        [[ $kind == svc ]] && tb_die 1 "$ref has no TCP ports to forward"
+        # A container may listen on a port its spec does not list.
+        [[ $want =~ ^[0-9]+$ ]] && { RPORT=$want; return 0; }
+        tb_die "$E_USAGE" "$ref lists no container ports, give one with --port"
+    fi
     while IFS=$'\t' read -r pname pnum; do
         ((n++))
         if [[ $pname == - ]]; then list+=("$pnum"); else list+=("$pname $pnum"); fi
@@ -62,10 +73,11 @@ pick_port() {
     done <<<"$lines"
     if [[ -n $want ]]; then
         [[ -n ${RPORT:-} ]] && return 0
-        tb_die "$E_USAGE" "svc/$name has no port $want. Its ports are $(join_and "${list[@]}")"
+        [[ $kind != svc && $want =~ ^[0-9]+$ ]] && { RPORT=$want; return 0; }
+        tb_die "$E_USAGE" "$ref has no port $want. Its ports are $(join_and "${list[@]}")"
     fi
     if (( n > 1 )); then
-        tb_err "svc/$name has $n ports, $(join_and "${list[@]}")"
+        tb_err "$ref has $n ports, $(join_and "${list[@]}")"
         tb_die "$E_USAGE" "pick one with $(join_and "${opts[@]}" | sed 's/ and / or /')"
     fi
     IFS=$'\t' read -r RNAME RPORT <<<"$lines"
@@ -76,8 +88,8 @@ pick_port() {
 # Start kubectl port-forward in the background, pid in PF.
 start_pf() {
     : > "$TMP/pf.log"
-    tb_show kubectl port-forward "svc/$name" "$LPORT:$RPORT" -n "$ns" ${TB_PASS[@]+"${TB_PASS[@]}"}
-    kubectl port-forward "svc/$name" "$LPORT:$RPORT" -n "$ns" ${TB_PASS[@]+"${TB_PASS[@]}"} \
+    tb_show kubectl port-forward "$ref" "$LPORT:$RPORT" -n "$ns" ${TB_PASS[@]+"${TB_PASS[@]}"}
+    kubectl port-forward "$ref" "$LPORT:$RPORT" -n "$ns" ${TB_PASS[@]+"${TB_PASS[@]}"} \
         >"$TMP/pf.log" 2>&1 &
     PF=$!
 }
@@ -115,12 +127,19 @@ main() {
 
     local saved=("${TB_PASS[@]}")
     TB_PASS=(${KCFG[@]+"${KCFG[@]}"})
-    if ! kube_to "$TMP/svc" get svc "$name" -n "$ns" -o json; then
+    if ! kube_to "$TMP/svc" get "$kind" "$name" -n "$ns" -o json; then
         if kube_notfound; then
-            kube_to "$TMP/names" get svc -n "$ns" -o name 2>/dev/null
-            hint=$(sed 's|^service/||' "$TMP/names" 2>/dev/null | closest "$name")
-            [[ -n $hint ]] && tb_die 1 "no service $name in $ns. Did you mean $hint?"
-            tb_die 1 "no service $name in $ns. List them with: kubectl get svc -n $ns"
+            local word
+            case $kind in
+                svc) word=service ;;
+                deploy) word=deployment ;;
+                sts) word=statefulset ;;
+                *) word=$kind ;;
+            esac
+            kube_to "$TMP/names" get "$kind" -n "$ns" -o name 2>/dev/null
+            hint=$(sed 's|^[^/]*/||' "$TMP/names" 2>/dev/null | closest "$name")
+            [[ -n $hint ]] && tb_die 1 "no $word $name in $ns. Did you mean $hint?"
+            tb_die 1 "no $word $name in $ns. List them with: kubectl get $kind -n $ns"
         fi
         kube_fail
     fi
@@ -142,7 +161,7 @@ main() {
     fi
     [[ $RPORT == 443 || $RPORT == 8443 || $RNAME == *https* ]] && scheme=https
     url="$scheme://127.0.0.1:$LPORT"
-    tb_say "service port $RPORT${RNAME:+ ($RNAME)}, local port $LPORT"
+    tb_say "remote port $RPORT${RNAME:+ ($RNAME)}, local port $LPORT"
 
     stopping=0
     trap 'stopping=1; [[ -n ${PF:-} ]] && kill "$PF" 2>/dev/null' INT TERM
@@ -160,7 +179,7 @@ main() {
     if (( TB_QUIET )); then
         echo "$url"
     else
-        echo "forwarding svc/$name port $RPORT to $url"
+        echo "forwarding $ref port $RPORT to $url"
         tb_info "Ctrl+C stops it"
     fi
     if (( open )); then
@@ -173,7 +192,7 @@ main() {
         (( stopping )) && break
         err=$(grep -v '^Forwarding from\|^Handling connection' "$TMP/pf.log" | grep -m1 .)
         tb_say "kubectl port-forward stopped${err:+: $err}"
-        tb_info "$TB_CMD: the connection to svc/$name dropped, reconnecting"
+        tb_info "$TB_CMD: the connection to $ref dropped, reconnecting"
         while :; do
             (( stopping )) && break 2
             sleep "$(( tries < 4 ? tries + 1 : 5 ))" &
@@ -202,6 +221,7 @@ LPORT=""
 want=""
 open=0
 name=""
+kind=svc
 tb_expand "n" "$@"
 set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
 while (( $# )); do
@@ -216,9 +236,18 @@ while (( $# )); do
         --)             shift; TB_PASS=("$@"); break ;;
         -*)             tb_common_opt "$1" || tb_unknown "$1" ;;
         *)
-            [[ -z $name ]] || tb_usage_error "one service at a time, not $name and $1"
-            name=${1#svc/}
-            name=${name#service/} ;;
+            [[ -z $name ]] || tb_usage_error "one service at a time, not $ref and $1"
+            name=${1#*/}
+            case $1 in
+                */*/*|*/) tb_usage_error "give a service, or a TYPE/NAME such as deploy/api, not $1" ;;
+                svc/*|service/*|services/*) kind=svc ;;
+                deploy/*|deployment/*|deployments/*) kind=deploy ;;
+                sts/*|statefulset/*|statefulsets/*) kind=sts ;;
+                po/*|pod/*|pods/*) kind=pod ;;
+                */*) tb_usage_error "give a service, deploy/, sts/ or pod/, not $1" ;;
+                *) name=$1 ;;
+            esac
+            ref=$kind/$name ;;
     esac
     shift
 done

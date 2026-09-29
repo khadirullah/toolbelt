@@ -21,6 +21,15 @@ JSON
   "ports":[{"name":"http","port":80,"protocol":"TCP","targetPort":9090},
            {"name":"grpc","port":9090,"protocol":"TCP","targetPort":10901}]}}
 JSON
+    cat > "$FX/deploy-api.json" <<'JSON'
+{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"api","namespace":"monitoring"},
+ "spec":{"template":{"spec":{"containers":[{"name":"api","image":"api:1",
+  "ports":[{"name":"http","containerPort":8080,"protocol":"TCP"},{"name":"stats","containerPort":8125,"protocol":"UDP"}]}]}}}}
+JSON
+    cat > "$FX/pod-api-1.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"api-1","namespace":"monitoring"},
+ "spec":{"containers":[{"name":"api","image":"api:1"}]}}
+JSON
     cat > "$BATS_TEST_TMPDIR/stubs/kubectl" <<'SH'
 #!/usr/bin/env bash
 echo "kubectl $*" >> "$CALLS"
@@ -30,6 +39,10 @@ case " $* " in
     *" get svc "*)
         if [[ -f $FX/$3.json ]]; then cat "$FX/$3.json"; exit 0; fi
         echo "Error from server (NotFound): services \"$3\" not found" >&2; exit 1 ;;
+    *" get deploy -n "*) printf 'deployment.apps/api\n' ;;
+    *" get deploy "*|*" get pod "*)
+        if [[ -f $FX/$2-$3.json ]]; then cat "$FX/$2-$3.json"; exit 0; fi
+        echo "Error from server (NotFound): $2 \"$3\" not found" >&2; exit 1 ;;
     *" port-forward "*)
         n=$(( $(cat "$BATS_TEST_TMPDIR/pf-count" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$BATS_TEST_TMPDIR/pf-count"
@@ -165,6 +178,40 @@ print(s.getsockname()[1], flush=True); time.sleep(10)' > "$BATS_TEST_TMPDIR/port
     for child in $(cat "$BATS_TEST_TMPDIR/pf-pids"); do
         ! kill -0 "$child" 2>/dev/null
     done
+}
+
+@test "deploy/ forwards to the one TCP container port" {
+    kfwd deploy/api > "$BATS_TEST_TMPDIR/out" 2>&1 3>&- &
+    local pid=$!
+    wait_for "$BATS_TEST_TMPDIR/out" "Ctrl+C stops it"
+    kill -TERM "$pid"
+    wait "$pid"
+    grep -Eq "^forwarding deploy/api port 8080 to http://127.0.0.1:[0-9]+$" "$BATS_TEST_TMPDIR/out"
+    grep -Eq "port-forward deploy/api [0-9]+:8080 -n monitoring" "$CALLS"
+}
+
+@test "a pod with no container ports takes a --port number" {
+    run kfwd pod/api-1
+    [ "$status" -eq 2 ]
+    [ "$output" = "kfwd: pod/api-1 lists no container ports, give one with --port" ]
+    kfwd --port 9000 pod/api-1 > "$BATS_TEST_TMPDIR/out" 2>&1 3>&- &
+    local pid=$!
+    wait_for "$BATS_TEST_TMPDIR/out" "Ctrl+C stops it"
+    kill -TERM "$pid"
+    wait "$pid"
+    grep -Eq "port-forward pod/api-1 [0-9]+:9000 -n monitoring" "$CALLS"
+}
+
+@test "a deployment typo suggests the closest name" {
+    run kfwd deploy/apo
+    [ "$status" -eq 1 ]
+    [ "$output" = "kfwd: no deployment apo in monitoring. Did you mean api?" ]
+}
+
+@test "other types are refused" {
+    run kfwd cm/api
+    [ "$status" -eq 2 ]
+    [ "${lines[0]}" = "kfwd: give a service, deploy/, sts/ or pod/, not cm/api" ]
 }
 
 @test "a failed first start exits 1 with kubectl's reason" {

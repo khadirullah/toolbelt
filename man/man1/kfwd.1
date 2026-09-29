@@ -1,4 +1,4 @@
-.TH "KFWD" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "KFWD" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 kfwd \- port\-forward a service to a spare local port
 .SH SYNOPSIS
@@ -6,6 +6,7 @@ kfwd \- port\-forward a service to a spare local port
 .RS 4
 .nf
 kfwd [-n NAMESPACE] [--local PORT] [--port PORT] [--open] SERVICE [-- kubectl port-forward options]
+kfwd [options] deploy/NAME | sts/NAME | pod/NAME
 .fi
 .RE
 .SH DESCRIPTION
@@ -14,7 +15,7 @@ kfwd [-n NAMESPACE] [--local PORT] [--port PORT] [--open] SERVICE [-- kubectl po
 .PP
 \fBkfwd\fR takes a service name and does the rest. It reads the service, picks its port, finds a spare local port, starts \fBkubectl port\-forward\fR and prints the URL. When the forward drops, it starts it again with a short back\-off, and says so. Ctrl+C stops it and exits 0.
 .PP
-\fBkfwd\fR forwards to services only, not to single pods. A service keeps working when the pod behind it changes, which is what makes the reconnect useful. For one pod, \fBkubectl port\-forward pod/NAME\fR does the job.
+A plain name is a service. \fBsvc/NAME\fR and \fBservice/NAME\fR are the same. \fBkfwd\fR also takes \fBdeploy/NAME\fR, \fBsts/NAME\fR and \fBpod/NAME\fR, which \fBkubectl port\-forward\fR accepts too, for apps that have no service yet. A deployment or a statefulset gets a new pod on each reconnect. A single pod only comes back when a pod of that name does, so a forward to a deleted pod gives up after 5 tries.
 .SH OPTIONS
 .TP
 \fB\-n\fR, \fB\-\-namespace NS\fR
@@ -24,7 +25,7 @@ The service's namespace. The context's own namespace by default.
 Listen on this local port instead of a spare one.
 .TP
 \fB\-\-port PORT\fR
-The service port to forward, by number or by name, such as \fB\-\-port 9090\fR or \fB\-\-port http\fR.
+The service or container port to forward, by number or by name, such as \fB\-\-port 9090\fR or \fB\-\-port http\fR.
 .TP
 \fB\-\-open\fR
 Open the URL in your browser with \fBxdg\-open\fR once the forward runs.
@@ -42,6 +43,8 @@ Show the help.
 .SH HOW IT PICKS THE PORTS
 .PP
 The service port : A service with one TCP port uses it. A service with several stops with exit 2 and lists them, so you pick one with \fB\-\-port\fR. UDP ports are skipped, since \fBkubectl port\-forward\fR forwards TCP only.
+.PP
+The container port : For \fBdeploy/\fR, \fBsts/\fR and \fBpod/\fR, the ports come from the \fBports\fR list of the containers, and the same rules apply. That list is only a note in the spec, since a container can listen on a port it does not list. So a \fB\-\-port\fR number that is not in the list is used as given, and a pod that lists no ports needs one.
 .PP
 The local port : \fB\-\-local PORT\fR is used as given. When something already listens there, \fBkfwd\fR names the program and its pid, as \fBss\fR reports it, and exits 1. Without \fB\-\-local\fR, \fBkfwd\fR looks for a free port starting at the service port, such as 9090 for 9090. Ports under 1024 need root to listen on, so for those it starts at 8000 plus the port, such as 8080 for 80 or 8443 for 443.
 .PP
@@ -174,6 +177,17 @@ $ kfwd -n monitoring grafna
 kfwd: no service grafna in monitoring. Did you mean grafana?
 .fi
 .RE
+.SS A deployment with no service
+.PP
+.RS 4
+.nf
+$ kfwd -n demo deploy/web
+forwarding deploy/web port 8080 to http://127.0.0.1:8080
+Ctrl+C stops it
+.fi
+.RE
+.PP
+The container lists port 8080, and 8080 was free, so both sides use it.
 .SS The pod does not come back
 .PP
 .RS 4
@@ -204,6 +218,8 @@ The browser opens on the URL once the forward runs, not before, so the first pag
 .PP
 \fBkfwd: svc/NAME has no TCP ports to forward\fR : The service has only UDP ports, such as a DNS service, or no ports at all. \fBkubectl port\-forward\fR cannot forward those.
 .PP
+\fBkfwd: pod/NAME lists no container ports, give one with \-\-port\fR : The pod spec has no \fBports\fR list. Give the port the app listens on, such as \fB\-\-port 8080\fR.
+.PP
 \fBkfwd: cannot listen on port PORT: ...\fR : kubectl could not open the local port, for example a port under 1024 without root. Leave out \fB\-\-local\fR, or pick a port above 1024.
 .PP
 The URL loads, but the page is empty or says bad gateway : The forward goes to the service port, which reaches the container's \fBtargetPort\fR. When the app listens on another port than the service's \fBtargetPort\fR, the connection opens and nothing answers. Compare them with \fBkyaml svc/NAME\fR.
@@ -219,10 +235,10 @@ No \fBHandling connection for PORT\fR lines : kubectl prints one for each new co
 Stopped with Ctrl+C or a TERM signal.
 .TP
 1
-The local port is taken, no such service, kubectl failed, or it gave up after 5 tries.
+The local port is taken, no such service or workload, kubectl failed, or it gave up after 5 tries.
 .TP
 2
-Bad usage, or a service with several ports and no \fB\-\-port\fR, or a \fB\-\-port\fR it does not have.
+Bad usage, a type other than svc/, deploy/, sts/ or pod/, several ports and no \fB\-\-port\fR, a service \fB\-\-port\fR it does not have, or no container ports and no \fB\-\-port\fR number.
 .TP
 3
 kubectl or jq is missing.

@@ -6,6 +6,7 @@ Port-forward a service to a spare local port.
 
 ```
 kfwd [-n NAMESPACE] [--local PORT] [--port PORT] [--open] SERVICE [-- kubectl port-forward options]
+kfwd [options] deploy/NAME | sts/NAME | pod/NAME
 ```
 
 ## Description
@@ -20,8 +21,10 @@ when the browser tab stops loading.
 starts `kubectl port-forward` and prints the URL. When the forward drops, it starts it again with a short back-off,
 and says so. Ctrl+C stops it and exits 0.
 
-`kfwd` forwards to services only, not to single pods. A service keeps working when the pod behind it changes,
-which is what makes the reconnect useful. For one pod, `kubectl port-forward pod/NAME` does the job.
+A plain name is a service. `svc/NAME` and `service/NAME` are the same. `kfwd` also takes `deploy/NAME`, `sts/NAME`
+and `pod/NAME`, which `kubectl port-forward` accepts too, for apps that have no service yet. A deployment or a
+statefulset gets a new pod on each reconnect. A single pod only comes back when a pod of that name does, so a
+forward to a deleted pod gives up after 5 tries.
 
 ## Options
 
@@ -29,7 +32,7 @@ which is what makes the reconnect useful. For one pod, `kubectl port-forward pod
 |---|---|
 | `-n`, `--namespace NS` | The service's namespace. The context's own namespace by default. |
 | `--local PORT` | Listen on this local port instead of a spare one. |
-| `--port PORT` | The service port to forward, by number or by name, such as `--port 9090` or `--port http`. |
+| `--port PORT` | The service or container port to forward, by number or by name, such as `--port 9090` or `--port http`. |
 | `--open` | Open the URL in your browser with `xdg-open` once the forward runs. |
 | `-q`, `--quiet` | Print only the URL, and no reconnect messages. |
 | `-v`, `--verbose` | Print each kubectl command, the ports it picked, and why a forward stopped. |
@@ -42,6 +45,11 @@ which is what makes the reconnect useful. For one pod, `kubectl port-forward pod
 The service port
 : A service with one TCP port uses it. A service with several stops with exit 2 and lists them, so you pick one
   with `--port`. UDP ports are skipped, since `kubectl port-forward` forwards TCP only.
+
+The container port
+: For `deploy/`, `sts/` and `pod/`, the ports come from the `ports` list of the containers, and the same rules
+  apply. That list is only a note in the spec, since a container can listen on a port it does not list. So a
+  `--port` number that is not in the list is used as given, and a pod that lists no ports needs one.
 
 The local port
 : `--local PORT` is used as given. When something already listens there, `kfwd` names the program and its pid, as
@@ -187,6 +195,16 @@ $ kfwd -n monitoring grafna
 kfwd: no service grafna in monitoring. Did you mean grafana?
 ```
 
+### A deployment with no service
+
+```console
+$ kfwd -n demo deploy/web
+forwarding deploy/web port 8080 to http://127.0.0.1:8080
+Ctrl+C stops it
+```
+
+The container lists port 8080, and 8080 was free, so both sides use it.
+
 ### The pod does not come back
 
 ```console
@@ -217,6 +235,9 @@ The browser opens on the URL once the forward runs, not before, so the first pag
 : The service has only UDP ports, such as a DNS service, or no ports at all. `kubectl port-forward` cannot forward
   those.
 
+`kfwd: pod/NAME lists no container ports, give one with --port`
+: The pod spec has no `ports` list. Give the port the app listens on, such as `--port 8080`.
+
 `kfwd: cannot listen on port PORT: ...`
 : kubectl could not open the local port, for example a port under 1024 without root. Leave out `--local`, or pick a
   port above 1024.
@@ -242,8 +263,8 @@ No `Handling connection for PORT` lines
 | Code | Meaning |
 |---|---|
 | 0 | Stopped with Ctrl+C or a TERM signal. |
-| 1 | The local port is taken, no such service, kubectl failed, or it gave up after 5 tries. |
-| 2 | Bad usage, or a service with several ports and no `--port`, or a `--port` it does not have. |
+| 1 | The local port is taken, no such service or workload, kubectl failed, or it gave up after 5 tries. |
+| 2 | Bad usage, a type other than svc/, deploy/, sts/ or pod/, several ports and no `--port`, a service `--port` it does not have, or no container ports and no `--port` number. |
 | 3 | kubectl or jq is missing. |
 
 ## See also
