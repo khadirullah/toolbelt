@@ -36,7 +36,7 @@ convert        imagemagick          ImageMagick          imagemagick          Im
 nmap           nmap                 nmap                 nmap                 nmap                 nmap
 notify-send    libnotify-bin        libnotify            libnotify            libnotify-tools      libnotify
 openssl        openssl              openssl              openssl              openssl              openssl
-pbzip2         pbzip2               pbzip2               pbzip2               pbzip2               pbzip2
+pbzip2         pbzip2               pbzip2               pbzip2               pbzip2               -
 pigz           pigz                 pigz                 pigz                 pigz                 pigz
 plzip          plzip                -                    -                    plzip                -
 podman         podman               podman               podman               podman               podman
@@ -50,7 +50,7 @@ smartctl       smartmontools        smartmontools        smartmontools        sm
 ss             iproute2             iproute              iproute2             iproute2             iproute2
 ssh            openssh-client       openssh-clients      openssh              openssh-clients      openssh-client
 tar            tar                  tar                  tar                  tar                  tar
-unar           unar                 unar                 unarchiver           unar                 unar
+unar           unar                 unar                 unarchiver           unar                 -
 unzip          unzip                unzip                unzip                unzip                unzip
 wl-copy        wl-clipboard         wl-clipboard         wl-clipboard         wl-clipboard         wl-clipboard
 xclip          xclip                xclip                xclip                xclip                xclip
@@ -68,7 +68,7 @@ du             coreutils            coreutils            coreutils            co
 fdupes         fdupes               fdupes               fdupes               fdupes               fdupes
 find           findutils            findutils            findutils            findutils            findutils
 head           coreutils            coreutils            coreutils            coreutils            coreutils
-jdupes         jdupes               jdupes               jdupes               jdupes               jdupes
+jdupes         jdupes               jdupes               jdupes               jdupes               -
 md5sum         coreutils            coreutils            coreutils            coreutils            coreutils
 mv             coreutils            coreutils            coreutils            coreutils            coreutils
 ncdu           ncdu                 ncdu                 ncdu                 ncdu                 ncdu
@@ -91,10 +91,10 @@ tr             coreutils            coreutils            coreutils            co
 wc             coreutils            coreutils            coreutils            coreutils            coreutils
 umount         mount                util-linux           util-linux           util-linux           util-linux-misc
 bsdtar         libarchive-tools     bsdtar               libarchive           bsdtar               libarchive-tools
-lsar           unar                 unar                 unarchiver           unar                 unar
+lsar           unar                 unar                 unarchiver           unar                 -
 uncompress     ncompress            ncompress            ncompress            ncompress            -
 unmkinitramfs  initramfs-tools-bin|initramfs-tools-core -                    -                    -                    -
-unrar          unrar                -                    unrar                unrar                unrar
+unrar          unrar                -                    unrar                unrar                -
 ffprobe        ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7|ffmpeg-4    ffmpeg
 shred          coreutils            coreutils            coreutils            coreutils            coreutils
 df             coreutils            coreutils            coreutils            coreutils            coreutils
