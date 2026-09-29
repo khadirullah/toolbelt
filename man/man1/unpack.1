@@ -1,0 +1,766 @@
+.TH "UNPACK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+unpack \- unpack any archive, from a file or a URL
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+unpack [options] archive|url ... [-- tool options]
+unpack --undo | --history
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBunpack\fR takes an archive and turns it into files, whatever the format. You do not need to remember that a \fB.tar.zst\fR wants \fBtar \-\-zstd \-xf\fR, that a \fB.7z.001\fR wants \fB7z x\fR on the first part, or that a \fB.deb\fR is an \fBar\fR file with a tar inside. \fBunpack\fR works that out, picks the tool, and runs it.
+.PP
+It reads the archive twice. The first pass lists every entry without writing anything. \fBunpack\fR checks that list for paths that would land outside the target folder, for links that point out of it, for disk space, for memory, and for archives that grow more than 100 times their size. Only when every check passes does the second pass write files.
+.PP
+The files go into a hidden temp folder first, such as \fB.unpack\-GttVuf\fR, in the folder where they will end up. When the tool finishes, \fBunpack\fR counts the files on disk and compares the count with the listing. Then it moves the result into place with one rename. If anything fails before that rename, the temp folder is removed and nothing you can see has changed.
+.PP
+After a checked unpack in a terminal, \fBunpack\fR asks whether to move the archive to the trash. It never deletes anything for good. Every run is recorded, and \fBunpack \-\-undo\fR moves the last result to the trash and brings a trashed archive back.
+.PP
+\fBunpack\fR never overwrites a file or folder that already exists. It never runs as root on its own, never follows a link out of the target, and never reads a password from the command line.
+.SH OPTIONS
+.TP
+\fB\-H\fR, \fB\-\-here\fR
+Put the files in the current folder, or in the \fB\-o\fR folder. Falls back to a new folder when a name would clash.
+.TP
+\fB\-d\fR, \fB\-\-dir\fR
+Always make a new folder named after the archive, even when the archive holds one top folder.
+.TP
+\fB\-o\fR, \fB\-\-out DIR\fR
+Unpack into DIR instead of the current folder. \fBunpack\fR makes DIR when it does not exist. Combines with \fB\-H\fR and \fB\-d\fR.
+.TP
+\fB\-l\fR, \fB\-\-list\fR
+List the contents and unpack nothing.
+.TP
+\fB\-t\fR, \fB\-\-test\fR
+Read every file to check the archive, and unpack nothing.
+.TP
+\fB\-\-only PATTERN\fR
+Unpack only the entries that match a shell pattern, such as \fB'*.yaml'\fR. Repeat it for more patterns.
+.TP
+\fB\-\-cat FILE\fR
+Print one file from the archive to stdout. FILE is the path as \fB\-l\fR shows it.
+.TP
+\fB\-p\fR, \fB\-\-password\fR
+Ask for the password of a zip, 7z or rar. In a terminal it asks without echo. In a script it reads one line of stdin.
+.TP
+\fB\-r\fR, \fB\-\-recursive\fR
+Also unpack archives found inside, up to 3 levels deep. Each inner archive is replaced by its contents.
+.TP
+\fB\-\-sandbox\fR
+Run the unpack inside a podman container with no network and the archive mounted read\-only. Uses docker when podman is missing.
+.TP
+\fB\-\-rm\fR
+Move the archive to the trash after a checked unpack, without asking.
+.TP
+\fB\-k\fR, \fB\-\-keep\fR
+Keep the archive and never ask.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Go past the memory check and the size ratio check. With \fB\-\-undo\fR, undo without asking.
+.TP
+\fB\-\-undo\fR
+Move what the last unpack made to the trash, and bring its archive back if it went to the trash.
+.TP
+\fB\-\-history\fR
+List past unpacks, newest first.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+Use only one of \fB\-l\fR, \fB\-t\fR, \fB\-\-cat\fR, \fB\-\-undo\fR and \fB\-\-history\fR at a time. \fB\-\-rm\fR and \fB\-k\fR cannot go together. \fB\-\-cat\fR reads one archive. \fB\-\-sandbox\fR works for a normal unpack only, not with \fB\-l\fR, \fB\-t\fR or \fB\-\-cat\fR.
+.SH FORMATS
+.PP
+\fBunpack\fR knows these formats. Each compressor works on its own, for a single file, and around a tar.
+.TP
+tar
+Names: \fB.tar\fR. Tool: tar. Debian 13 package: \fBtar\fR
+.TP
+gzip
+Names: \fB.gz\fR, \fB.tar.gz\fR, \fB.tgz\fR, \fB.taz\fR. Tool: pigz, or gzip. Debian 13 package: \fBpigz\fR, \fBgzip\fR
+.TP
+bzip2
+Names: \fB.bz2\fR, \fB.bz\fR, \fB.tar.bz2\fR, \fB.tbz2\fR, \fB.tbz\fR, \fB.tb2\fR. Tool: pbzip2, or bzip2. Debian 13 package: \fBpbzip2\fR, \fBbzip2\fR
+.TP
+xz
+Names: \fB.xz\fR, \fB.tar.xz\fR, \fB.txz\fR. Tool: xz. Debian 13 package: \fBxz\-utils\fR
+.TP
+lzma
+Names: \fB.lzma\fR, \fB.tar.lzma\fR, \fB.tlzma\fR. Tool: \fBxz \-\-format=lzma\fR. Debian 13 package: \fBxz\-utils\fR
+.TP
+zstd
+Names: \fB.zst\fR, \fB.zstd\fR, \fB.tar.zst\fR, \fB.tzst\fR. Tool: zstd. Debian 13 package: \fBzstd\fR
+.TP
+lz4
+Names: \fB.lz4\fR, \fB.tar.lz4\fR, \fB.tlz4\fR. Tool: lz4. Debian 13 package: \fBlz4\fR
+.TP
+lzip
+Names: \fB.lz\fR, \fB.tar.lz\fR, \fB.tlz\fR. Tool: plzip, or lzip. Debian 13 package: \fBplzip\fR, \fBlzip\fR
+.TP
+lzop
+Names: \fB.lzo\fR, \fB.tar.lzo\fR, \fB.tzo\fR. Tool: lzop. Debian 13 package: \fBlzop\fR
+.TP
+brotli
+Names: \fB.br\fR, \fB.tar.br\fR, \fB.tbr\fR. Tool: brotli. Debian 13 package: \fBbrotli\fR
+.TP
+compress
+Names: \fB.Z\fR, \fB.tar.Z\fR, \fB.tz\fR. Tool: gzip, or uncompress. Debian 13 package: \fBgzip\fR, \fBncompress\fR
+.TP
+zip
+Names: \fB.zip\fR, \fB.jar\fR, \fB.war\fR, \fB.ear\fR, \fB.whl\fR. Tool: unzip, or 7z. Debian 13 package: \fBunzip\fR, \fB7zip\fR
+.TP
+7z
+Names: \fB.7z\fR. Tool: 7z. Debian 13 package: \fB7zip\fR
+.TP
+rar
+Names: \fB.rar\fR. Tool: unrar, or 7z, or unar. Debian 13 package: \fBunrar\fR, \fB7zip\fR, \fBunar\fR
+.TP
+deb
+Names: \fB.deb\fR, \fB.udeb\fR, \fB.ddeb\fR. Tool: dpkg\-deb, or ar and tar. Debian 13 package: \fBdpkg\fR, \fBbinutils\fR
+.TP
+rpm
+Names: \fB.rpm\fR. Tool: rpm2cpio and cpio. Debian 13 package: \fBrpm2cpio\fR, \fBcpio\fR
+.TP
+cpio
+Names: \fB.cpio\fR, \fB.cpio.gz\fR and the other compressors. Tool: cpio. Debian 13 package: \fBcpio\fR
+.TP
+iso
+Names: \fB.iso\fR. Tool: 7z, or bsdtar. Debian 13 package: \fB7zip\fR, \fBlibarchive\-tools\fR
+.TP
+initramfs
+Names: \fBinitrd.img\-*\fR, \fBinitrd\-*\fR, \fBinitramfs*\fR. Tool: unmkinitramfs, or cpio. Debian 13 package: \fBinitramfs\-tools\-bin\fR, \fBcpio\fR
+.TP
+URL
+Names: \fBhttp://\fR, \fBhttps://\fR, \fBfile://\fR. Tool: curl. Debian 13 package: \fBcurl\fR
+.PP
+When two tools can do the job, \fBunpack\fR takes the faster one. pigz, pbzip2 and plzip use every core, so they win over gzip, bzip2 and lzip when installed. \fB\-v\fR says so in a line such as \fBtool: pigz, in place of gzip\fR.
+.PP
+For zip, \fBunpack\fR uses unzip when it can, because unzip is on almost every machine. It switches to 7z for a zip with a password, since unzip cannot read AES encryption, and for split zips.
+.PP
+For rar, unrar comes first. On distros that do not ship unrar, the 7z from the \fB7zip\fR package reads rar too. unar is the last choice.
+.PP
+A deb goes to \fBdpkg\-deb \-\-fsys\-tarfile\fR, which reads every compression a deb can use. Without dpkg\-deb, \fBunpack\fR pulls \fBdata.tar.*\fR out with \fBar p\fR and decompresses it itself. Only the files of the package come out, not the control scripts.
+.SH HOW IT RECOGNISES A FILE
+.PP
+\fBunpack\fR looks at the name first. A name it does not know, such as \fBbackup.bin\fR or \fBdownload\fR, gets a second look at the content with \fBfile \-z\fR, which also looks inside a compressed stream. When \fBfile\fR sees gzip and nothing more, \fBunpack\fR decompresses the first 8KB and asks \fBfile\fR again, so a tar inside a plain \fB.gz\fR is found too.
+.PP
+When the name and the content disagree, the content wins if the outer layer differs. A file called \fBsite.tar.gz\fR that is really a zip is unpacked as a zip. A plain \fB.gz\fR that holds a tar is unpacked as a tar. \fB\-v\fR shows which one decided:
+.PP
+.RS 4
+.nf
+$ unpack -v backup.bin
+unpack: backup.bin: tar.gz, from the content, the name did not say
+.fi
+.RE
+.PP
+A name with no known extension and a single compressor around a non\-archive, such as \fBaccess.log.gz\fR, becomes that one file, \fBaccess.log\fR.
+.SH MULTI\-PART SETS
+.PP
+A large archive often comes in parts. Give \fBunpack\fR any one part and it finds the rest in the same folder, puts them in order, and reads them as one stream. It never joins them into a big temp file on disk, except for split zips when only unzip is there, because unzip needs one file it can seek in.
+.TP
+\fB.partN.rar\fR
+Example: \fBfilm.part1.rar\fR, \fBfilm.part2.rar\fR. First part: \fB.part1.rar\fR. How it reads them: The rar tool follows the parts itself.
+.TP
+\fB.rNN\fR
+Example: \fBold.rar\fR, \fBold.r00\fR, \fBold.r01\fR. First part: \fB.rar\fR. How it reads them: The rar tool follows the parts itself.
+.TP
+\fB.7z.NNN\fR
+Example: \fBphotos.7z.001\fR, \fBphotos.7z.002\fR. First part: \fB.001\fR. How it reads them: 7z follows the parts itself.
+.TP
+\fB.zip.NNN\fR
+Example: \fBsite.zip.001\fR, \fBsite.zip.002\fR. First part: \fB.001\fR. How it reads them: 7z follows the parts. Without 7z, \fBcat\fR joins them into a temp zip for unzip.
+.TP
+\fB.zNN\fR
+Example: \fBmail.z01\fR, \fBmail.z02\fR, \fBmail.zip\fR. First part: \fB.z01\fR. How it reads them: 7z reads the set. Without 7z, \fBzip \-s 0\fR joins it for unzip. The \fB.zip\fR is the last part.
+.TP
+\fB.aa\fR
+Example: \fBbackup.tar.gz.aa\fR, \fBbackup.tar.gz.ab\fR. First part: \fB.aa\fR. How it reads them: \fBcat\fR joins them into the decompressor. This is what \fBsplit\fR makes.
+.TP
+\fB.NNN\fR
+Example: \fBbackup.tar.001\fR, \fBbackup.tar.002\fR. First part: \fB.001\fR. How it reads them: \fBcat\fR joins them. This is what \fBsplit \-d \-a 3\fR and many tools make.
+.TP
+\fB.NN\fR
+Example: \fBbackup.tar.gz.00\fR, \fBbackup.tar.gz.01\fR. First part: \fB.00\fR. How it reads them: \fBcat\fR joins them. This is what \fBsplit \-d\fR makes.
+.PP
+For \fB.aa\fR and \fB.NN\fR, the name in front must be an archive name \fBunpack\fR knows, such as \fBbackup.tar.gz\fR. Otherwise \fBnotes.ab\fR would count as a part.
+.PP
+Every part in the middle must be there. A gap is an error that names the missing part and lists what was found:
+.PP
+.RS 4
+.nf
+$ unpack site.tar.gz.001
+unpack: site.tar.gz: part .003 is missing, found .001 .002 .004 .005
+.fi
+.RE
+.PP
+A few gaps have their own messages:
+.PP
+.RS 4
+.nf
+$ unpack old.r00
+unpack: old.rar: the first part old.rar is missing
+$ unpack mail.z01
+unpack: mail.zip: the last part mail.zip is missing
+$ unpack mail.zip
+unpack: mail.zip: part .z01 is missing, found .zip
+.fi
+.RE
+.PP
+The last one works because a split zip records how many disks the set has. \fBunpack\fR reads that number from the end of the \fB.zip\fR.
+.PP
+A missing part at the end of a \fB.aa\fR or \fB.001\fR set cannot be seen from the names, because nothing records how many parts there were. The decompressor then stops early, and \fBunpack\fR reports that the archive may be damaged or incomplete. Nothing is written in that case.
+.PP
+The result line counts the parts:
+.PP
+.RS 4
+.nf
+$ unpack -k backup.tar.gz.ab
+backup.tar.gz (4 parts) -> backup/ (24KB, 4 files, 0.0s)
+.fi
+.RE
+.SH WHERE THE FILES GO
+.PP
+\fBunpack\fR has three ways to place the result. The default is smart placement.
+.PP
+Smart placement looks at the top of the listing:
+.IP \(bu 2
+One top folder, such as \fBbackup/\fR, comes out as that folder.
+.IP \(bu 2
+One single file comes out as that file.
+.IP \(bu 2
+Several entries at the top get a new folder named after the archive, so they do not spill into the current folder. \fBsite\-2026\-09.zip\fR holding \fBindex.html\fR and \fBcss/\fR becomes \fBsite\-2026\-09/index.html\fR and \fBsite\-2026\-09/css/\fR.
+.PP
+The folder name drops every archive extension, so \fBbackup.tar.gz\fR, \fBbackup.tgz\fR and \fBbackup.tar.gz.aa\fR all become \fBbackup\fR. A deb, an rpm and an initramfs image always get a folder of their own. \fBinitrd.img\-6.12.48\-amd64\fR becomes \fBinitrd\-6.12.48\-amd64/\fR.
+.PP
+\fB\-H\fR puts the entries right in the current folder, or in the \fB\-o\fR folder. If any top entry already exists there, \fBunpack\fR falls back to a new folder and says so:
+.PP
+.RS 4
+.nf
+$ unpack -H site.tar
+unpack: index.html already exists in ./, using a folder instead
+site.tar -> site/ (412KB, 38 files, 0.1s)
+.fi
+.RE
+.PP
+\fB\-d\fR always makes a new folder named after the archive, even when the archive holds one top folder. \fBunpack \-d backup.tar.gz\fR gives \fBbackup/backup/\fR.
+.PP
+\fB\-o DIR\fR changes where all of this happens. \fBunpack \-o ~/restore backup.tar.gz\fR gives \fB~/restore/backup/\fR.
+.PP
+\fBunpack\fR never writes over anything. When the name it wants is taken, it adds a number, as in \fBbackup\-1/\fR and \fBnotes\-1.txt\fR. For a file, the number goes before the extension.
+.SH SAFETY CHECKS
+.PP
+Every check runs on the listing, before a single file is written. A refusal exits with status 4 and leaves the disk as it was.
+.SS Paths that escape
+.PP
+An entry whose path leaves the target folder is refused. That covers \fB../\fR anywhere in the path, absolute paths such as \fB/etc/cron.d/job\fR, links that point outside the target, and files written through a link that an earlier entry made. \fBunpack\fR shows up to 10 of them:
+.PP
+.RS 4
+.nf
+$ unpack evil.tar
+unpack: evil.tar: link x/sh -> /etc/shadow points outside
+unpack: evil.tar: ../../.bashrc escapes the target folder
+unpack: refused, 2 unsafe paths. Nothing was written.
+.fi
+.RE
+.PP
+The other messages are \fBX is an absolute path\fR and \fBX is written through a link\fR.
+.PP
+A deb, an rpm and an initramfs image hold a whole system tree, where links such as \fB/usr/bin/python3 \-> python3.13\fR are normal. For those three formats, links with absolute targets are allowed, because they point into the unpacked tree when you look at it as a root. Paths with \fB..\fR are still refused.
+.SS Disk space
+.PP
+\fBunpack\fR adds up the size of every entry, plus 4KB for each entry to cover the file system blocks. When the target disk has less free space than that, it stops:
+.PP
+.RS 4
+.nf
+$ unpack backup.tar.gz
+unpack: backup.tar.gz: needs 52KB, /data has 1KB free
+unpack: refused. Use -o to unpack onto a disk with more room.
+.fi
+.RE
+.SS Memory
+.PP
+xz, zstd and 7z can need a lot of RAM to decompress, set by the dictionary or window size the archive was made with. \fBunpack\fR reads that size from the archive and compares it with \fBMemAvailable\fR in \fB/proc/meminfo\fR.
+.IP \(bu 2
+For xz it asks \fBxz \-\-robot \-\-list \-vv\fR.
+.IP \(bu 2
+For lzma it reads the dictionary size from the header.
+.IP \(bu 2
+For zstd it reads the window size from \fBzstd \-lv\fR.
+.IP \(bu 2
+For 7z it reads the LZMA and LZMA2 dictionary and the PPMd memory from \fB7z l \-slt\fR.
+.PP
+.RS 4
+.nf
+$ unpack dump.tar.xz
+unpack: dump.tar.xz: xz needs 12GB of RAM for this archive, and 3.1GB is free
+unpack: refused. Free some memory, or add -y to try anyway.
+.fi
+.RE
+.PP
+With \fB\-y\fR it warns and goes on. On a machine with swap, that can work, slowly.
+.SS Size ratio
+.PP
+An archive that grows more than 100 times its size is suspicious. Real data rarely compresses that well, and zip bombs do. Anything that unpacks to less than 1MB is never flagged.
+.PP
+In a terminal, \fBunpack\fR asks:
+.PP
+.RS 4
+.nf
+$ unpack zeros.gz
+unpack: zeros.gz: 1.3MB unpacks to 300MB, 229x the archive
+Unpack it anyway? [y/N] n
+Nothing changed.
+.fi
+.RE
+.PP
+A no exits with status 5. In a script there is nobody to ask, so it refuses unless \fB\-y\fR is given:
+.PP
+.RS 4
+.nf
+$ unpack zeros.gz < /dev/null
+unpack: zeros.gz: 1.3MB unpacks to 300MB, 229x the archive
+unpack: refused, over 100x with no terminal to ask. Add -y.
+.fi
+.RE
+.SS The file count
+.PP
+After the tool finishes, \fBunpack\fR counts the files and links in the temp folder and compares that with the listing. A mismatch is a warning, not an error, because the files did come out. The archive is then never offered for deletion, since the result was not verified.
+.PP
+.RS 4
+.nf
+unpack: backup.tar.gz: 199 files on disk, 201 in the listing. The archive stays.
+.fi
+.RE
+.SH THE DELETE QUESTION
+.PP
+After a verified unpack in a terminal, \fBunpack\fR offers to move the archive to the trash:
+.PP
+.RS 4
+.nf
+$ unpack backup.tar.gz
+backup.tar.gz -> backup/ (31MB, 201 files, 3.1s)
+Delete backup.tar.gz (31 MB)? It goes to the trash. [y/N] y
+backup.tar.gz is in the trash.
+.fi
+.RE
+.PP
+For a multi\-part set it asks once for every part:
+.PP
+.RS 4
+.nf
+$ unpack backup.tar.gz.aa
+backup.tar.gz (4 parts) -> backup/ (31MB, 201 files, 3.4s)
+Delete the 4 parts of backup (31 MB)? They go to the trash. [y/N] y
+The 4 parts of backup are in the trash.
+.fi
+.RE
+.PP
+The size is the size of the archive, or of all parts together. The default is no. A no keeps the archive, prints \fBKept backup.tar.gz.\fR and still exits with status 0, because the unpack worked.
+.PP
+The rules:
+.IP \(bu 2
+It asks only when the file count matched the listing.
+.IP \(bu 2
+\fB\-\-rm\fR moves the archive to the trash without asking.
+.IP \(bu 2
+\fB\-k\fR never asks and keeps the archive.
+.IP \(bu 2
+In a script, with no terminal, it never asks and keeps the archive, unless \fB\-\-rm\fR is given.
+.IP \(bu 2
+It never asks after \fB\-\-only\fR, since the archive still holds files you did not take.
+.IP \(bu 2
+It never asks after \fB\-\-cat\fR, \fB\-l\fR or \fB\-t\fR, which write nothing.
+.IP \(bu 2
+It never asks for a URL. The download was a temp file, and it is already gone.
+.IP \(bu 2
+It never asks for a file under \fB/boot\fR. An initramfs image there belongs to the system.
+.PP
+The trash is \fB~/.local/share/Trash\fR, the same one your file manager uses. Restore from there, or with \fBunpack \-\-undo\fR.
+.SH UNDO AND HISTORY
+.PP
+Every unpack writes one line to \fB~/.local/state/toolbelt/unpack.log\fR. The line holds the time, the archive path, the target, the number of files, and whether the archive went to the trash, with its name in the trash. Next to it, \fB~/.local/state/toolbelt/unpack/\fR keeps the size and modification time of each file that came out. \fBunpack\fR keeps the last 200 runs.
+.PP
+\fB\-\-history\fR lists them, newest first:
+.PP
+.RS 4
+.nf
+$ unpack --history
+2026-09-29 14:02  backup.tar.gz (4)  ~/restore/backup/  201 files  archive in the trash
+2026-09-29 11:47  web-1.4.2.tgz      ~/lab/chart/        14 files
+2026-09-28 22:10  notes.zip          ~/Documents/notes/  12 files  undone
+.fi
+.RE
+.PP
+\fB\-\-undo\fR takes the last run that was not undone yet. It shows what it found and asks first:
+.PP
+.RS 4
+.nf
+$ unpack --undo
+last run  2026-09-29 14:02
+archive   backup.tar.gz, 4 parts, now in the trash
+created   ~/restore/backup/, 201 files, 31 MB
+Move backup/ to the trash and bring back the 4 parts? [y/N] y
+backup/ is in the trash, except 1 file you changed since:
+  backup/notes.txt
+4 parts are back in ~/restore/.
+.fi
+.RE
+.PP
+Before it moves anything, \fB\-\-undo\fR compares every file with the record. A file you edited or added since the unpack is not yours to lose, so it stays where it is. The rest of the folder goes to the trash.
+.PP
+When the archive went to the trash after the unpack, \fB\-\-undo\fR brings it back to where it was. When it was kept, there is nothing to bring back and the question is only \fBMove backup/ to the trash?\fR.
+.PP
+In a script, \fB\-\-undo\fR needs \fB\-y\fR, like every other question. A no exits with status 5 and changes nothing.
+.SH SANDBOX
+.PP
+\fB\-\-sandbox\fR runs the unpack in a throwaway container. Use it for an archive from a place you do not trust, or to keep a bug in a decompressor away from your files.
+.PP
+.RS 4
+.nf
+$ unpack --sandbox tool-1.4.2.tar.gz
+unpack: sandbox: podman, no network, archive read-only
+tool-1.4.2.tar.gz -> tool-1.4.2/ (3.2MB, 88 files, 1.9s)
+.fi
+.RE
+.PP
+The outer \fBunpack\fR does the listing and every safety check on the host first. Then it starts:
+.PP
+.RS 4
+.nf
+podman run --rm -i --network=none --security-opt label=disable --userns=keep-id
+  -v <toolbelt>:/opt/toolbelt:ro -v <archive>:/in/<name>:ro -v <temp folder>:/out
+  docker.io/library/debian:stable-slim /opt/toolbelt/bin/unpack -H -k -y -q -o /out /in/<name>
+.fi
+.RE
+.PP
+The container has no network. It sees the archive and toolbelt read\-only, and it can write only into the temp folder. After it exits, the outer \fBunpack\fR counts the files, places them and asks the delete question as usual.
+.PP
+podman runs rootless and maps your user in with \fB\-\-userns=keep\-id\fR, so the files belong to you. docker is the fallback when podman is missing, with \fB\-\-user\fR set to your uid and gid.
+.PP
+The image needs the tools for the format. \fBdebian:stable\-slim\fR has tar, gzip and xz. For other formats, set \fBUNPACK_SANDBOX_IMAGE\fR to an image that has them:
+.PP
+.RS 4
+.nf
+$ UNPACK_SANDBOX_IMAGE=localhost/unpack-tools unpack --sandbox photos.7z
+.fi
+.RE
+.SH PASSWORDS
+.PP
+\fB\-p\fR asks for the password of a zip, 7z or rar. In a terminal the typing does not show:
+.PP
+.RS 4
+.nf
+$ unpack -p keys.7z
+Password for keys.7z:
+keys.7z -> keys/ (2KB, 3 files, 0.1s)
+.fi
+.RE
+.PP
+In a script, \fBunpack \-p\fR reads one line of stdin, so \fBpass show backup | unpack \-p backup.7z\fR works. The password never goes on the \fBunpack\fR command line, where \fBps\fR would show it to every user.
+.PP
+7z reads the password on stdin, so \fBunpack\fR picks 7z for any zip or rar with a password when 7z is installed. unzip, unrar and unar only take a password as an option, which \fBps\fR shows while they run. \fBunpack\fR falls back to them only when 7z is missing, and \fB\-v\fR prints the password as \fB***\fR.
+.PP
+Without \fB\-p\fR, an encrypted archive stops with a hint:
+.PP
+.RS 4
+.nf
+$ unpack keys.7z
+unpack: keys.7z: the archive is encrypted, add -p to type the password
+.fi
+.RE
+.PP
+A wrong password gives \fBwrong password\fR and exit status 1. \fB\-p\fR on a format without passwords, such as a tar, prints a warning and goes on.
+.SH URLS
+.PP
+A URL is downloaded with \fBcurl \-fL\fR into a temp folder, unpacked, and the download removed. The file name comes from the last part of the URL.
+.PP
+.RS 4
+.nf
+$ unpack https://example.com/tool-1.4.2.tar.gz
+unpack: downloaded 3.1MB from example.com
+tool-1.4.2.tar.gz -> tool-1.4.2/ (9.8MB, 88 files, 2.7s)
+.fi
+.RE
+.PP
+curl only follows \fBhttp\fR, \fBhttps\fR and \fBfile\fR URLs, including after a redirect. \fBfile://\fR URLs work the same way, which is how the tests check this without a network. A URL is never offered for deletion, and \fB\-\-history\fR shows the URL.
+.SH ARCHIVES INSIDE ARCHIVES
+.PP
+\fB\-r\fR unpacks every archive it finds in the result, and every archive inside those, up to 3 levels deep. Each inner archive is replaced by its contents, in place.
+.PP
+.RS 4
+.nf
+$ unpack -r web-1.4.2.tgz
+  inner: 1 archive unpacked in place
+web-1.4.2.tgz -> chart/ (22KB, 14 files, 0.1s)
+.fi
+.RE
+.PP
+\fBcharts/redis\-18.1.0.tgz\fR inside the chart became \fBcharts/redis/\fR. Every inner unpack goes through the same safety checks.
+.PP
+Some archives stay as they are, because unpacking them would break what they are for. Those are jar, war, ear and whl files, debs, rpms, isos, initramfs images, and parts of multi\-part sets.
+.SH INITRAMFS IMAGES
+.PP
+A Linux initramfs image is not one archive. It is one or more plain cpio archives, often with CPU microcode, followed by one compressed cpio with the real root file system. \fBfile\fR sees only the first one, and \fBcpio \-i\fR stops after it.
+.PP
+\fBunpack\fR uses \fBunmkinitramfs\fR from \fBinitramfs\-tools\-bin\fR when it is installed. That is the tool Debian and Ubuntu ship for this. Without it, \fBunpack\fR walks the image itself. It reads each plain cpio, finds its \fBTRAILER!!!\fR entry, skips the zero padding, and repeats until it finds the compressed part. It recognises that part by its magic bytes, so gzip, xz, lzma, zstd, lz4, lzop and bzip2 all work.
+.PP
+With more than one layer, the first layers go into \fBearly/\fR, \fBearly2/\fR and so on, and the compressed layer into \fBmain/\fR. That is the same layout \fBunmkinitramfs\fR makes.
+.PP
+.RS 4
+.nf
+$ unpack /boot/initrd.img-6.12.48-amd64
+unpack: initrd.img-6.12.48-amd64: initramfs, 2 layers
+  layer 1: cpio -> early/, 1 file
+  layer 2: cpio.zst -> main/, 2,114 files
+initrd.img-6.12.48-amd64 -> initrd-6.12.48-amd64/ (78MB, 2,115 files, 2.2s)
+.fi
+.RE
+.PP
+Files in an initramfs keep their owners only when you unpack as root. As a normal user they belong to you, which is fine for reading them. The image in \fB/boot\fR is never offered for deletion.
+.SH PROGRESS AND OUTPUT
+.PP
+In a terminal, \fBpv\fR draws a progress bar for every format that goes through a pipe, such as a tar or a single compressed file. 7z shows its own percentage. Without \fBpv\fR, \fBunpack\fR prints a hint with the install line and works without the bar. \fB\-q\fR hides the hint.
+.PP
+The result line goes to stdout. Everything else, such as questions, warnings and \fB\-v\fR steps, goes to stderr. That keeps \fBunpack \-q x.tar.gz > done.log\fR clean, and \fB\-\-cat\fR output is exactly the file.
+.PP
+The result line is always the same shape:
+.PP
+.RS 4
+.nf
+ARCHIVE[ (N parts)] -> TARGET (SIZE, N files, TIME)
+.fi
+.RE
+.PP
+With \fB\-\-only\fR the count reads \fB2 of 201 files\fR.
+.PP
+\fB\-v\fR shows every step. Each real command starts with \fB+\fR, in a form you can paste into a shell:
+.PP
+.RS 4
+.nf
+$ unpack -v backup.tar.gz
+unpack: backup.tar.gz: tar.gz, from the name
+unpack: tool: pigz, in place of gzip
+unpack: listing: 4 files, 24KB, one top folder backup/
+unpack: paths: ok, none escape
+unpack: disk: 52KB needed, 725MB free on /home
+unpack: memory: ok, pigz needs under 1MB
+unpack: ratio: 1.4x, the limit is 100x
++ cat backup.tar.gz | pigz -dc | tar -xf - -C .unpack-GttVuf
+unpack: verify: 4 files on disk, 4 in the listing
+unpack: move: .unpack-GttVuf/backup -> backup
+backup.tar.gz -> backup/ (24KB, 4 files, 0.0s)
+.fi
+.RE
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to the tool that writes the files. Which tool that is depends on the format:
+.TP
+tar with any compressor, deb
+Gets the options: tar. Example: \fBunpack site.tar.gz \-\- \-\-no\-same\-owner\fR
+.TP
+a single compressed file
+Gets the options: the decompressor. Example: \fBunpack dump.sql.zst \-\- \-\-memory=2048MB\fR
+.TP
+cpio, rpm
+Gets the options: cpio. Example: \fBunpack root.cpio \-\- \-\-no\-preserve\-owner\fR
+.TP
+zip
+Gets the options: unzip, or 7z. Example: \fBunpack notes.zip \-\- \-LL\fR
+.TP
+7z, split zip, iso
+Gets the options: 7z. Example: \fBunpack photos.7z \-\- \-mmt=4\fR
+.TP
+rar
+Gets the options: unrar, 7z or unar. Example: \fBunpack film.part1.rar \-\- \-ai\fR
+.TP
+initramfs
+Gets the options: unmkinitramfs, or cpio. Example: \fBunpack initrd.img \-\- \-\-no\-preserve\-owner\fR
+.PP
+\fBunpack\fR does not check these options. An option that changes which files come out, such as tar's \fB\-\-exclude\fR, makes the file count differ from the listing. That shows as a warning, and the archive is then not offered for deletion.
+.SH NEEDS
+.PP
+tar, gzip and xz, which every distro has, and \fBfile\fR for archives with unknown names. Every other tool is needed only for its own format, as the table in Formats shows. When one is missing, \fBunpack\fR names it with the install line for your package manager and exits with status 3:
+.PP
+.RS 4
+.nf
+$ unpack logs.tar.zst
+unpack: needs zstd. Install it with: sudo apt install zstd
+.fi
+.RE
+.PP
+Optional tools:
+.IP \(bu 2
+\fBpv\fR draws the progress bar. Package \fBpv\fR.
+.IP \(bu 2
+\fBpigz\fR, \fBpbzip2\fR and \fBplzip\fR decompress on every core.
+.IP \(bu 2
+\fBcurl\fR fetches URLs. Package \fBcurl\fR.
+.IP \(bu 2
+\fBpodman\fR or \fBdocker\fR runs \fB\-\-sandbox\fR. Packages \fBpodman\fR, \fBdocker.io\fR.
+.IP \(bu 2
+\fBunmkinitramfs\fR splits initramfs images. Package \fBinitramfs\-tools\-bin\fR.
+.IP \(bu 2
+\fBbsdtar\fR reads isos when 7z is missing. Package \fBlibarchive\-tools\fR.
+.PP
+Package names on other distros:
+.TP
+7z
+apt: \fB7zip\fR. dnf: \fB7zip\fR. pacman: \fB7zip\fR. zypper: \fB7zip\fR. apk: \fB7zip\fR
+.TP
+unrar
+apt: \fBunrar\fR. dnf: none. pacman: \fBunrar\fR. zypper: \fBunrar\fR. apk: \fBunrar\fR
+.TP
+unar
+apt: \fBunar\fR. dnf: \fBunar\fR. pacman: \fBunarchiver\fR. zypper: \fBunar\fR. apk: \fBunar\fR
+.TP
+rpm2cpio
+apt: \fBrpm2cpio\fR. dnf: \fBrpm\fR. pacman: \fBrpmextract\fR. zypper: \fBrpm\fR. apk: \fBrpm\fR
+.TP
+dpkg\-deb
+apt: \fBdpkg\fR. dnf: \fBdpkg\fR. pacman: \fBdpkg\fR. zypper: \fBdpkg\fR. apk: \fBdpkg\fR
+.TP
+bsdtar
+apt: \fBlibarchive\-tools\fR. dnf: \fBbsdtar\fR. pacman: \fBlibarchive\fR. zypper: \fBbsdtar\fR. apk: \fBlibarchive\-tools\fR
+.TP
+unmkinitramfs
+apt: \fBinitramfs\-tools\-bin\fR. dnf: none. pacman: none. zypper: none. apk: none
+.SH EXAMPLES
+.SS Unpack a backup and keep the archive
+.PP
+.RS 4
+.nf
+$ unpack -k backup.tar.gz
+backup.tar.gz -> backup/ (24KB, 4 files, 0.0s)
+.fi
+.RE
+.SS Unpack a split backup into another folder
+.PP
+.RS 4
+.nf
+$ unpack -o ~/restore backup.tar.gz.aa
+backup.tar.gz (4 parts) -> ~/restore/backup/ (31MB, 201 files, 3.4s)
+.fi
+.RE
+.SS Look inside before unpacking
+.PP
+.RS 4
+.nf
+$ unpack -l backup.tar.gz
+          backup/
+      2B  backup/notes.txt
+          backup/db/
+     6KB  backup/db/blob.bin
+    18KB  backup/db/dump.sql
+          backup/etc/
+     10B  backup/etc/nginx.conf
+backup.tar.gz: 4 files, 24KB
+.fi
+.RE
+.SS Check an archive
+.PP
+.RS 4
+.nf
+$ unpack -t backup.tar.gz
+backup.tar.gz: ok, 4 files, 24KB
+.fi
+.RE
+.SS Read one file without unpacking
+.PP
+.RS 4
+.nf
+$ unpack --cat backup/etc/nginx.conf backup.tar.gz
+server {}
+.fi
+.RE
+.SS Take only the config files
+.PP
+.RS 4
+.nf
+$ unpack --only '*.conf' backup.tar.gz
+backup.tar.gz -> backup/ (10B, 1 of 4 files, 0.0s)
+.fi
+.RE
+.SS Pass options to 7z
+.PP
+.RS 4
+.nf
+$ unpack -v photos.7z -- -mmt=4
+unpack: photos.7z: 7z, from the name
+unpack: tool: 7z
+unpack: listing: 811 files, 1.2GB, one top folder photos/
+unpack: paths: ok, none escape
+unpack: disk: 1.2GB needed, 38GB free on /home
+unpack: memory: ok, 7z needs 16MB, 5.2GB is free
+unpack: ratio: 1.0x, the limit is 100x
++ 7z x -o.unpack-fc0aKD -y -mmt=4 photos.7z
+unpack: verify: 811 files on disk, 811 in the listing
+unpack: move: .unpack-fc0aKD/photos -> photos
+photos.7z -> photos/ (1.2GB, 811 files, 14.2s)
+.fi
+.RE
+.SS Undo the last unpack
+.PP
+.RS 4
+.nf
+$ unpack --undo
+last run  2026-09-29 16:56
+archive   backup.tar.gz, now in the trash
+created   backup/, 4 files, 24 KB
+Move backup/ to the trash and bring back backup.tar.gz? [y/N] y
+backup/ is in the trash.
+backup.tar.gz is back in ./.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB`could not read the archive, it may be damaged or incomplete`.\fR The tool failed while listing. For a download, check the size against the source and download it again. For a \fB.aa\fR or \fB.001\fR set, check that the last part is there. The lines above the message are the tool's own error.
+.PP
+\fB`unpacking failed, nothing was changed`.\fR The listing worked but writing did not. The tool's error is above the message. A full disk and a file that is damaged halfway are the usual causes. The temp folder is already removed.
+.PP
+\fB`not an initramfs image this command can read`.\fR The image has a layout \fBunpack\fR does not know, such as a compressed layer in the middle. Install \fBinitramfs\-tools\-bin\fR for \fBunmkinitramfs\fR.
+.PP
+\fB`unknown archive type`.\fR Neither the name nor the content matched a format. \fBfile notes.txt\fR shows what the file really is. Without \fBfile\fR installed, only the name counts, and the message names the package to install.
+.PP
+\fBA folder called `backup\-1` instead of `backup`.\fR \fBbackup\fR already existed. \fBunpack\fR never writes into an existing folder. Move the old one away and run \fBunpack\fR again, or compare the two with \fBdiff \-r\fR.
+.PP
+\fBOwners and permissions.\fR tar keeps the modes in the archive. As a normal user you own every file. As root, tar also restores the owners. Pass \fB\-\- \-\-no\-same\-owner\fR to stop that.
+.PP
+\fBThe progress bar does not show.\fR Install \fBpv\fR. The bar only shows in a terminal, and never with \fB\-q\fR.
+.PP
+\fBThe delete question never comes.\fR It needs a terminal, a verified count, a local file and no \fB\-\-only\fR. \fB\-v\fR shows the verify line. In a script, add \fB\-\-rm\fR.
+.PP
+\fB`\-\-undo` keeps some files.\fR Those are files you changed or added after the unpack. They are listed, and you can remove them yourself.
+.PP
+\fBA sandbox run fails with `needs 7z`.\fR The container image lacks the tool. Set \fBUNPACK_SANDBOX_IMAGE\fR to an image that has it.
+.SH EXIT STATUS
+.TP
+0
+Everything unpacked. Also when you answered no to the delete question.
+.TP
+1
+An archive failed, a part is missing, a password was wrong, or \fB\-\-cat\fR did not find the file. With several archives, 1 when any of them failed.
+.TP
+2
+Bad usage, such as an unknown option or two actions at once.
+.TP
+3
+A tool is missing. The message names it and the package.
+.TP
+4
+Refused by a safety check. Nothing was written.
+.TP
+5
+You answered no to the ratio question or to \fB\-\-undo\fR.
+.PP
+With several archives, \fBunpack\fR goes on after a failure and exits with 1 at the end. Ctrl+C stops the whole run and removes the temp folder.
+.SH SEE ALSO
+.PP
+\fBsquash\fR, \fBarchdiff\fR, \fBarchmount\fR, \fBautounpack\fR, \fBtar(1)\fR, \fB7z(1)\fR, \fBunzip(1)\fR, \fBunmkinitramfs(8)\fR

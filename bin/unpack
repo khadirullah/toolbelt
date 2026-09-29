@@ -1,0 +1,2242 @@
+#!/usr/bin/env bash
+# unpack: unpack any archive, from a file or a URL.
+set -uo pipefail
+TB_CMD=unpack
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+
+usage() {
+    cat <<'EOF'
+usage: unpack [options] archive|url ... [-- tool options]
+       unpack --undo | --history
+
+Unpack any archive, from a file or a URL.
+
+Where it goes:
+  -H, --here          put the files in the current folder
+  -d, --dir           always make a new folder named after the archive
+  -o, --out DIR       unpack into DIR, combines with -H and -d
+
+What it does:
+  -l, --list          list the contents and unpack nothing
+  -t, --test          check every file and unpack nothing
+      --only PATTERN  unpack only the files that match, repeat for more
+      --cat FILE      print one file from the archive to stdout
+  -p, --password      ask for the password of a zip, 7z or rar
+  -r, --recursive     also unpack archives found inside, 3 levels deep
+      --sandbox       unpack in a podman container with no network
+
+The archive:
+      --rm            move it to the trash after a checked unpack
+  -k, --keep          keep it and never ask
+  -y, --yes           go past the memory and size ratio checks
+      --undo          move what the last unpack made to the trash
+      --history       list past unpacks, newest first
+
+Output:
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to the tool for the format, such as 7z or unzip.
+  For any tar, with or without compression, they go to tar.
+
+Examples:
+  unpack backup.tar.gz
+  unpack -o ~/restore backup.tar.gz.aa
+  unpack --only '*.yaml' chart-1.4.2.tgz
+  unpack https://example.com/tool-1.4.2.tar.gz
+  unpack -v photos.7z -- -mmt=4
+
+Needs: tar, plus the tool for each format. See man unpack.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# ---------------------------------------------------------------- settings
+
+RATIO_LIMIT=100               # refuse or ask above this unpacked/archive ratio
+RATIO_FLOOR=$((1024 * 1024))  # never flag an archive that unpacks to less
+BLOCK_BYTES=4096              # disk space counted for each entry on top of its size
+MAX_DEPTH=3                   # levels for -r, counting the archive you named
+HISTORY_KEEP=200              # records kept in unpack.log
+
+place=smart         # smart, here or dir
+action=unpack       # unpack, list, test, cat, undo, history
+outdir=""
+only=()
+cat_file=""
+want_password=0
+recursive=0
+sandbox=0
+TB_RM=0
+TB_KEEP=0
+depth=${UNPACK_DEPTH:-1}
+nested=${UNPACK_NESTED:-0}
+in_sandbox=${UNPACK_IN_SANDBOX:-0}
+sandbox_image=${UNPACK_SANDBOX_IMAGE:-docker.io/library/debian:stable-slim}
+
+# ---------------------------------------------------------------- small helpers
+
+# Quote one word the way tb_show does, so -v lines can be copied and run.
+shq() {
+    if [[ $1 =~ ^[][A-Za-z0-9_./:=,@%+^-]+$ ]]; then
+        printf '%s' "$1"
+    else
+        printf "'%s'" "${1//\'/\'\\\'\'}"
+    fi
+}
+
+# A command as one line of text, from its words.
+cmdtext() {
+    local out="" a
+    for a in "$@"; do out+="${out:+ }$(shq "$a")"; done
+    printf '%s' "$out"
+}
+
+# A path for -v command lines: relative under the current folder, else absolute.
+rel() {
+    local p=$1
+    if [[ $p == "$PWD" ]]; then
+        echo .
+    elif [[ $p == "$PWD"/* ]]; then
+        echo "${p#"$PWD"/}"
+    else
+        echo "$p"
+    fi
+}
+
+# A path for people: relative under the current folder, ~ under home.
+# A folder for a sentence, always with one trailing slash.
+dir_text() { local t; t=$(nice_path "$1"); echo "${t%/}/"; }
+
+nice_path() {
+    local p=$1
+    if [[ $p == "$PWD" ]]; then
+        echo ./
+    elif [[ $p == "$PWD"/* ]]; then
+        echo "${p#"$PWD"/}"
+    elif [[ $p == "$HOME" ]]; then
+        echo "~/"
+    elif [[ $p == "$HOME"/* ]]; then
+        echo "~/${p#"$HOME"/}"
+    else
+        echo "$p"
+    fi
+}
+
+# A result path for the summary line, with a slash after a folder.
+show_target() {
+    local p=${1%/} s
+    [[ -n $p ]] || p=/
+    s=$(nice_path "$p")
+    [[ -d $p && ! -L $p ]] && s=${s%/}/
+    echo "$s"
+}
+
+# Escape the glob characters in a name, for patterns built from real names.
+globesc() { sed 's/[][*?\\]/\\&/g' <<<"$1"; }
+
+# Encode tabs, newlines and backslashes for one field of unpack.log.
+enc() {
+    local s=${1//\\/\\\\}
+    s=${s//$'\t'/\\t}
+    s=${s//$'\n'/\\n}
+    printf '%s' "$s"
+}
+dec() { printf '%b' "$1"; }
+
+# Total size of the regular files under a folder, in bytes. Folders count 0.
+files_bytes() {
+    find "$1" -type f -exec stat -c %s {} + 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'
+}
+
+# Files and links under a folder, the unit the listing counts.
+files_count() {
+    find "$1" \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' '
+}
+
+# The mount point that holds a path, for the disk message.
+mount_of() { df -P -- "$1" 2>/dev/null | awk 'NR == 2 { print $NF }'; }
+
+# The password for this archive. Asked in a terminal, one line of stdin otherwise.
+PW=""
+HAVE_PW=0
+read_password() {
+    local label=$1
+    (( HAVE_PW )) && return 0
+    if tb_is_tty; then
+        printf 'Password for %s: ' "$label" >&2
+        IFS= read -rs PW || PW=""
+        printf '\n' >&2
+    elif ! IFS= read -r PW; then
+        tb_die "$E_USAGE" "-p needs the password on stdin when there is no terminal"
+    fi
+    HAVE_PW=1
+}
+
+# ---------------------------------------------------------------- detection
+
+# Split a type such as tar.gz into KIND (tar, cpio or raw) and COMP (gz).
+# Types that are not a stream, such as zip, have an empty COMP.
+split_type() {
+    case $1 in
+        tar|cpio) KIND=$1; COMP="" ;;
+        tar.*|cpio.*) KIND=${1%%.*}; COMP=${1#*.} ;;
+        gz|bz2|xz|lzma|zst|lz4|lz|lzo|br|Z) KIND=raw; COMP=$1 ;;
+        *) KIND=$1; COMP="" ;;
+    esac
+}
+
+# The archive type from the file name alone.
+detect_name() {
+    local b n
+    b=$(basename "$1")
+    n=${b,,}
+    case $n in
+        initrd|initrd.img*|initrd-*|initramfs*) echo initramfs; return ;;
+    esac
+    case $n in
+        *.tar.gz|*.tgz|*.taz)                     echo tar.gz ;;
+        *.tar.bz2|*.tar.bz|*.tbz2|*.tbz|*.tb2)    echo tar.bz2 ;;
+        *.tar.xz|*.txz)                           echo tar.xz ;;
+        *.tar.lzma|*.tlzma)                       echo tar.lzma ;;
+        *.tar.zst|*.tar.zstd|*.tzst)              echo tar.zst ;;
+        *.tar.lz4|*.tlz4)                         echo tar.lz4 ;;
+        *.tar.lz|*.tlz)                           echo tar.lz ;;
+        *.tar.lzo|*.tzo)                          echo tar.lzo ;;
+        *.tar.br|*.tbr)                           echo tar.br ;;
+        *.tar.z|*.tz)                             echo tar.Z ;;
+        *.tar)                                    echo tar ;;
+        *.cpio.gz|*.cpgz)                         echo cpio.gz ;;
+        *.cpio.bz2)                               echo cpio.bz2 ;;
+        *.cpio.xz)                                echo cpio.xz ;;
+        *.cpio.zst)                               echo cpio.zst ;;
+        *.cpio.lz4)                               echo cpio.lz4 ;;
+        *.cpio)                                   echo cpio ;;
+        *.gz)                                     echo gz ;;
+        *.bz2|*.bz)                               echo bz2 ;;
+        *.xz)                                     echo xz ;;
+        *.lzma)                                   echo lzma ;;
+        *.zst|*.zstd)                             echo zst ;;
+        *.lz4)                                    echo lz4 ;;
+        *.lz)                                     echo lz ;;
+        *.lzo)                                    echo lzo ;;
+        *.br)                                     echo br ;;
+        *.z)                                      echo Z ;;
+        *.zip|*.jar|*.war|*.ear|*.whl)            echo zip ;;
+        *.7z)                                     echo 7z ;;
+        *.rar)                                    echo rar ;;
+        *.deb|*.udeb|*.ddeb)                      echo deb ;;
+        *.rpm)                                    echo rpm ;;
+        *.iso)                                    echo iso ;;
+        *) return 1 ;;
+    esac
+}
+
+# The compression of a mime type, or nothing.
+mime_comp() {
+    case $1 in
+        application/gzip|application/x-gzip) echo gz ;;
+        application/x-bzip2)                 echo bz2 ;;
+        application/x-xz)                    echo xz ;;
+        application/x-lzma)                  echo lzma ;;
+        application/zstd|application/x-zstd) echo zst ;;
+        application/x-lz4)                   echo lz4 ;;
+        application/x-lzip)                  echo lz ;;
+        application/x-lzop)                  echo lzo ;;
+        application/x-compress)              echo Z ;;
+        *) return 1 ;;
+    esac
+}
+
+# The archive type from the first bytes of a file, with file(1).
+# A compressed tar or cpio counts as tar.gz, cpio.gz and so on.
+detect_content() {
+    local f=$1 outer inner comp
+    tb_has file || return 1
+    outer=$(file --brief --mime-type -- "$f" 2>/dev/null) || return 1
+    if comp=$(mime_comp "$outer"); then
+        inner=$(file --brief --mime-type -z -- "$f" 2>/dev/null)
+        if [[ $inner == "$outer" || -z $inner ]] && set_decomp "$comp" quiet; then
+            # file could not look inside, so decompress the first bytes.
+            inner=$("${DECOMP[@]}" <"$f" 2>/dev/null | head -c 8192 | file --brief --mime-type - 2>/dev/null)
+        fi
+        case $inner in
+            application/x-tar)  echo "tar.$comp" ;;
+            application/x-cpio) echo "cpio.$comp" ;;
+            *)                  echo "$comp" ;;
+        esac
+        return 0
+    fi
+    case $outer in
+        application/x-tar)  echo tar ;;
+        application/x-cpio) echo cpio ;;
+        application/zip|application/java-archive|application/x-java-archive|application/x-zip-compressed)
+                            echo zip ;;
+        application/x-7z-compressed) echo 7z ;;
+        application/vnd.rar|application/x-rar|application/x-rar-compressed) echo rar ;;
+        application/vnd.debian.binary-package) echo deb ;;
+        application/x-rpm)  echo rpm ;;
+        application/x-iso9660-image) echo iso ;;
+        *) return 1 ;;
+    esac
+}
+
+# The outer layer of a type, what the first bytes show: gz for tar.gz.
+outer_of() {
+    local KIND COMP
+    split_type "$1"
+    echo "${COMP:-$KIND}"
+}
+
+# A file name without its archive extensions: backup.tar.gz gives backup.
+stem() {
+    local b=$1 l ext cut=0
+    l=${b,,}
+    for ext in tgz taz tbz2 tbz tb2 txz tlzma tzst tlz4 tlz tzo tbr tz gz bz2 bz xz lzma zst zstd lz4 lz lzo br z \
+               tar cpio cpgz zip jar war ear whl 7z rar deb udeb ddeb rpm iso; do
+        if [[ $l == ?*.$ext ]]; then
+            b=${b:0:${#b}-${#ext}-1}
+            cut=1
+            break
+        fi
+    done
+    l=${b,,}
+    if (( cut )) && [[ $l == ?*.tar || $l == ?*.cpio ]]; then
+        b=${b%.*}
+    fi
+    if (( ! cut )); then
+        echo "$b.out"
+    else
+        echo "$b"
+    fi
+}
+
+# ---------------------------------------------------------------- multi-part sets
+
+# Collect the numbered parts of a set into PARTS, in order. Stops with a
+# message naming each missing part. Arguments: folder, the name before the
+# number, a glob for the rest, a regex that captures the number, the first
+# number, the label format such as '.part%s.rar', and "alpha" for aa, ab.
+collect() {
+    local dir=$1 prefix=$2 rest=$3 re=$4 first=$5 lfmt=$6 alpha=${7:-} c i max=-1 width=1 s
+    local -A byidx=()
+    local found=()
+    local oldifs=$IFS
+    IFS=
+    shopt -s nullglob nocaseglob
+    # shellcheck disable=SC2206
+    found=("$dir"/$(globesc "$prefix")$rest)
+    shopt -u nullglob nocaseglob
+    IFS=$oldifs
+    for c in "${found[@]}"; do
+        [[ ${c,,} =~ $re ]] || continue
+        width=${#BASH_REMATCH[1]}
+        if [[ -n $alpha ]]; then
+            s=${BASH_REMATCH[1]}
+            i=$(( ($(printf '%d' "'${s:0:1}") - 97) * 26 + $(printf '%d' "'${s:1:1}") - 97 ))
+        else
+            i=$((10#${BASH_REMATCH[1]}))
+        fi
+        byidx[$i]=$c
+        (( i > max )) && max=$i
+    done
+    PARTS=()
+    PART_LABELS=()
+    local missing=() have=() label
+    for ((i = first; i <= max; i++)); do
+        if [[ -n $alpha ]]; then
+            label=$(printf "\\$(printf '%03o' $((97 + i / 26)))\\$(printf '%03o' $((97 + i % 26)))")
+        else
+            label=$(printf '%0*d' "$width" "$i")
+        fi
+        # shellcheck disable=SC2059
+        label=$(printf "$lfmt" "$label")
+        if [[ -n ${byidx[$i]:-} ]]; then
+            PARTS+=("${byidx[$i]}")
+            PART_LABELS+=("$label")
+            have+=("$label")
+        else
+            missing+=("$label")
+        fi
+    done
+    if (( ${#missing[@]} )); then
+        local shown=("${have[@]:0:8}")
+        (( ${#have[@]} > 8 )) && shown+=("...")
+        if (( ${#missing[@]} == 1 )); then
+            tb_err "$SETNAME: part ${missing[0]} is missing, found ${shown[*]:-none}"
+        else
+            tb_err "$SETNAME: parts ${missing[*]} are missing, found ${shown[*]:-none}"
+        fi
+        return 1
+    fi
+    if (( ! ${#PARTS[@]} )); then
+        tb_err "$SETNAME: no parts found"
+        return 1
+    fi
+}
+
+# Work out what one file is. Sets:
+#   TYPE, KIND, COMP  the archive type, such as tar.gz, tar and gz
+#   PARTS             every file of the set in order. PARTS[0] is what tools open
+#   SPLIT             1 when the parts are raw pieces of one file, joined with cat
+#   NAME              the folder or file name for the output
+#   SETNAME           the name of the whole set, for messages
+resolve() {
+    local f=$1 dir base lower p="" named ntype="" ctype="" how n
+    dir=$(dirname "$f")
+    base=$(basename "$f")
+    lower=${base,,}
+    PARTS=("$f")
+    PART_LABELS=()
+    SPLIT=0
+    TYPE=""
+    NAME=$(stem "$base")
+    SETNAME=$base
+
+    if [[ $lower =~ ^(.+)\.part[0-9]+\.rar$ ]]; then
+        p=${base:0:${#BASH_REMATCH[1]}}
+        SETNAME=$p.rar
+        collect "$dir" "$p" '.part*.rar' '\.part([0-9]+)\.rar$' 1 '.part%s.rar' || return 1
+        TYPE=rar
+        NAME=$p
+    elif [[ $lower =~ ^(.+)\.r[0-9]{2}$ ]] ||
+         { [[ $lower =~ ^(.+)\.rar$ ]] && compgen -G "$(globesc "$dir/${base%.*}").[rR]00" >/dev/null; }; then
+        p=${base:0:${#BASH_REMATCH[1]}}
+        SETNAME=$p.rar
+        collect "$dir" "$p" '.r[0-9][0-9]' '\.r([0-9]{2})$' 0 '.r%s' || return 1
+        if [[ ! -f $dir/$p.rar ]]; then
+            tb_err "$SETNAME: the first part $p.rar is missing"
+            return 1
+        fi
+        PARTS=("$dir/$p.rar" "${PARTS[@]}")
+        PART_LABELS=(.rar "${PART_LABELS[@]}")
+        TYPE=rar
+        NAME=$p
+    elif [[ $lower =~ ^(.+)\.z[0-9]{2}$ ]] ||
+         { [[ $lower =~ ^(.+)\.zip$ ]] && compgen -G "$(globesc "$dir/${base%.*}").[zZ]01" >/dev/null; }; then
+        p=${base:0:${#BASH_REMATCH[1]}}
+        SETNAME=$p.zip
+        collect "$dir" "$p" '.z[0-9][0-9]' '\.z([0-9]{2})$' 1 '.z%s' || return 1
+        if [[ ! -f $dir/$p.zip ]]; then
+            tb_err "$SETNAME: the last part $p.zip is missing"
+            return 1
+        fi
+        PARTS=("$dir/$p.zip" "${PARTS[@]}")
+        PART_LABELS=(.zip "${PART_LABELS[@]}")
+        TYPE=zipsplit
+        NAME=$p
+    elif [[ $lower == *.zip ]] && n=$(zip_disks "$f") && (( n > 1 )); then
+        # A lone .zip that says it is the last disk of a split set.
+        p=${base%.*}
+        SETNAME=$base
+        local want=() i
+        for ((i = 1; i < n; i++)); do want+=("$(printf '.z%02d' "$i")"); done
+        if (( n == 2 )); then
+            tb_err "$SETNAME: part ${want[0]} is missing, found .zip"
+        else
+            tb_err "$SETNAME: parts ${want[*]} are missing, found .zip"
+        fi
+        return 1
+    elif [[ $lower =~ ^(.+)\.[0-9]{3}$ ]]; then
+        p=${base:0:${#BASH_REMATCH[1]}}
+        SETNAME=$p
+        collect "$dir" "$p" '.[0-9][0-9][0-9]' '\.([0-9]{3})$' 1 '.%s' || return 1
+        SPLIT=1
+        NAME=$(stem "$p")
+    elif [[ $lower =~ ^(.+)\.(a[a-z])$ ]] && detect_name "${BASH_REMATCH[1]}" >/dev/null; then
+        p=${base:0:${#BASH_REMATCH[1]}}
+        SETNAME=$p
+        collect "$dir" "$p" '.[a-z][a-z]' '\.([a-z][a-z])$' 0 '.%s' alpha || return 1
+        SPLIT=1
+        NAME=$(stem "$p")
+    elif [[ $lower =~ ^(.+)\.[0-9]{2}$ ]] && detect_name "${BASH_REMATCH[1]}" >/dev/null; then
+        p=${base:0:${#BASH_REMATCH[1]}}
+        SETNAME=$p
+        collect "$dir" "$p" '.[0-9][0-9]' '\.([0-9]{2})$' 0 '.%s' || return 1
+        SPLIT=1
+        NAME=$(stem "$p")
+    fi
+
+    named=$base
+    (( SPLIT )) && named=$p
+    if [[ -n $TYPE ]]; then
+        how="from the part names"
+    else
+        ntype=$(detect_name "$named") || ntype=""
+        if [[ $ntype != initramfs ]]; then
+            ctype=$(detect_content "${PARTS[0]}") || ctype=""
+        fi
+        if [[ -n $ntype && -n $ctype && $ntype != "$ctype" ]]; then
+            # The name and the bytes disagree. The bytes win when the outer
+            # layer differs, or when they see a tar inside a plain .gz.
+            if [[ $(outer_of "$ntype") != "$(outer_of "$ctype")" || $ntype != tar.* && $ctype == tar.* ]]; then
+                tb_say "$base: the name says $ntype, the content is $ctype"
+                ntype=""
+            else
+                ctype=""
+            fi
+        fi
+        if [[ -n $ntype ]]; then
+            TYPE=$ntype
+            how="from the name"
+        elif [[ -n $ctype ]]; then
+            TYPE=$ctype
+            how="from the content, the name did not say"
+        fi
+    fi
+    if [[ -z $TYPE ]]; then
+        if tb_has file; then
+            tb_err "$base: unknown archive type"
+        else
+            tb_err "$base: unknown archive type. $(tb_missing_msg file), to detect it by content"
+        fi
+        return 1
+    fi
+    split_type "$TYPE"
+    if (( SPLIT )) && [[ $KIND == deb || $KIND == rpm || $KIND == initramfs ]]; then
+        tb_err "$base: a split $KIND is not supported, join the parts with cat first"
+        return 1
+    fi
+    if [[ $KIND == cpio && -z $COMP ]] && (( ! SPLIT )) && walk_layers "${PARTS[0]}" && (( ${#LAYER_OFF[@]} > 1 )); then
+        TYPE=initramfs
+        how+=", with ${#LAYER_OFF[@]} layers"
+        split_type "$TYPE"
+    fi
+    [[ $KIND == initramfs ]] && NAME=$(initramfs_name "$base")
+    [[ $KIND != raw && $NAME == *.out ]] && NAME=${NAME%.out}
+    tb_say "$base: $TYPE, $how"
+    if (( ${#PARTS[@]} > 1 )); then
+        local i n=0
+        for i in "${!PARTS[@]}"; do [[ ${PARTS[i]} == "$f" ]] && n=$((i + 1)); done
+        if [[ $TYPE == zipsplit ]]; then
+            # The .zip holds the end of the set, so it counts last.
+            (( n == 1 )) && n=$(( ${#PARTS[@]} + 1 ))
+            tb_say "$base: part $((n - 1)) of ${#PARTS[@]}, ${PART_LABELS[1]} to ${PART_LABELS[0]}"
+        else
+            tb_say "$base: part $n of ${#PARTS[@]}, ${PART_LABELS[0]} to ${PART_LABELS[${#PART_LABELS[@]}-1]}"
+        fi
+    fi
+    return 0
+}
+
+# initrd.img-6.1.0-amd64 becomes initrd-6.1.0-amd64, initramfs.img becomes initramfs.
+initramfs_name() {
+    local b=$1
+    if [[ ${b,,} =~ ^.+(\.img)(-.*)?$ ]]; then
+        b=${b:0:${#b} - ${#BASH_REMATCH[1]} - ${#BASH_REMATCH[2]}}${b:${#b} - ${#BASH_REMATCH[2]}}
+    fi
+    echo "$b"
+}
+
+# ---------------------------------------------------------------- tools
+
+# Pick the decompressor for a compression. Sets DECOMP to the command that
+# reads stdin and writes stdout, and DECOMP_NOTE for -v. With "quiet" it
+# returns 1 instead of exiting when the tool is missing.
+set_decomp() {
+    local comp=$1 quiet=${2:-} want alt=""
+    DECOMP=()
+    DECOMP_NOTE=""
+    case $comp in
+        gz)   want=gzip;  alt=pigz ;;
+        bz2)  want=bzip2; alt=pbzip2 ;;
+        xz)   want=xz ;;
+        lzma) want=xz ;;
+        zst)  want=zstd ;;
+        lz4)  want=lz4 ;;
+        lz)   want=lzip;  alt=plzip ;;
+        lzo)  want=lzop ;;
+        br)   want=brotli ;;
+        Z)    want=gzip ;;
+        *) return 1 ;;
+    esac
+    if [[ -n $alt ]] && tb_has "$alt"; then
+        DECOMP_NOTE="$alt, in place of $want"
+        want=$alt
+    elif [[ $comp == Z ]] && ! tb_has gzip && tb_has uncompress; then
+        want=uncompress
+    elif ! tb_has "$want"; then
+        [[ -n $quiet ]] && return 1
+        tb_need "$want"
+    fi
+    case $comp in
+        lzma) DECOMP=(xz --format=lzma -dc) ;;
+        zst)  DECOMP=(zstd -dcq --long=31) ;;
+        Z)    if [[ $want == uncompress ]]; then DECOMP=(uncompress -c); else DECOMP=(gzip -dc); fi ;;
+        *)    DECOMP=("$want" -dc) ;;
+    esac
+    [[ -n $DECOMP_NOTE ]] || DECOMP_NOTE=$want
+    return 0
+}
+
+# The 7-Zip binary, or empty.
+sevenzip() {
+    local c
+    for c in 7z 7zz 7za; do
+        tb_has "$c" && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+# True when 7-Zip on this machine reads rar.
+sevenzip_rar() {
+    local sz
+    sz=$(sevenzip) || return 1
+    "$sz" i 2>/dev/null | grep -qE '[[:space:]]Rar[[:space:]]'
+}
+
+# Choose the tools for the current type and exit 3 when one is missing.
+# Sets TOOL for the non-stream formats.
+choose_tools() {
+    TOOL=""
+    DECOMP=()
+    DECOMP_NOTE=""
+    SZ=$(sevenzip) || SZ=""
+    case $KIND in
+        tar)
+            tb_need tar
+            [[ -n $COMP ]] && set_decomp "$COMP" ;;
+        raw)
+            set_decomp "$COMP" ;;
+        cpio)
+            tb_need cpio
+            [[ -n $COMP ]] && set_decomp "$COMP" ;;
+        zip)
+            if (( want_password )) && [[ -n $SZ ]]; then TOOL=$SZ
+            elif (( SPLIT )) && [[ -n $SZ ]]; then TOOL=$SZ
+            elif tb_has unzip; then TOOL=unzip
+            elif [[ -n $SZ ]]; then TOOL=$SZ
+            else tb_need unzip; fi ;;
+        zipsplit)
+            if [[ -n $SZ ]]; then TOOL=$SZ
+            else tb_need zip unzip; TOOL=unzip; fi ;;
+        7z)
+            [[ -n $SZ ]] || tb_need 7z
+            TOOL=$SZ ;;
+        iso)
+            if [[ -n $SZ ]]; then TOOL=$SZ
+            elif tb_has bsdtar; then TOOL=bsdtar
+            else tb_need 7z; fi ;;
+        rar)
+            # 7z takes a password on stdin, unrar only on its command line.
+            if (( want_password )) && sevenzip_rar; then TOOL=$SZ
+            elif tb_has unrar; then TOOL=unrar
+            elif sevenzip_rar; then TOOL=$SZ
+            elif tb_has unar && tb_has lsar; then TOOL=unar
+            else tb_need unar lsar; fi ;;
+        deb)
+            tb_need tar
+            if tb_has dpkg-deb; then TOOL=dpkg-deb
+            else tb_need ar; TOOL=ar; fi ;;
+        rpm)
+            tb_need rpm2cpio cpio
+            TOOL=rpm2cpio ;;
+        initramfs)
+            tb_need cpio
+            if tb_has unmkinitramfs; then TOOL=unmkinitramfs; else TOOL=cpio; fi ;;
+    esac
+    if [[ -n $DECOMP_NOTE && $DECOMP_NOTE == *"in place of"* ]]; then
+        tb_say "tool: $DECOMP_NOTE"
+    elif [[ -n $TOOL ]]; then
+        tb_say "tool: $TOOL"
+    elif [[ -n $DECOMP_NOTE ]]; then
+        tb_say "tool: $DECOMP_NOTE"
+    fi
+}
+
+# ---------------------------------------------------------------- streams
+
+# The parts, joined, to stdout. Through pv when a progress bar is wanted.
+feed() {
+    if (( ${SHOW_PV:-0} )); then
+        pv -N "$NAME" "${PARTS[@]}"
+    else
+        cat -- "${PARTS[@]}"
+    fi
+}
+
+# The decompressed stream of a tar, cpio or raw file, to stdout.
+stream() {
+    if [[ -n $COMP ]]; then
+        feed | "${DECOMP[@]}"
+    else
+        feed
+    fi
+}
+
+# Text for -v: "cat a b | gzip -dc".
+stream_text() {
+    local parts=() p t
+    for p in "${PARTS[@]}"; do parts+=("$(rel "$p")"); done
+    if (( ${SHOW_PV:-0} )); then
+        t=$(cmdtext pv -N "$NAME" "${parts[@]}")
+    else
+        t=$(cmdtext cat "${parts[@]}")
+    fi
+    [[ -n $COMP ]] && t+=" | $(cmdtext "${DECOMP[@]}")"
+    printf '%s' "$t"
+}
+
+# The deb data tarball, uncompressed, to stdout.
+deb_tar() {
+    if [[ $TOOL == dpkg-deb ]]; then
+        dpkg-deb --fsys-tarfile "$OPEN"
+    else
+        local member comp
+        member=$(ar t "$OPEN" | grep -m1 '^data\.tar') || return 1
+        comp=${member#data.tar}
+        comp=${comp#.}
+        if [[ -z $comp ]]; then
+            ar p "$OPEN" "$member"
+        else
+            [[ $comp == zst ]] || [[ $comp == gz || $comp == xz || $comp == bz2 || $comp == lzma ]] || return 1
+            set_decomp "$comp" || return 1
+            ar p "$OPEN" "$member" | "${DECOMP[@]}"
+        fi
+    fi
+}
+
+deb_tar_text() {
+    if [[ $TOOL == dpkg-deb ]]; then
+        cmdtext dpkg-deb --fsys-tarfile "$(rel "$OPEN")"
+    else
+        printf '%s' "$(cmdtext ar p "$(rel "$OPEN")") data.tar.* | ..."
+    fi
+}
+
+# ---------------------------------------------------------------- initramfs layers
+
+LAYER_OFF=()
+LAYER_LEN=()
+LAYER_COMP=()
+
+# Hex of a few bytes at an offset.
+# How many disks a zip says its set has, from the end of central directory
+# record. Prints 1 for a normal zip.
+zip_disks() {
+    local off hex
+    off=$(tail -c 65557 -- "$1" 2>/dev/null | LC_ALL=C grep -obUaP 'PK\x05\x06' | tail -1 | cut -d: -f1)
+    [[ -n $off ]] || return 1
+    hex=$(tail -c 65557 -- "$1" | tail -c +$((off + 5)) | od -An -tx1 -N2 | tr -d ' \n')
+    [[ ${#hex} == 4 ]] || return 1
+    echo $(( 16#${hex:2:2}${hex:0:2} + 1 ))
+}
+
+hexat() { od -An -tx1 -v -N "$2" -j "$1" -- "$3" 2>/dev/null | tr -d ' \n'; }
+
+# Walk an initramfs image: plain cpio archives, one after another, and at
+# most one compressed archive at the end. Fills LAYER_OFF, LAYER_LEN and
+# LAYER_COMP. Returns 1 when the file is not laid out like that.
+walk_layers() {
+    local f=$1 size off=0 magic blocks region tpos end skip comp
+    size=$(stat -c %s -- "$f") || return 1
+    LAYER_OFF=()
+    LAYER_LEN=()
+    LAYER_COMP=()
+    while (( off < size )); do
+        magic=$(hexat "$off" 6 "$f")
+        case $magic in
+            303730373031|303730373032|303730373037)
+                blocks=$(tail -c +$((off + 1)) -- "$f" | LC_ALL=C cpio -it 2>&1 >/dev/null |
+                         awk '/blocks?$/ { print $1; exit }')
+                [[ $blocks =~ ^[0-9]+$ ]] || return 1
+                region=$((blocks * 512))
+                (( off + region > size )) && region=$((size - off))
+                tpos=$(tail -c +$((off + 1)) -- "$f" | head -c "$region" | LC_ALL=C grep -obUa 'TRAILER!!!' |
+                       tail -1 | cut -d: -f1)
+                [[ $tpos =~ ^[0-9]+$ ]] || return 1
+                end=$((tpos + 11))
+                [[ $magic != 303730373037 ]] && end=$(( (end + 3) / 4 * 4 ))
+                LAYER_OFF+=("$off")
+                LAYER_LEN+=("$end")
+                LAYER_COMP+=("")
+                off=$((off + end))
+                # Skip the zero padding before the next archive.
+                while (( off < size )); do
+                    skip=$(tail -c +$((off + 1)) -- "$f" | head -c 65536 | od -An -tx1 -v |
+                           tr -s ' \n' '\n\n' | awk 'NF { if ($1 != "00") { print n; f = 1; exit } n++ }
+                                                     END { if (!f) print n }')
+                    [[ $skip =~ ^[0-9]+$ ]] || return 1
+                    off=$((off + skip))
+                    (( skip < 65536 )) && break
+                done
+                ;;
+            *)
+                case $magic in
+                    1f8b*)         comp=gz ;;
+                    fd377a585a00)  comp=xz ;;
+                    28b52ffd*)     comp=zst ;;
+                    425a68*)       comp=bz2 ;;
+                    894c5a4f*)     comp=lzo ;;
+                    02214c18*|04224d18*) comp=lz4 ;;
+                    4c5a4950*)     comp=lz ;;
+                    5d0000*)       comp=lzma ;;
+                    *) return 1 ;;
+                esac
+                LAYER_OFF+=("$off")
+                LAYER_LEN+=($((size - off)))
+                LAYER_COMP+=("$comp")
+                break
+                ;;
+        esac
+    done
+    (( ${#LAYER_OFF[@]} ))
+}
+
+# One layer as a plain cpio stream, to stdout.
+layer_stream() {
+    local i=$1 f=$OPEN
+    if [[ -n ${LAYER_COMP[i]} ]]; then
+        set_decomp "${LAYER_COMP[i]}" || return 1
+        { tail -c +$((LAYER_OFF[i] + 1)) -- "$f" 2>/dev/null || true; } | head -c "${LAYER_LEN[i]}" | "${DECOMP[@]}"
+    else
+        { tail -c +$((LAYER_OFF[i] + 1)) -- "$f" 2>/dev/null || true; } | head -c "${LAYER_LEN[i]}"
+    fi
+}
+
+layer_label() {
+    local i=$1
+    if [[ -n ${LAYER_COMP[i]} ]]; then echo "cpio.${LAYER_COMP[i]}"; else echo cpio; fi
+}
+
+# The folder a layer goes to when there is more than one.
+layer_dir() {
+    local i=$1 last=$((${#LAYER_OFF[@]} - 1))
+    if (( i == last )); then echo main
+    elif (( i == 0 )); then echo early
+    else echo "early$((i + 1))"; fi
+}
+
+# ---------------------------------------------------------------- listing
+
+# Every lister writes lines of: type, size, path, link target, layer.
+# Type is f file, d folder, l symlink, h hard link or o other.
+
+# Parse `tar -tv` output. GNU tar quotes names with --quoting-style=c.
+awk_tar='
+function unq(s,    out, i, n, c, o) {
+    out = ""; n = length(s); i = 2
+    while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\\") {
+            i++; c = substr(s, i, 1)
+            if (c ~ /[0-7]/) { o = substr(s, i, 3); i += 2; c = sprintf("%c", (substr(o,1,1)*64 + substr(o,2,1)*8 + substr(o,3,1))) }
+            else if (c == "n" || c == "t" || c == "r") c = "?"
+            else if (c == "a") c = "\a"; else if (c == "b") c = "\b"; else if (c == "f") c = "\f"; else if (c == "v") c = "\v"
+            out = out c
+        } else if (c == "\"") { REST = substr(s, i + 1); return out }
+        else out = out c
+        i++
+    }
+    REST = ""; return out
+}
+{
+    t = substr($1, 1, 1); size = $3; line = $0
+    sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ /, "", line)
+    target = ""
+    if (substr(line, 1, 1) == "\"") {
+        name = unq(line); rest = REST
+        if (t == "l") { sub(/^ -> /, "", rest); target = unq(rest) }
+        else if (t == "h") { sub(/^ link to /, "", rest); target = unq(rest) }
+    } else {
+        name = line
+        if (t == "l" && index(line, " -> ")) { name = substr(line, 1, index(line, " -> ") - 1); target = substr(line, index(line, " -> ") + 4) }
+        if (t == "h" && index(line, " link to ")) { name = substr(line, 1, index(line, " link to ") - 1); target = substr(line, index(line, " link to ") + 9) }
+    }
+    if (t == "-" || t == "0") type = "f"; else if (t == "d") type = "d"; else if (t == "l") type = "l"
+    else if (t == "h") type = "h"; else type = "o"
+    if (type != "f") size = 0
+    if (size !~ /^[0-9]+$/) size = 0
+    printf "%s\t%s\t%s\t%s\t%s\n", type, size, name, target, LAYER
+}'
+
+# Parse `cpio -itvn` output, also the ls -l style of bsdtar -tv.
+awk_cpio='
+{
+    t = substr($1, 1, 1); line = $0
+    sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, "", line)
+    if (t == "c" || t == "b") { sub(/^[0-9]+, *[0-9]+ +/, "", line); size = 0 }
+    else { size = line; sub(/ .*/, "", size); sub(/^[0-9]+ +/, "", line) }
+    sub(/^[A-Za-z]+ +[0-9]+ +[0-9:]+ /, "", line)
+    name = line; target = ""
+    if (t == "l" && index(line, " -> ")) { name = substr(line, 1, index(line, " -> ") - 1); target = substr(line, index(line, " -> ") + 4) }
+    if (t == "-") type = "f"; else if (t == "d") type = "d"; else if (t == "l") type = "l"; else type = "o"
+    if (type != "f" || size !~ /^[0-9]+$/) size = 0
+    if (name == "." || name == "./") next
+    printf "%s\t%s\t%s\t%s\t%s\n", type, size, name, target, LAYER
+}'
+
+tar_is_gnu() {
+    [[ -z ${TAR_GNU:-} ]] && { if tar --version 2>/dev/null | grep -q 'GNU tar'; then TAR_GNU=1; else TAR_GNU=0; fi; }
+    (( TAR_GNU ))
+}
+
+# A tar on stdin as listing lines.
+list_tar_stdin() {
+    local st
+    if tar_is_gnu; then
+        LC_ALL=C tar -tvP --numeric-owner --quoting-style=c -f - | LC_ALL=C awk -v LAYER=0 "$awk_tar"
+    else
+        LC_ALL=C tar -tvf - | LC_ALL=C awk -v LAYER=0 "$awk_tar"
+    fi
+    st=("${PIPESTATUS[@]}")
+    (( st[0] == 0 && st[1] == 0 ))
+}
+
+# A cpio on stdin as listing lines.
+list_cpio_stdin() {
+    local st
+    LC_ALL=C cpio -itvn --quiet | LC_ALL=C awk -v LAYER="${1:-0}" "$awk_cpio"
+    st=("${PIPESTATUS[@]}")
+    (( st[0] == 0 && st[1] == 0 ))
+}
+
+# The 7-Zip listing, raw, kept for the memory check.
+sz_raw() {
+    local f=$OPEN
+    if (( HAVE_PW )); then
+        printf '%s\n' "$PW" | LC_ALL=C "$SZ" l -slt -- "$f"
+    else
+        LC_ALL=C "$SZ" l -slt -- "$f" </dev/null
+    fi
+}
+
+list_7z() {
+    local raw=$WORK/7z.raw rc
+    sz_raw >"$raw" 2>&1
+    rc=$?
+    if grep -qiE 'Wrong password|Break signaled|Enter password' "$raw" && (( rc != 0 )); then
+        if (( HAVE_PW )); then
+            tb_err "$SETNAME: wrong password"
+        else
+            tb_err "$SETNAME: the archive is encrypted, add -p to type the password"
+        fi
+        return 9
+    fi
+    (( rc == 0 )) || { sed -n 's/^ERROR: //p' "$raw" | head -3 >&2; return 1; }
+    grep -q '^Encrypted = +' "$raw" && ENCRYPTED=1
+    LC_ALL=C awk '
+        /^----------/ { body = 1; next }
+        !body { next }
+        /^Path = / { flush(); path = substr($0, 8); inrec = 1; next }
+        /^Folder = \+/ { dir = 1 }
+        /^Size = / { size = substr($0, 8) }
+        /^Attributes = / { a = substr($0, 14); if (a ~ /^D/) dir = 1; if (a ~ / l/) link = 1 }
+        /^Symbolic Link = ./ { link = 1; target = substr($0, 17) }
+        function flush() {
+            if (!inrec) return
+            type = dir ? "d" : (link ? "l" : "f")
+            if (size !~ /^[0-9]+$/ || type == "d") size = 0
+            printf "%s\t%s\t%s\t%s\t0\n", type, (type == "f" ? size : 0), path, target
+            inrec = 0; dir = 0; link = 0; size = 0; target = ""
+        }
+        END { flush() }' "$raw"
+}
+
+list_zip_unzip() {
+    local f=$1 st
+    LC_ALL=C unzip -Z -l "$f" | LC_ALL=C awk '
+        NF >= 10 && $4 ~ /^[0-9]+$/ && $5 ~ /^[tTbB]/ {
+            line = $0
+            sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ /, "", line)
+            if ($5 ~ /^[TB]/) enc = 1
+            t = substr($1, 1, 1)
+            if (line ~ /\/$/ || t == "d") type = "d"; else if (t == "l") type = "l"; else type = "f"
+            printf "%s\t%s\t%s\t\t0\n", type, (type == "f" ? $4 : 0), line
+        }
+        END { if (enc) print "enc" > "/dev/stderr" }' 2>"$WORK/zip.enc"
+    st=("${PIPESTATUS[@]}")
+    grep -q enc "$WORK/zip.enc" && ENCRYPTED=1
+    (( st[0] == 0 ))
+}
+
+list_rar_unrar() {
+    local pwopt=-p-
+    (( HAVE_PW )) && pwopt="-p$PW"
+    LC_ALL=C unrar lt -idq "$pwopt" "$OPEN" | LC_ALL=C awk '
+        function flush() { if (name != "") printf "%s\t%s\t%s\t%s\t0\n", type, (type == "f" ? size : 0), name, target; name = ""; target = ""; size = 0; type = "f" }
+        /^ *Name: / { flush(); name = $0; sub(/^ *Name: /, "", name); type = "f"; next }
+        /^ *Type: / { t = $0; sub(/^ *Type: /, "", t); if (t ~ /^Directory/) type = "d"; else if (t ~ /link/) type = (t ~ /[Hh]ard/ ? "h" : "l") }
+        /^ *Size: / { size = $2 }
+        /^ *Target: / { target = $0; sub(/^ *Target: /, "", target) }
+        END { flush() }'
+    local st=("${PIPESTATUS[@]}")
+    (( st[0] == 0 ))
+}
+
+list_rar_lsar() {
+    local args=(-j)
+    (( HAVE_PW )) && args=(-p "$PW" -j)
+    LC_ALL=C lsar "${args[@]}" "$OPEN" | LC_ALL=C awk '
+        function str(s) { sub(/^[^:]*: *"/, "", s); sub(/",? *$/, "", s); gsub(/\\\//, "/", s); gsub(/\\"/, "\"", s); gsub(/\\\\/, "\\", s); return s }
+        function num(s) { sub(/^[^:]*: */, "", s); sub(/,? *$/, "", s); return s + 0 }
+        /^[[:space:]]*"lsarContents"/ { inlist = 1; next }
+        !inlist { next }
+        /^[[:space:]]*\{[[:space:]]*$/ { depth++; next }
+        /^[[:space:]]*\},?[[:space:]]*$/ {
+            if (depth == 1 && name != "") printf "%s\t%s\t%s\t%s\t0\n", (dir ? "d" : (link ? "l" : "f")), (dir || link ? 0 : size), name, target
+            if (depth == 1) { name = ""; size = 0; dir = 0; link = 0; target = "" }
+            depth--; next
+        }
+        depth != 1 { next }
+        /"XADFileName":/ { name = str($0) }
+        /"XADFileSize":/ { size = num($0) }
+        /"XADIsDirectory":/ { dir = num($0) }
+        /"XADIsLink":/ { link = num($0) }
+        /"XADLinkDestination":/ { target = str($0); link = 1 }'
+    local st=("${PIPESTATUS[@]}")
+    (( st[0] == 0 ))
+}
+
+# Fill $WORK/list for the current archive. Returns 1 on a damaged archive
+# and 9 when a message was already printed.
+make_listing() {
+    local out=$WORK/list i n
+    ENCRYPTED=0
+    : >"$out"
+    case $KIND in
+        tar)
+            stream 2>"$WORK/err" | list_tar_stdin >"$out" ;;
+        raw)
+            local bytes
+            bytes=$(stream 2>"$WORK/err" | wc -c) || return 1
+            printf 'f\t%s\t%s\t\t0\n' "$bytes" "$NAME" >"$out" ;;
+        cpio)
+            stream 2>"$WORK/err" | list_cpio_stdin >"$out" ;;
+        zip)
+            if [[ $TOOL == unzip ]]; then
+                list_zip_unzip "$OPEN" >"$out"
+            else
+                list_7z >"$out"
+            fi ;;
+        zipsplit|7z)
+            list_7z >"$out" ;;
+        iso)
+            if [[ $TOOL == bsdtar ]]; then
+                LC_ALL=C bsdtar -tvf "$OPEN" | LC_ALL=C awk -v LAYER=0 "$awk_cpio" >"$out"
+            else
+                list_7z >"$out"
+            fi ;;
+        rar)
+            case $TOOL in
+                unrar) list_rar_unrar >"$out" ;;
+                unar)  list_rar_lsar >"$out" ;;
+                *)     list_7z >"$out" ;;
+            esac ;;
+        deb)
+            deb_tar 2>"$WORK/err" | list_tar_stdin >"$out" ;;
+        rpm)
+            rpm2cpio "$OPEN" 2>"$WORK/err" | list_cpio_stdin >"$out" ;;
+        initramfs)
+            walk_layers "$OPEN" || { tb_err "$SETNAME: not an initramfs image this command can read"; return 9; }
+            n=${#LAYER_OFF[@]}
+            for ((i = 0; i < n; i++)); do
+                layer_stream "$i" 2>"$WORK/err" | list_cpio_stdin "$i" >>"$out" || return 1
+            done ;;
+    esac
+    local rc=$?
+    (( rc == 0 )) || return "$rc"
+    # Symlink targets that zip and 7z keep as the link's content.
+    if [[ $KIND == zip || $KIND == 7z || $KIND == zipsplit || ( $KIND == rar && $TOOL == "$SZ" ) ]] &&
+       awk -F'\t' '$1 == "l" && $4 == "" { f = 1 } END { exit !f }' "$out"; then
+        fill_link_targets "$out"
+    fi
+    return 0
+}
+
+fill_link_targets() {
+    local out=$1 tmpl=$WORK/list.2 type size path target layer
+    : >"$tmpl"
+    while IFS=$'\037' read -r type size path target layer; do
+        if [[ $type == l && -z $target ]]; then
+            if [[ $TOOL == unzip ]]; then
+                target=$(unzip -p "$OPEN" "$(globesc "$path")" 2>/dev/null | head -c 4096)
+            elif (( HAVE_PW )); then
+                target=$(printf '%s\n' "$PW" | "$SZ" x -so -spd "$OPEN" -- "$path" 2>/dev/null | head -c 4096)
+            else
+                target=$("$SZ" x -so -spd "$OPEN" -- "$path" 2>/dev/null </dev/null | head -c 4096)
+            fi
+            target=${target//$'\t'/?}
+            target=${target//$'\n'/?}
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$size" "$path" "$target" "$layer" >>"$tmpl"
+    done < <(tr '\t' '\037' <"$out")
+    mv -f "$tmpl" "$out"
+}
+
+# Keep only the listing lines that match --only. Writes list.only, the
+# exact names for tar and cpio, and USED_PATS, the patterns that matched.
+USED_PATS=()
+filter_only() {
+    local in=$WORK/list out=$WORK/list.only type size path target layer p q
+    local -A used=()
+    : >"$out"
+    : >"$WORK/names"
+    : >"$WORK/cpio.names"
+    while IFS=$'\037' read -r type size path target layer; do
+        q=${path#./}
+        for p in "${only[@]}"; do
+            # shellcheck disable=SC2053
+            if [[ $path == $p || $q == $p ]]; then
+                printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$size" "$path" "$target" "$layer" >>"$out"
+                if [[ $type != d ]]; then
+                    printf '%s\n' "$path" >>"$WORK/names"
+                    globesc "$path" >>"$WORK/cpio.names"
+                fi
+                used[$p]=1
+                break
+            fi
+        done
+    done < <(tr '\t' '\037' <"$in")
+    USED_PATS=()
+    for p in "${only[@]}"; do
+        [[ -n ${used[$p]:-} ]] && USED_PATS+=("$p")
+    done
+    return 0
+}
+
+# Join a split zip into one file for unzip, when 7-Zip is not there.
+join_zip() {
+    local jdir parent=$outdir
+    [[ -n $parent && -d $parent && -w $parent ]] || parent=${TMPDIR:-/tmp}
+    tb_tmpdir jdir "$parent" || tb_die "$E_FAIL" "could not make a temp folder in $parent"
+    if [[ $KIND == zipsplit ]]; then
+        tb_need zip
+        tb_run zip -q -s 0 "${PARTS[0]}" --out "$jdir/joined.zip" >&2 ||
+            tb_die "$E_FAIL" "$SETNAME: zip could not join the parts"
+    else
+        tb_show_text "$(cmdtext cat "${PARTS[@]}") > $(shq "$(rel "$jdir/joined.zip")")"
+        cat -- "${PARTS[@]}" >"$jdir/joined.zip" || tb_die "$E_FAIL" "$SETNAME: could not join the parts"
+    fi
+    OPEN=$jdir/joined.zip
+    KIND=zip
+}
+
+# Numbers from a listing file: entries that are files, total bytes, top items.
+listing_stats() {
+    local f=$1
+    LC_ALL=C awk -F'\t' '
+        { p = $3; sub(/^(\.\/)+/, "", p); sub(/^\/+/, "", p); sub(/\/+$/, "", p) }
+        p == "" || p == "." { next }
+        { split(p, c, "/"); top[c[1]] = 1; if (c[2] != "" || $1 == "d") topdir[c[1]] = 1 }
+        $1 == "d" { next }
+        $1 != "o" && !seen[$5 "\t" p]++ { n++ }
+        { s += $2 }
+        END {
+            t = 0; one = ""
+            for (k in top) { t++; one = k }
+            printf "%d %d %d %s%s\n", n, s, t, one, (one in topdir ? "/" : "")
+        }' "$f"
+}
+
+# ---------------------------------------------------------------- safety checks
+
+# Paths that escape the target folder. Prints one message per problem.
+check_paths() {
+    local sys=0
+    [[ $KIND == deb || $KIND == rpm || $KIND == initramfs ]] && sys=1
+    LC_ALL=C awk -F'\t' -v sys="$sys" '
+        function norm(p,    n, parts, i, k, st, out) {
+            n = split(p, parts, "/"); k = 0
+            for (i = 1; i <= n; i++) {
+                if (parts[i] == "" || parts[i] == ".") continue
+                if (parts[i] == "..") { if (k == 0) return "\001"; k--; continue }
+                st[++k] = parts[i]
+            }
+            out = ""
+            for (i = 1; i <= k; i++) out = out (i > 1 ? "/" : "") st[i]
+            return out
+        }
+        function outside(path, t,    d) {
+            if (t ~ /^\//) return 1
+            d = norm(path); sub(/\/?[^\/]*$/, "", d)
+            return norm((d == "" ? "" : d "/") t) == "\001"
+        }
+        NR == FNR {
+            if ($1 == "l" && $3 !~ /^\// && norm($3) != "\001" && outside($3, $4)) bad[$5 "\t" norm($3)] = 1
+            next
+        }
+        {
+            p = $3
+            if (p ~ /^\//) { print "abs\t" p; next }
+            q = norm(p)
+            if (q == "\001") { print "esc\t" p; next }
+            n = split(q, c, "/"); pre = ""
+            for (i = 1; i < n; i++) {
+                pre = pre (i > 1 ? "/" : "") c[i]
+                if (($5 "\t" pre) in bad) { print "thru\t" p "\t" pre; next }
+            }
+            if ($1 == "l" && outside(p, $4) && !(sys && $4 ~ /^\//)) print "link\t" p "\t" $4
+            if ($1 == "h" && ($4 ~ /^\// || norm($4) == "\001")) print "hard\t" p "\t" $4
+        }' "$1" "$1"
+}
+
+# Run the four checks. Exits 4 or 5 through the caller's subshell.
+safety_checks() {
+    local list=$1 count total tops one bad n kind p t
+    read -r count total tops one <<<"$(listing_stats "$list")"
+    LIST_COUNT=$count
+    LIST_BYTES=$total
+    LIST_TOPS=$tops
+    LIST_ONE=$one
+    if (( tops == 1 )) && [[ $one == */ ]]; then
+        tb_say "listing: $(tb_plural "$count" file), $(tb_human "$total"), one top folder $one"
+    elif (( tops == 1 )); then
+        tb_say "listing: $(tb_plural "$count" file), $(tb_human "$total"), one top file $one"
+    else
+        tb_say "listing: $(tb_plural "$count" file), $(tb_human "$total"), $tops top items"
+    fi
+
+    # 1. Paths that escape.
+    bad=$(check_paths "$list")
+    if [[ -n $bad ]]; then
+        n=0
+        while IFS=$'\t' read -r kind p t; do
+            n=$((n + 1))
+            (( n > 10 )) && continue
+            case $kind in
+                abs)  tb_err "$SETNAME: $p is an absolute path" ;;
+                esc)  tb_err "$SETNAME: $p escapes the target folder" ;;
+                link) tb_err "$SETNAME: link $p -> $t points outside" ;;
+                hard) tb_err "$SETNAME: hard link $p -> $t points outside" ;;
+                thru) tb_err "$SETNAME: $p is written through the link $t" ;;
+            esac
+        done <<<"$bad"
+        (( n > 10 )) && tb_err "$SETNAME: and $((n - 10)) more"
+        tb_die "$E_SAFE" "refused, $(tb_plural "$n" "unsafe path"). Nothing was written."
+    fi
+    tb_say "paths: ok, none escape"
+
+    # 2. Disk space.
+    local entries need free_kb free mnt
+    entries=$(wc -l <"$list")
+    need=$(( total + entries * BLOCK_BYTES ))
+    free_kb=$(tb_free_kb "$outdir")
+    mnt=$(mount_of "$outdir")
+    if [[ $free_kb =~ ^[0-9]+$ ]]; then
+        free=$(( free_kb * 1024 ))
+        if (( need > free )); then
+            tb_err "$SETNAME: needs $(tb_human "$need"), ${mnt:-the disk} has $(tb_human "$free") free"
+            tb_die "$E_SAFE" "refused. Use -o to unpack onto a disk with more room."
+        fi
+        tb_say "disk: $(tb_human "$need") needed, $(tb_human "$free") free on ${mnt:-the disk}"
+    else
+        tb_say "disk: could not read the free space, going on"
+    fi
+
+    # 3. Memory.
+    mem_check
+
+    # 4. Size ratio.
+    local abytes ratio tenths
+    abytes=$(tb_bytes "${PARTS[@]}")
+    (( abytes > 0 )) || abytes=1
+    ratio=$(( total / abytes ))
+    tenths=$(( total * 10 / abytes % 10 ))
+    if (( total >= RATIO_FLOOR && total > RATIO_LIMIT * abytes )); then
+        tb_err "$SETNAME: $(tb_human "$abytes") unpacks to $(tb_human "$total"), ${ratio}x the archive"
+        if (( ! TB_YES )); then
+            tb_ask "Unpack it anyway?"
+            case $? in
+                0) ;;
+                1) tb_info "Nothing changed."; exit "$E_NO" ;;
+                *) tb_die "$E_SAFE" "refused, over ${RATIO_LIMIT}x with no terminal to ask. Add -y." ;;
+            esac
+        fi
+        tb_say "ratio: ${ratio}x, over the limit, going on"
+    else
+        tb_say "ratio: ${ratio}.${tenths}x, the limit is ${RATIO_LIMIT}x"
+    fi
+}
+
+# Parse a 7-Zip dictionary size such as 24 (2^24), 1536m or 64k.
+sz_dict_bytes() {
+    local v=$1 n unit
+    [[ $v =~ ^([0-9]+)([bkmg]?)$ ]] || { echo 0; return; }
+    n=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    case $unit in
+        b) echo "$n" ;;
+        k) echo $(( n * 1024 )) ;;
+        m) echo $(( n * 1024 * 1024 )) ;;
+        g) echo $(( n * 1024 * 1024 * 1024 )) ;;
+        *) if (( n <= 62 )); then echo $(( 1 << n )); else echo "$n"; fi ;;
+    esac
+}
+
+# The RAM the decompressor needs, compared with MemAvailable.
+mem_check() {
+    local need=0 tool="" avail_kb avail f=$OPEN line v m
+    case $KIND:$COMP in
+        tar:xz|raw:xz|cpio:xz)
+            tool=xz
+            (( SPLIT )) || need=$(xz --robot --list -vv -- "$f" 2>/dev/null | awk -F'\t' '$1 == "summary" { print $2; exit }') ;;
+        tar:lzma|raw:lzma|cpio:lzma)
+            tool=xz
+            need=$(od -An -tu4 -j1 -N4 -- "$f" 2>/dev/null | tr -d ' ') ;;
+        tar:zst|raw:zst|cpio:zst)
+            tool=zstd
+            (( SPLIT )) || need=$(zstd -lv -- "$f" 2>/dev/null |
+                awk '/Window Size:/ { if (match($0, /\([0-9]+ B\)/)) { v = substr($0, RSTART + 1, RLENGTH - 4) + 0; if (v > m) m = v } }
+                     END { print m + 0 }') ;;
+    esac
+    if [[ $KIND == 7z || ( -n $TOOL && $TOOL == "$SZ" && -s $WORK/7z.raw ) ]]; then
+        tool=$SZ
+        need=0
+        while IFS= read -r line; do
+            for m in $line; do
+                if [[ $m =~ ^(LZMA2?|LZMA86):([0-9]+[bkmg]?)$ ]]; then
+                    v=$(sz_dict_bytes "${BASH_REMATCH[2]}")
+                elif [[ $m =~ ^PPMD:.*mem([0-9]+[bkmg]?) ]]; then
+                    v=$(sz_dict_bytes "${BASH_REMATCH[1]}")
+                else
+                    continue
+                fi
+                (( v > need )) && need=$v
+            done
+        done < <(sed -n 's/^Method = //p' "$WORK/7z.raw")
+    fi
+    [[ $need =~ ^[0-9]+$ ]] || need=0
+    [[ -n $tool ]] || tool=${DECOMP_NOTE%%,*}
+    [[ -n $tool ]] || tool=${TOOL:-tar}
+    if (( need < 1024 * 1024 )); then
+        tb_say "memory: ok, $tool needs under 1MB"
+        return 0
+    fi
+    avail_kb=$(tb_mem_avail_kb)
+    [[ $avail_kb =~ ^[0-9]+$ ]] || { tb_say "memory: $tool needs $(tb_human "$need"), free memory unknown"; return 0; }
+    avail=$(( avail_kb * 1024 ))
+    if (( need > avail )); then
+        if (( TB_YES )); then
+            tb_warn "$SETNAME: $tool needs $(tb_human "$need") of RAM and $(tb_human "$avail") is free, going on because of -y"
+            return 0
+        fi
+        tb_err "$SETNAME: $tool needs $(tb_human "$need") of RAM for this archive, and $(tb_human "$avail") is free"
+        tb_die "$E_SAFE" "refused. Free some memory, or add -y to try anyway."
+    fi
+    tb_say "memory: ok, $tool needs $(tb_human "$need"), $(tb_human "$avail") is free"
+}
+
+# ---------------------------------------------------------------- unpacking
+
+# True when every stage of a pipeline worked. Pass "${PIPESTATUS[@]}".
+pipe_ok() {
+    local s
+    for s in "$@"; do (( s == 0 )) || return 1; done
+    return 0
+}
+
+# Options that pick the --only files for each kind of tool. Tar and cpio get
+# the exact names from the listing, the others the patterns that matched.
+tar_only_opts() {
+    (( ${#only[@]} )) || return 0
+    TAR_ONLY=(--no-wildcards)
+    tar_is_gnu && TAR_ONLY+=(--verbatim-files-from)
+    TAR_ONLY+=(-T "$WORK/names")
+}
+
+# Unpack the current archive into the empty folder $1.
+extract_to() {
+    local d=$1 st pass=() TAR_ONLY=()
+    pass=(${TB_PASS[@]+"${TB_PASS[@]}"})
+    case $KIND in
+        tar|deb)
+            tar_only_opts
+            local tx=(tar -xf - -C "$d" ${pass[@]+"${pass[@]}"} ${TAR_ONLY[@]+"${TAR_ONLY[@]}"})
+            local src
+            if [[ $KIND == deb ]]; then src=$(deb_tar_text); else src=$(stream_text); fi
+            tb_show_text "$src | $(cmdtext tar -xf - -C "$(rel "$d")" ${pass[@]+"${pass[@]}"} ${TAR_ONLY[@]+"${TAR_ONLY[@]}"})"
+            if [[ $KIND == deb ]]; then
+                deb_tar | "${tx[@]}" >&2
+            else
+                stream | "${tx[@]}" >&2
+            fi ;;
+        raw)
+            local dc=("${DECOMP[@]}" ${pass[@]+"${pass[@]}"})
+            tb_show_text "$(stream_text)${pass[*]:+ ${pass[*]}} > $(shq "$(rel "$d/$NAME")")"
+            feed | "${dc[@]}" >"$d/$NAME" ;;
+        cpio|rpm)
+            local cx=(cpio -idm --no-absolute-filenames --quiet ${pass[@]+"${pass[@]}"})
+            (( ${#only[@]} )) && cx+=(-E "$WORK/cpio.names")
+            if [[ $KIND == rpm ]]; then
+                tb_show_text "$(cmdtext rpm2cpio "$(rel "$OPEN")") | (cd $(shq "$(rel "$d")") && $(cmdtext "${cx[@]}"))"
+                rpm2cpio "$OPEN" | (cd "$d" && "${cx[@]}") >&2
+            else
+                tb_show_text "$(stream_text) | (cd $(shq "$(rel "$d")") && $(cmdtext "${cx[@]}"))"
+                stream | (cd "$d" && "${cx[@]}") >&2
+            fi ;;
+        zip|zipsplit|7z|iso|rar)
+            extract_multi "$d" ;;
+        initramfs)
+            extract_initramfs "$d" ;;
+    esac
+}
+
+# zip, 7z, iso and rar, with the tool choose_tools picked.
+extract_multi() {
+    local d=$1 pats=() pass=() rc
+    pats=(${USED_PATS[@]+"${USED_PATS[@]}"})
+    pass=(${TB_PASS[@]+"${TB_PASS[@]}"})
+    case $TOOL in
+        unzip)
+            local ux=(unzip -o -q) shown=(unzip -o -q)
+            if (( HAVE_PW )); then
+                ux+=(-P "$PW")
+                shown+=(-P '***')
+            fi
+            ux+=(${pass[@]+"${pass[@]}"} "$OPEN" ${pats[@]+"${pats[@]}"} -d "$d")
+            shown+=(${pass[@]+"${pass[@]}"} "$(rel "$OPEN")" ${pats[@]+"${pats[@]}"} -d "$(rel "$d")")
+            tb_show "${shown[@]}"
+            "${ux[@]}" </dev/null >&2
+            rc=$?
+            # 1 means warnings only. The count check catches anything missing.
+            (( rc == 0 || rc == 1 )) ;;
+        bsdtar)
+            tb_run bsdtar -xf "$OPEN" -C "$d" ${pass[@]+"${pass[@]}"} ${pats[@]+"${pats[@]}"} >&2 ;;
+        unrar)
+            local pwopt=-p- pwshow=-p-
+            if (( HAVE_PW )); then
+                pwopt="-p$PW"
+                pwshow='-p***'
+            fi
+            tb_show unrar x -idq -y -o+ "$pwshow" ${pass[@]+"${pass[@]}"} "$(rel "$OPEN")" ${pats[@]+"${pats[@]}"} "$(rel "$d")/"
+            unrar x -idq -y -o+ "$pwopt" ${pass[@]+"${pass[@]}"} "$OPEN" ${pats[@]+"${pats[@]}"} "$d/" </dev/null >&2 ;;
+        unar)
+            local ua=(unar -q -D -f -o "$d") shown=(unar -q -D -f -o "$(rel "$d")")
+            if (( HAVE_PW )); then
+                ua+=(-p "$PW")
+                shown+=(-p '***')
+            fi
+            tb_show "${shown[@]}" ${pass[@]+"${pass[@]}"} "$(rel "$OPEN")" ${pats[@]+"${pats[@]}"}
+            "${ua[@]}" ${pass[@]+"${pass[@]}"} "$OPEN" ${pats[@]+"${pats[@]}"} </dev/null >&2 ;;
+        *)
+            local sx=("$SZ" x -o"$d" -y -bso0 -bse2)
+            if tb_progress; then sx+=(-bsp2); else sx+=(-bsp0); fi
+            sx+=(${pass[@]+"${pass[@]}"})
+            (( ${#pats[@]} )) && sx+=(-r)
+            sx+=("$OPEN" ${pats[@]+"${pats[@]}"})
+            tb_show "$SZ" x -o"$(rel "$d")" -y ${pass[@]+"${pass[@]}"} ${pats[@]+-r} "$(rel "$OPEN")" ${pats[@]+"${pats[@]}"}
+            if (( HAVE_PW )); then
+                printf '%s\n' "$PW" | "${sx[@]}"
+                rc=${PIPESTATUS[1]}
+            else
+                "${sx[@]}" </dev/null
+                rc=$?
+            fi
+            tb_progress && printf '\r\033[K' >&2
+            return "$rc" ;;
+    esac
+}
+
+extract_initramfs() {
+    local d=$1 i n=${#LAYER_OFF[@]} sub st cx
+    if [[ $TOOL == unmkinitramfs ]] && (( ! ${#only[@]} )); then
+        local ua=(unmkinitramfs)
+        tb_show "${ua[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} "$(rel "$OPEN")" "$(rel "$d")"
+        "${ua[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} "$OPEN" "$d" >&2
+        return
+    fi
+    cx=(cpio -idm --no-absolute-filenames --quiet ${TB_PASS[@]+"${TB_PASS[@]}"})
+    (( ${#only[@]} )) && cx+=(-E "$WORK/cpio.names")
+    for ((i = 0; i < n; i++)); do
+        sub=$d
+        if (( n > 1 )); then
+            sub=$d/$(layer_dir "$i")
+            mkdir -p "$sub" || return 1
+        fi
+        local dtext=""
+        if [[ -n ${LAYER_COMP[i]} ]]; then
+            set_decomp "${LAYER_COMP[i]}" quiet || return 1
+            dtext=" | $(cmdtext "${DECOMP[@]}")"
+        fi
+        tb_show_text "tail -c +$((LAYER_OFF[i] + 1)) $(shq "$(rel "$OPEN")") | head -c ${LAYER_LEN[i]}$dtext | (cd $(shq "$(rel "$sub")") && $(cmdtext "${cx[@]}"))"
+        layer_stream "$i" | (cd "$sub" && "${cx[@]}") >&2
+        st=("${PIPESTATUS[@]}")
+        pipe_ok "${st[@]}" || return 1
+    done
+}
+
+# Run the unpack in a container with no network. The archive is mounted
+# read-only and the output goes to the temp folder $1.
+extract_sandbox() {
+    local d=$1 engine p args=() inner=() pat
+    tb_need_any engine podman docker
+    args=(run --rm -i --network=none)
+    if [[ $engine == podman ]]; then
+        args+=(--security-opt label=disable --userns=keep-id)
+    else
+        args+=(--user "$(id -u):$(id -g)")
+    fi
+    args+=(-e UNPACK_IN_SANDBOX=1 -e NO_COLOR=1 -v "$TB_ROOT:/opt/toolbelt:ro")
+    for p in "${PARTS[@]}"; do
+        args+=(-v "$p:/in/$(basename "$p"):ro")
+    done
+    args+=(-v "$d:/out" "$sandbox_image")
+    inner=(/opt/toolbelt/bin/unpack -H -k -y -q -o /out)
+    for pat in ${only[@]+"${only[@]}"}; do inner+=(--only "$pat"); done
+    (( HAVE_PW )) && inner+=(-p)
+    inner+=("/in/$(basename "${PARTS[0]}")")
+    (( ${#TB_PASS[@]} )) && inner+=(-- "${TB_PASS[@]}")
+    tb_info "unpack: sandbox: $engine, no network, archive read-only"
+    tb_show "$engine" "${args[@]}" "${inner[@]}"
+    if (( HAVE_PW )); then
+        printf '%s\n' "$PW" | "$engine" "${args[@]}" "${inner[@]}" >/dev/null
+        return "${PIPESTATUS[1]}"
+    fi
+    # The inner result line names the temp folder, so only its errors show.
+    "$engine" "${args[@]}" "${inner[@]}" </dev/null >/dev/null
+}
+
+# ---------------------------------------------------------------- -l, -t and --cat
+
+do_list() {
+    local list=$WORK/list type size path target n bytes
+    (( ${#only[@]} )) && { filter_only; list=$WORK/list.only; }
+    while IFS=$'\037' read -r type size path target _; do
+        case $type in
+            d) printf '%8s  %s\n' "" "${path%/}/" ;;
+            l) printf '%8s  %s -> %s\n' "" "$path" "$target" ;;
+            h) printf '%8s  %s => %s\n' "" "$path" "$target" ;;
+            *) printf '%8s  %s\n' "$(tb_human "$size")" "$path" ;;
+        esac
+    done < <(tr '\t' '\037' <"$list")
+    read -r n bytes _ <<<"$(listing_stats "$list")"
+    tb_info "$SETNAME: $(tb_plural "$n" file), $(tb_human "$bytes")"
+}
+
+do_test() {
+    local rc st i
+    case $KIND in
+        tar)
+            tb_show_text "$(stream_text) | tar -tf - > /dev/null"
+            stream | tar -tf - >/dev/null ;;
+        raw)
+            tb_show_text "$(stream_text) > /dev/null"
+            stream >/dev/null ;;
+        cpio)
+            tb_show_text "$(stream_text) | cpio -it --quiet > /dev/null"
+            stream | cpio -it --quiet >/dev/null ;;
+        rpm)
+            tb_show_text "$(cmdtext rpm2cpio "$(rel "$OPEN")") | cpio -it --quiet > /dev/null"
+            rpm2cpio "$OPEN" | cpio -it --quiet >/dev/null ;;
+        deb)
+            tb_show_text "$(deb_tar_text) | tar -tf - > /dev/null"
+            deb_tar | tar -tf - >/dev/null ;;
+        initramfs)
+            for ((i = 0; i < ${#LAYER_OFF[@]}; i++)); do
+                layer_stream "$i" | cpio -it --quiet >/dev/null
+                st=("${PIPESTATUS[@]}")
+                pipe_ok "${st[@]}" || return 1
+            done ;;
+        *)
+            case $TOOL in
+                unzip)
+                    if (( HAVE_PW )); then
+                        tb_show unzip -tqq -P '***' "$(rel "$OPEN")"
+                        unzip -tqq -P "$PW" "$OPEN" </dev/null >&2
+                    else
+                        tb_run unzip -tqq "$OPEN" </dev/null >&2
+                    fi ;;
+                unrar)
+                    local pwopt=-p-
+                    (( HAVE_PW )) && pwopt="-p$PW"
+                    tb_show unrar t -idq "$( (( HAVE_PW )) && echo '-p***' || echo -p-)" "$(rel "$OPEN")"
+                    unrar t -idq "$pwopt" "$OPEN" </dev/null >&2 ;;
+                unar)
+                    local la=(lsar -t)
+                    (( HAVE_PW )) && la=(lsar -p "$PW" -t)
+                    tb_show lsar -t "$(rel "$OPEN")"
+                    "${la[@]}" "$OPEN" </dev/null >/dev/null ;;
+                bsdtar)
+                    tb_run bsdtar -tf "$OPEN" >/dev/null ;;
+                *)
+                    tb_show "$SZ" t "$(rel "$OPEN")"
+                    if (( HAVE_PW )); then
+                        printf '%s\n' "$PW" | "$SZ" t -bso0 -bsp0 "$OPEN" >&2
+                        rc=${PIPESTATUS[1]}
+                    else
+                        "$SZ" t -bso0 -bsp0 "$OPEN" </dev/null >&2
+                        rc=$?
+                    fi
+                    return "$rc" ;;
+            esac ;;
+    esac
+}
+
+do_cat() {
+    local want q stored="" layer=0 type=""
+    want=${cat_file#./}
+    want=${want#/}
+    IFS=$'\t' read -r type stored layer < <(LC_ALL=C awk -F'\t' -v w="$want" '
+        { p = $3; sub(/^(\.\/)+/, "", p); sub(/^\/+/, "", p); sub(/\/+$/, "", p) }
+        p == w { print $1 "\t" $3 "\t" $5; exit }' "$WORK/list")
+    [[ -n $stored ]] || tb_die "$E_FAIL" "$SETNAME: $cat_file is not in the archive"
+    [[ $type == d ]] && tb_die "$E_FAIL" "$SETNAME: $cat_file is a folder, --cat prints one file"
+    q=$(globesc "$stored")
+    case $KIND in
+        tar)
+            tb_show_text "$(stream_text) | $(cmdtext tar -xOf - -- "$stored")"
+            stream | tar -xOf - -- "$stored" ;;
+        raw)
+            tb_show_text "$(stream_text)"
+            stream ;;
+        cpio)
+            tb_show_text "$(stream_text) | $(cmdtext cpio -i --to-stdout --quiet "$q")"
+            stream | cpio -i --to-stdout --quiet "$q" ;;
+        rpm)
+            tb_show_text "$(cmdtext rpm2cpio "$(rel "$OPEN")") | $(cmdtext cpio -i --to-stdout --quiet "$q")"
+            rpm2cpio "$OPEN" | cpio -i --to-stdout --quiet "$q" ;;
+        deb)
+            tb_show_text "$(deb_tar_text) | $(cmdtext tar -xOf - -- "$stored")"
+            deb_tar | tar -xOf - -- "$stored" ;;
+        initramfs)
+            layer_stream "$layer" | cpio -i --to-stdout --quiet "$q" ;;
+        *)
+            case $TOOL in
+                unzip)
+                    if (( HAVE_PW )); then
+                        unzip -p -P "$PW" "$OPEN" "$q" </dev/null
+                    else
+                        tb_run unzip -p "$OPEN" "$q" </dev/null
+                    fi ;;
+                unrar)
+                    local pwopt=-p-
+                    (( HAVE_PW )) && pwopt="-p$PW"
+                    unrar p -inul "$pwopt" "$OPEN" "$stored" </dev/null ;;
+                unar)
+                    local ua=(unar -q -o -)
+                    (( HAVE_PW )) && ua+=(-p "$PW")
+                    "${ua[@]}" "$OPEN" "$stored" </dev/null ;;
+                bsdtar)
+                    bsdtar -xOf "$OPEN" "$stored" ;;
+                *)
+                    tb_show "$SZ" x -so -spd "$(rel "$OPEN")" -- "$stored"
+                    if (( HAVE_PW )); then
+                        printf '%s\n' "$PW" | "$SZ" x -so -spd -bse2 "$OPEN" -- "$stored"
+                        return "${PIPESTATUS[1]}"
+                    fi
+                    "$SZ" x -so -spd -bse2 "$OPEN" -- "$stored" </dev/null ;;
+            esac ;;
+    esac
+}
+
+# ---------------------------------------------------------------- download
+
+# Fetch a URL into a temp folder and put the path in DL_FILE.
+download() {
+    local url=$1 dir=$2 name host bytes curl=(curl -fL --proto =http,https,file)
+    tb_need curl
+    name=${url%%[?#]*}
+    name=${name%/}
+    name=${name##*/}
+    [[ -z $name || $name == *:* ]] && name=download
+    host=${url#*://}
+    host=${host%%/*}
+    host=${host##*@}
+    if tb_progress; then curl+=(--progress-bar); else curl+=(-sS); fi
+    tb_say "download: $url"
+    tb_show curl -fL --proto =http,https,file -o "$(rel "$dir/$name")" "$url"
+    if ! "${curl[@]}" -o "$dir/$name" -- "$url"; then
+        tb_die "$E_FAIL" "$url: the download failed"
+    fi
+    bytes=$(tb_bytes "$dir/$name")
+    tb_info "unpack: downloaded $(tb_human "$bytes") from ${host:-a local file}"
+    DL_FILE=$dir/$name
+}
+
+is_url() { [[ $1 =~ ^(https?|file)://. ]]; }
+
+# ---------------------------------------------------------------- -r
+
+# True for a name -r should unpack. Packages, disk images and parts are left alone.
+recursable() {
+    local b t
+    b=$(basename "$1")
+    t=$(detect_name "$b") || return 1
+    case $t in deb|rpm|iso|initramfs) return 1 ;; esac
+    case ${b,,} in
+        *.jar|*.war|*.ear|*.whl) return 1 ;;
+        *.part[0-9]*.rar|*.r[0-9][0-9]|*.z[0-9][0-9]|*.[0-9][0-9][0-9]|*.a[a-z]) return 1 ;;
+    esac
+    return 0
+}
+
+# Unpack archives inside folder $1 in place, each replaced by its contents.
+recurse_into() {
+    local d=$1 f n=0 failed=0 args=()
+    (( depth < MAX_DEPTH )) || return 0
+    args=(-k -q)
+    (( TB_YES )) && args+=(-y)
+    (( TB_VERBOSE )) && args=(-k -v)
+    (( depth + 1 < MAX_DEPTH )) && args+=(-r)
+    local found=()
+    while IFS= read -r -d '' f; do
+        recursable "$f" && found+=("$f")
+    done < <(find "$d" -type f -print0)
+    for f in ${found[@]+"${found[@]}"}; do
+        tb_say "inner: $(rel "$f")"
+        if UNPACK_NESTED=1 UNPACK_DEPTH=$((depth + 1)) "$SELF" "${args[@]}" -o "$(dirname "$f")" "$f" >/dev/null; then
+            rm -f -- "$f"
+            n=$((n + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+    if (( n )); then
+        tb_info "  inner: $(tb_plural "$n" archive) unpacked in place"
+    fi
+    (( failed )) && tb_warn "$SETNAME: $(tb_plural "$failed" "inner archive") could not be unpacked and stayed as they are"
+    return 0
+}
+
+# ---------------------------------------------------------------- history
+
+log_file() { echo "$(tb_state_dir)/unpack.log"; }
+
+# Write one record, and the manifest --undo compares against.
+record() {
+    local archive=$1 base=$2 files=$3 status=$4 trashnames=$5 items=() id log mdir it parts=() p
+    shift 5
+    items=("$@")
+    log=$(log_file) || return 0
+    mdir=$(tb_state_dir)/unpack
+    mkdir -p "$mdir" || return 0
+    id="$(date +%Y%m%d%H%M%S)-$$-$RANDOM"
+    for p in "${PARTS[@]}"; do parts+=("$(basename "$p")"); done
+    {
+        for it in "${items[@]}"; do
+            [[ -e $base/$it || -L $base/$it ]] || continue
+            (cd "$base" && find "./$it" \( -type f -o -type l \) -exec stat -c $'%s\t%Y\t%n' {} + 2>/dev/null) |
+                awk -F'\t' -v OFS='\t' '{ sub(/^\.\//, "", $3); print }'
+        done
+    } >"$mdir/$id"
+    local IFS=/
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$(date '+%Y-%m-%d %H:%M:%S')" "$(enc "$archive")" \
+        "$(enc "${parts[*]}")" "$(enc "$base")" "$(enc "${items[*]}")" "$files" "$status" "$(enc "$trashnames")" >>"$log"
+    unset IFS
+    prune_history "$log" "$mdir"
+}
+
+prune_history() {
+    local log=$1 mdir=$2 n id
+    n=$(wc -l <"$log")
+    (( n > HISTORY_KEEP )) || return 0
+    while IFS=$'\t' read -r id _; do
+        rm -f -- "$mdir/$id"
+    done < <(head -n $((n - HISTORY_KEEP)) "$log")
+    tail -n "$HISTORY_KEEP" "$log" >"$log.new" && mv -f "$log.new" "$log"
+}
+
+do_history() {
+    local log line id when archive parts base items files status trash n a t shown=()
+    log=${XDG_STATE_HOME:-$HOME/.local/state}/toolbelt/unpack.log
+    if [[ ! -s $log ]]; then
+        tb_info "No unpacks recorded yet."
+        return 0
+    fi
+    while IFS=$'\t' read -r id when archive parts base items files status trash; do
+        archive=$(dec "$archive")
+        parts=$(dec "$parts")
+        base=$(dec "$base")
+        items=$(dec "$items")
+        n=$(awk -F/ '{ print NF }' <<<"$parts")
+        if [[ $status == url ]]; then a=$archive
+        else a=$(basename "$archive"); (( n > 1 )) && a+=" ($n)"; fi
+        if [[ $items != */* && -n $items ]]; then
+            t=$(nice_path "$base/$items")
+            # A folder keeps its slash after undo removed it, from the manifest.
+            if [[ -d $base/$items ]] || awk -F'\t' -v p="$items/" 'index($3, p) == 1 { f = 1; exit } END { exit !f }' \
+                "$(dirname "$log")/unpack/$id" 2>/dev/null; then
+                t=${t%/}/
+            fi
+        else
+            t=$(nice_path "$base")
+            t=${t%/}/
+        fi
+        local note=""
+        case $status in
+            undone) note="undone" ;;
+            trash)  note="archive in the trash" ;;
+        esac
+        shown+=("${when:0:16}"$'\t'"$a"$'\t'"$t"$'\t'"$(tb_plural "$files" file)"$'\t'"$note")
+    done <"$log"
+    printf '%s\n' "${shown[@]}" | awk -F'\t' '
+        { l[NR] = $0; for (i = 1; i <= 4; i++) if (length($i) > w[i]) w[i] = length($i) }
+        END {
+            for (r = NR; r >= 1; r--) {
+                split(l[r], f, "\t")
+                line = sprintf("%-" w[1] "s  %-" w[2] "s  %-" w[3] "s  %" w[4] "s", f[1], f[2], f[3], f[4])
+                if (f[5] != "") line = line "  " f[5]
+                sub(/ +$/, "", line); print line
+            }
+        }'
+}
+
+do_undo() {
+    local log line id when archive parts base items files status trash mdir
+    log=${XDG_STATE_HOME:-$HOME/.local/state}/toolbelt/unpack.log
+    line=$([[ -f $log ]] && awk -F'\t' '$8 != "undone"' "$log" | tail -1)
+    [[ -n $line ]] || tb_die "$E_FAIL" "nothing to undo, no unpack is recorded"
+    IFS=$'\t' read -r id when archive parts base items files status trash <<<"$line"
+    archive=$(dec "$archive")
+    base=$(dec "$base")
+    mdir=$(tb_state_dir)/unpack
+    local -a partv=() itemv=() trashv=()
+    IFS=/ read -r -a partv <<<"$(dec "$parts")"
+    IFS=/ read -r -a itemv <<<"$(dec "$items")"
+    IFS=/ read -r -a trashv <<<"$(dec "$trash")"
+    local nparts=${#partv[@]} adir label what size
+    adir=$(dirname "$archive")
+
+    # What is still there, and what changed since.
+    local it present=() changed=() rel s m cur
+    for it in "${itemv[@]}"; do
+        [[ -e $base/$it || -L $base/$it ]] && present+=("$it")
+    done
+    if [[ -f $mdir/$id ]]; then
+        local -A known=()
+        while IFS=$'\t' read -r s m rel; do
+            known[$rel]=1
+            [[ -e $base/$rel || -L $base/$rel ]] || continue
+            cur=$(stat -c $'%s\t%Y' -- "$base/$rel" 2>/dev/null)
+            [[ $cur == "$s"$'\t'"$m" ]] || changed+=("$rel")
+        done <"$mdir/$id"
+        for it in ${present[@]+"${present[@]}"}; do
+            while IFS= read -r -d '' rel; do
+                rel=${rel#./}
+                [[ -n ${known[$rel]:-} ]] || changed+=("$rel")
+            done < <(cd "$base" && find "./$it" \( -type f -o -type l \) -print0 2>/dev/null)
+        done
+    fi
+    size=$(awk -F'\t' '{ s += $1 } END { print s + 0 }' "$mdir/$id" 2>/dev/null)
+
+    if (( ${#itemv[@]} == 1 )); then
+        label=${itemv[0]}
+        [[ -d $base/$label ]] && label+=/
+        what="$(nice_path "$base/${itemv[0]}")"
+        [[ -d $base/${itemv[0]} ]] && what=${what%/}/
+    else
+        label="the ${#itemv[@]} items"
+        what="${#itemv[@]} items in $(nice_path "$base")"
+    fi
+    printf 'last run  %s\n' "${when:0:16}" >&2
+    case $status in
+        trash)
+            if (( nparts > 1 )); then
+                printf 'archive   %s, %d parts, now in the trash\n' "$(basename "$archive")" "$nparts" >&2
+            else
+                printf 'archive   %s, now in the trash\n' "$(basename "$archive")" >&2
+            fi ;;
+        url) printf 'archive   %s\n' "$archive" >&2 ;;
+        *)   printf 'archive   %s\n' "$(nice_path "$archive")" >&2 ;;
+    esac
+    printf 'created   %s, %s, %s\n' "$what" "$(tb_plural "$files" file)" "$(tb_human "${size:-0}" " ")" >&2
+
+    local q
+    if (( ! ${#present[@]} )); then
+        q="Nothing unpacked is left."
+        [[ $status == trash ]] || { tb_info "$q Nothing to undo."; mark_undone "$log" "$id"; return 0; }
+    fi
+    if [[ $status == trash ]]; then
+        if (( nparts > 1 )); then q="Move $label to the trash and bring back the $nparts parts?"
+        else q="Move $label to the trash and bring back ${partv[0]}?"; fi
+        if (( ! ${#present[@]} )); then
+            if (( nparts > 1 )); then q="Bring back the $nparts parts?"; else q="Bring back ${partv[0]}?"; fi
+        fi
+    else
+        q="Move $label to the trash?"
+    fi
+    tb_confirm "$q"
+
+    local trash_dir=${XDG_DATA_HOME:-$HOME/.local/share}/Trash kept=() c tn inside
+    for it in ${present[@]+"${present[@]}"}; do
+        local mine=()
+        for c in ${changed[@]+"${changed[@]}"}; do
+            [[ $c == "$it" || $c == "$it"/* ]] && mine+=("$c")
+        done
+        if [[ ! -d $base/$it ]] && (( ${#mine[@]} )); then
+            kept+=("${mine[@]}")
+            continue
+        fi
+        tb_trash "$base/$it" || { tb_warn "could not move $it to the trash"; continue; }
+        tn=${TB_TRASHED[0]}
+        for c in ${mine[@]+"${mine[@]}"}; do
+            inside=${c#"$it"/}
+            mkdir -p "$(dirname "$base/$c")" &&
+                mv -- "$trash_dir/files/$tn/$inside" "$base/$c" && kept+=("$c")
+        done
+    done
+    if (( ${#present[@]} )); then
+        if (( ${#kept[@]} )); then
+            tb_info "$label is in the trash, except $(tb_plural "${#kept[@]}" file) you changed since:"
+            for c in "${kept[@]}"; do tb_info "  $c"; done
+        else
+            tb_info "$label is in the trash."
+        fi
+    fi
+    if [[ $status == trash ]]; then
+        local i ok=0
+        for i in "${!trashv[@]}"; do
+            tb_untrash "${trashv[i]}" "$adir/${partv[i]:-${trashv[i]}}" && ok=$((ok + 1))
+        done
+        if (( nparts > 1 )); then
+            tb_info "$ok parts are back in $(dir_text "$adir")."
+        elif (( ok )); then
+            tb_info "${partv[0]} is back in $(dir_text "$adir")."
+        fi
+    fi
+    mark_undone "$log" "$id"
+}
+
+mark_undone() {
+    local log=$1 id=$2
+    awk -F'\t' -v OFS='\t' -v id="$id" '$1 == id { $8 = "undone" } { print }' "$log" >"$log.new" &&
+        mv -f "$log.new" "$log"
+}
+
+# ---------------------------------------------------------------- one archive
+
+# Unpack one archive or set. Runs in a subshell, so exits end only this one.
+run_one() {
+    trap tb_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    local arg=$1 url="" start label
+
+    start=$(tb_now_ms)
+    tb_tmpdir WORK || tb_die "$E_FAIL" "could not make a temp folder"
+
+    if is_url "$arg"; then
+        url=$arg
+        local dldir parent=$outdir
+        [[ -n $parent && -w $parent ]] || parent=${TMPDIR:-/tmp}
+        tb_tmpdir dldir "$parent" || tb_die "$E_FAIL" "could not make a temp folder in $parent"
+        download "$url" "$dldir"
+        resolve "$DL_FILE" || exit 1
+    fi
+
+    choose_tools
+    OPEN=${PARTS[0]}
+    case $KIND in
+        zip|zipsplit|7z|rar)
+            (( want_password )) && read_password "$SETNAME" ;;
+        *)
+            (( want_password )) && tb_warn "$SETNAME: a $TYPE has no password, -p is ignored" ;;
+    esac
+    if [[ $action == unpack ]] && (( ${#only[@]} )) && [[ $KIND == raw ]]; then
+        tb_die "$E_USAGE" "$SETNAME holds one file, --only does not apply"
+    fi
+    if [[ $TOOL == unzip ]] && { (( SPLIT )) || [[ $KIND == zipsplit ]]; }; then
+        join_zip
+    fi
+
+    make_listing
+    case $? in
+        0) ;;
+        9) exit 1 ;;
+        *)
+            [[ -s $WORK/err ]] && sed 's/^/  /' "$WORK/err" | head -5 >&2
+            tb_die "$E_FAIL" "$SETNAME: could not read the archive, it may be damaged or incomplete" ;;
+    esac
+    if (( ENCRYPTED && ! HAVE_PW )) && [[ $action == unpack || $action == test || $action == cat ]]; then
+        tb_die "$E_FAIL" "$SETNAME: the archive is encrypted, add -p to type the password"
+    fi
+
+    case $action in
+        list) do_list; exit 0 ;;
+        test)
+            local n bytes
+            read -r n bytes _ <<<"$(listing_stats "$WORK/list")"
+            if do_test; then
+                echo "$SETNAME: ok, $(tb_plural "$n" file), $(tb_human "$bytes")"
+                exit 0
+            fi
+            tb_die "$E_FAIL" "$SETNAME: damaged, the test failed" ;;
+        cat) do_cat; exit $? ;;
+    esac
+
+    # --only: the checks and the count cover the matching files only.
+    local list=$WORK/list all_count
+    read -r all_count _ <<<"$(listing_stats "$list")"
+    if (( ${#only[@]} )); then
+        filter_only
+        list=$WORK/list.only
+        if [[ ! -s $list ]]; then
+            tb_die "$E_FAIL" "$SETNAME: nothing matches ${only[*]}"
+        fi
+    fi
+
+    mkdir -p -- "$outdir" || tb_die "$E_FAIL" "could not make $outdir"
+    outdir=$(cd "$outdir" && pwd) || tb_die "$E_FAIL" "could not open $outdir"
+    [[ -w $outdir ]] || tb_die "$E_FAIL" "$(nice_path "$outdir") is not writable"
+
+    safety_checks "$list"
+
+    # Unpack into a hidden temp folder next to the result.
+    local tmp
+    tb_tmpdir tmp "$outdir" || tb_die "$E_FAIL" "could not make a temp folder in $(nice_path "$outdir")"
+    SHOW_PV=0
+    if tb_progress && [[ $KIND == tar || $KIND == raw || $KIND == cpio ]] && (( ! sandbox )); then
+        tb_has pv && SHOW_PV=1
+    fi
+    local ok=0
+    if (( sandbox )); then
+        extract_sandbox "$tmp" && ok=1
+    else
+        extract_to "$tmp" && ok=1
+    fi
+    if (( ! ok )); then
+        tb_die "$E_FAIL" "$SETNAME: unpacking failed, nothing was changed"
+    fi
+
+    shopt -s nullglob dotglob
+    local items=("$tmp"/*)
+    shopt -u nullglob dotglob
+    if (( ${#items[@]} == 0 )); then
+        tb_info "$SETNAME: the archive is empty, nothing was written"
+        exit 0
+    fi
+
+    # Verify: the files on disk against the listing.
+    local on_disk verified=1
+    on_disk=$(files_count "$tmp")
+    if [[ $KIND == initramfs && ( -d $tmp/main || -d $tmp/early ) ]]; then
+        LIST_COUNT=$(awk -F'\t' '$1 != "d" && $1 != "o" { p = $3; sub(/^(\.\/)+/, "", p); if (!s[$5 "\t" p]++) n++ } END { print n + 0 }' "$list")
+    elif [[ $KIND == initramfs ]]; then
+        LIST_COUNT=$(awk -F'\t' '$1 != "d" && $1 != "o" { p = $3; sub(/^(\.\/)+/, "", p); if (!s[p]++) n++ } END { print n + 0 }' "$list")
+    fi
+    if (( on_disk == LIST_COUNT )); then
+        tb_say "verify: $(tb_plural "$on_disk" file) on disk, $LIST_COUNT in the listing"
+    else
+        verified=0
+        tb_warn "$SETNAME: $on_disk files on disk, $LIST_COUNT in the listing. The archive stays."
+    fi
+    if [[ $KIND == initramfs ]]; then
+        local i lc
+        tb_info "unpack: $SETNAME: initramfs, $(tb_plural "${#LAYER_OFF[@]}" layer)"
+        for ((i = 0; i < ${#LAYER_OFF[@]}; i++)); do
+            lc=$(awk -F'\t' -v L="$i" '$5 == L && $1 != "d" && $1 != "o"' "$list" | wc -l)
+            if [[ -d $tmp/$(layer_dir "$i") ]] && (( ${#LAYER_OFF[@]} > 1 )); then
+                tb_info "  layer $((i + 1)): $(layer_label "$i") -> $(layer_dir "$i")/, $(tb_plural "$lc" file)"
+            else
+                tb_info "  layer $((i + 1)): $(layer_label "$i"), $(tb_plural "$lc" file)"
+            fi
+        done
+    fi
+
+    (( recursive )) && recurse_into "$tmp"
+
+    # Place the result.
+    shopt -s nullglob dotglob
+    items=("$tmp"/*)
+    shopt -u nullglob dotglob
+    local how=$place item target base names=() size count took
+    [[ $how == smart && ( $KIND == deb || $KIND == rpm || $KIND == initramfs ) ]] && how=dir
+    if [[ $how == here ]]; then
+        for item in "${items[@]}"; do
+            if [[ -e $outdir/$(basename "$item") || -L $outdir/$(basename "$item") ]]; then
+                tb_info "unpack: $(basename "$item") already exists in $(nice_path "$outdir"), using a folder instead"
+                how=dir
+                break
+            fi
+        done
+    fi
+    size=$(files_bytes "$tmp")
+    count=$(files_count "$tmp")
+    case $how in
+        here)
+            tb_say "move: ${#items[@]} items from $(rel "$tmp") into $(nice_path "$outdir")"
+            for item in "${items[@]}"; do
+                mv -- "$item" "$outdir/" || tb_die "$E_FAIL" "could not move $(basename "$item") into place"
+                names+=("$(basename "$item")")
+            done
+            target=$outdir/
+            base=$outdir ;;
+        smart)
+            if (( ${#items[@]} == 1 )); then
+                local kind=dir
+                [[ -d ${items[0]} && ! -L ${items[0]} ]] || kind=file
+                target=$(tb_free_name "$outdir/$(basename "${items[0]}")" "$kind")
+                tb_say "move: $(rel "${items[0]}") -> $(rel "$target")"
+                mv -- "${items[0]}" "$target" || tb_die "$E_FAIL" "could not move the result into place"
+            else
+                target=$(tb_free_name "$outdir/$NAME" dir)
+                tb_say "move: $(rel "$tmp") -> $(rel "$target")/, ${#items[@]} top items"
+                mv -- "$tmp" "$target" || tb_die "$E_FAIL" "could not move the result into place"
+            fi
+            base=$outdir
+            names=("$(basename "$target")") ;;
+        dir)
+            target=$(tb_free_name "$outdir/$NAME" dir)
+            tb_say "move: $(rel "$tmp") -> $(rel "$target")/"
+            mv -- "$tmp" "$target" || tb_die "$E_FAIL" "could not move the result into place"
+            base=$outdir
+            names=("$(basename "$target")") ;;
+    esac
+    [[ -d $target && $target != */ ]] && target+=/
+
+    took=$(tb_elapsed $(( $(tb_now_ms) - start )))
+    label=$SETNAME
+    [[ -n $url ]] && label=$(basename "${PARTS[0]}")
+    (( ${#PARTS[@]} > 1 )) && label+=" (${#PARTS[@]} parts)"
+    local counted
+    if (( ${#only[@]} )); then
+        counted="$count of $all_count files"
+    else
+        counted=$(tb_plural "$count" file)
+    fi
+    printf '%s -> %s (%s, %s, %s)\n' "$label" "$(show_target "$target")" "$(tb_human "$size")" "$counted" "$took"
+
+    # The delete question, only after a verified, complete unpack of a local file.
+    local status=kept trashnames=""
+    [[ -n $url ]] && status=url
+    if (( verified )) && [[ -z $url ]] && (( ! ${#only[@]} && ! nested && ! in_sandbox )) &&
+       [[ $(readlink -f "${PARTS[0]}") != /boot/* ]]; then
+        offer_delete && { status=trash; trashnames=$OFFER_TRASHED; }
+    fi
+
+    if (( ! nested && ! in_sandbox )); then
+        local archive=${url:-$(dirname "${PARTS[0]}")/$SETNAME}
+        record "$archive" "$base" "$count" "$status" "$trashnames" "${names[@]}"
+    fi
+    exit 0
+}
+
+# Ask to move the archive, or every part of the set, to the trash.
+# Returns 0 when it went to the trash, with the trash names in OFFER_TRASHED.
+offer_delete() {
+    local bytes h q done_msg n=${#PARTS[@]} b
+    bytes=$(tb_bytes "${PARTS[@]}")
+    h=$(tb_human "$bytes" " ")
+    b=$(basename "${PARTS[0]}")
+    if (( n > 1 )); then
+        q="Delete the $n parts of $NAME ($h)? They go to the trash."
+        done_msg="The $n parts of $NAME are in the trash."
+    else
+        q="Delete $b ($h)? It goes to the trash."
+        done_msg="$b is in the trash."
+    fi
+    TB_TRASHED=()
+    tb_offer_delete "$q" "$done_msg" "${PARTS[@]}"
+    if (( ${#TB_TRASHED[@]} )); then
+        local IFS=/
+        OFFER_TRASHED="${TB_TRASHED[*]}"
+        return 0
+    fi
+    if (( ! TB_KEEP && ! TB_RM )) && tb_is_tty && [[ -e ${PARTS[0]} ]]; then
+        if (( n > 1 )); then tb_info "Kept $n parts."; else tb_info "Kept $b."; fi
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+    local f rc=0 one key
+    local -A seen=()
+
+    case $action in
+        undo)    do_undo; exit $? ;;
+        history) do_history; exit $? ;;
+    esac
+
+    [[ -n $outdir ]] || outdir=.
+    if [[ $action == unpack ]] && tb_progress && ! tb_has pv; then
+        tb_hint pv "pv draws a progress bar"
+    fi
+
+    for f in "${files[@]}"; do
+        if is_url "$f"; then
+            ( run_one "$f" )
+            one=$?
+        else
+            if [[ ! -e $f ]]; then
+                tb_err "$f: no such file"
+                rc=1
+                continue
+            fi
+            if [[ -d $f ]]; then
+                tb_err "$f: is a folder, not an archive"
+                rc=1
+                continue
+            fi
+            if [[ ! -r $f ]]; then
+                tb_err "$f: permission denied, try again with sudo"
+                rc=1
+                continue
+            fi
+            if ! resolve "$(readlink -f -- "$f")"; then
+                rc=1
+                continue
+            fi
+            key=$(readlink -f -- "${PARTS[0]}")
+            [[ -n ${seen[$key]:-} ]] && continue
+            seen[$key]=1
+            ( run_one "$f" )
+            one=$?
+        fi
+        (( one == 130 || one == 143 )) && exit "$one"
+        if (( one != 0 )); then
+            if (( ${#files[@]} == 1 )); then rc=$one; else rc=1; fi
+        fi
+    done
+    exit "$rc"
+}
+
+tb_expand "o" "$@"
+set -- "${TB_EXPANDED[@]}"
+files=()
+while (( $# )); do
+    case $1 in
+        -H|--here)      place=here ;;
+        -d|--dir)       place=dir ;;
+        -o|--out)       tb_optarg "$@"; outdir=$2; shift ;;
+        -l|--list)      [[ $action == unpack ]] || tb_usage_error "use one of -l, -t, --cat, --undo and --history"
+                        action=list ;;
+        -t|--test)      [[ $action == unpack ]] || tb_usage_error "use one of -l, -t, --cat, --undo and --history"
+                        action=test ;;
+        --cat)          tb_optarg "$@"
+                        [[ $action == unpack ]] || tb_usage_error "use one of -l, -t, --cat, --undo and --history"
+                        action=cat; cat_file=$2; shift ;;
+        --only)         tb_optarg "$@"; only+=("$2"); shift ;;
+        -p|--password)  want_password=1 ;;
+        -r|--recursive) recursive=1 ;;
+        --rm)           TB_RM=1 ;;
+        -k|--keep)      TB_KEEP=1 ;;
+        --undo)         [[ $action == unpack ]] || tb_usage_error "use one of -l, -t, --cat, --undo and --history"
+                        action=undo ;;
+        --history)      [[ $action == unpack ]] || tb_usage_error "use one of -l, -t, --cat, --undo and --history"
+                        action=history ;;
+        --sandbox)      sandbox=1 ;;
+        --)             shift; TB_PASS=("$@"); break ;;
+        -*)             tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)              files+=("$1") ;;
+    esac
+    shift
+done
+
+if (( TB_RM && TB_KEEP )); then
+    tb_usage_error "--rm and --keep contradict each other, pick one"
+fi
+case $action in
+    undo|history)
+        (( ${#files[@]} )) && tb_usage_error "--$action takes no archive" ;;
+    *)
+        (( ${#files[@]} )) || tb_usage_error "no archive given" ;;
+esac
+if [[ $action == cat ]] && (( ${#files[@]} > 1 )); then
+    tb_usage_error "--cat reads one archive"
+fi
+if (( sandbox )) && [[ $action != unpack ]]; then
+    tb_usage_error "--sandbox works with a normal unpack, not with -l, -t or --cat"
+fi
+if (( sandbox && in_sandbox )); then
+    sandbox=0
+fi
+
+main
