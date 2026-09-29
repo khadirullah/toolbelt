@@ -1,4 +1,4 @@
-.TH "KNODES" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "KNODES" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 knodes \- show node health and pressure at a glance
 .SH SYNOPSIS
@@ -13,6 +13,8 @@ knodes [NODE] [-- kubectl options]
 \fBkubectl get nodes\fR says Ready or NotReady and little else. A node can be Ready and still be in trouble. Under MemoryPressure, DiskPressure or PIDPressure the kubelet refuses new pods and evicts running ones, and \fBget nodes\fR shows none of that. You find it in \fBkubectl describe node\fR, one node at a time, in a long block of conditions.
 .PP
 \fBknodes\fR prints one row per node with its status, roles, age and kubelet version. A CONDITIONS column appears when any node has a problem, and says \fBok\fR for the others. When every node is fine, the table ends with \fBall conditions normal\fR.
+.PP
+A taint on a node keeps pods off it unless they tolerate it, which is a common reason a node gets no pods. Each taint gets a line under the table, such as \fBtaint  k8s\-worker\-1  dedicated=db:NoSchedule\fR. Two kinds are left out. The control\-plane taint on a node with the control\-plane role is expected there. The \fBnode.kubernetes.io/\fR taints that Kubernetes adds for NotReady, pressure or a cordon repeat what the table already shows.
 .PP
 Each problem then gets a short block under the table.
 .IP \(bu 2
@@ -30,7 +32,7 @@ Name a node to see only that one.
 .SH OPTIONS
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
-Print only the table, no detail blocks and no closing line.
+Print only the table, no taints, no detail blocks and no closing line.
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Print each kubectl command before it runs.
@@ -116,6 +118,20 @@ $ echo $?
 0
 .fi
 .RE
+.SS A tainted node
+.PP
+.RS 4
+.nf
+$ knodes
+NODE                     STATUS  ROLE           AGE  VERSION
+toolbelt-control-plane   Ready   control-plane  40m  v1.37.0
+taint  toolbelt-control-plane  dedicated=db:NoSchedule
+taint  toolbelt-control-plane  gpu:PreferNoSchedule
+all conditions normal
+.fi
+.RE
+.PP
+A taint is not a problem, so the exit status stays 0. Pods that should run there need a matching toleration, and \fBkubectl taint node NAME dedicated\-\fR removes the taint.
 .SS Only the table
 .PP
 .RS 4

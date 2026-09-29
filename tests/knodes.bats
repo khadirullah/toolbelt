@@ -17,6 +17,12 @@ setup() {
 ]}
 JSON
     jq '{kind: "List", items: [.items[0]]}' "$FX/nodes.json" > "$FX/one.json"
+    jq '.items[0].spec.taints = [{key: "node-role.kubernetes.io/control-plane", effect: "NoSchedule"}]
+        | .items[1].spec.taints = [{key: "dedicated", value: "db", effect: "NoSchedule"},
+            {key: "gpu", effect: "PreferNoSchedule"},
+            {key: "node.kubernetes.io/unschedulable", effect: "NoSchedule"}]
+        | .items[2].spec.taints = [{key: "node-role.kubernetes.io/control-plane", effect: "NoSchedule"}]
+        | .items[2].status.conditions[0].status = "False"' "$FX/nodes.json" > "$FX/tainted.json"
     jq '.items[1].status.conditions[1] = {type: "Ready", status: "Unknown", reason: "NodeStatusUnknown",
         message: "Kubelet stopped posting node status.", lastTransitionTime: "2026-09-29T09:00:00Z"}
         | .items[1].spec.unschedulable = true' "$FX/nodes.json" > "$FX/down.json"
@@ -138,4 +144,23 @@ SH
     run knodes -- --context kind-kind
     grep -q -- "get nodes -o json --context kind-kind" "$CALLS"
     grep -q -- "top pods -A --no-headers --context kind-kind" "$CALLS"
+}
+
+@test "taints get a line each, except the expected ones" {
+    NODES=tainted run knodes
+    [ "$status" -eq 0 ]
+    [ "${lines[4]}" = "taint  k8s-worker-1  dedicated=db:NoSchedule" ]
+    [ "${lines[5]}" = "taint  k8s-worker-1  gpu:PreferNoSchedule" ]
+    # The control-plane taint shows only on a node without the control-plane role.
+    [ "${lines[6]}" = "taint  k8s-worker-2  node-role.kubernetes.io/control-plane:NoSchedule" ]
+    [ "${lines[7]}" = "all conditions normal" ]
+    [ "${#lines[@]}" -eq 8 ]
+}
+
+@test "naming a node shows only its taints, -q none" {
+    NODES=tainted run knodes k8s-worker-1
+    [ "${#lines[@]}" -eq 5 ]
+    [ "${lines[2]}" = "taint  k8s-worker-1  dedicated=db:NoSchedule" ]
+    NODES=tainted run knodes -q
+    [ "${#lines[@]}" -eq 4 ]
 }

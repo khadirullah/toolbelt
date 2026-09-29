@@ -92,6 +92,18 @@ top_users() {
         cut -f2 | paste -sd, - | sed 's/,/, /g'
 }
 
+# Taints someone set, as node TAB key=value:Effect. The control-plane taint
+# on a control-plane node is expected, and the node.kubernetes.io taints
+# repeat a condition or a cordon the table already shows.
+read -r -d '' TAINTS_JQ <<'JQ'
+.items[] | .metadata.name as $n |
+(.metadata.labels // {} | has("node-role.kubernetes.io/control-plane") or has("node-role.kubernetes.io/master")) as $cp |
+.spec.taints[]? |
+select(.key | startswith("node.kubernetes.io/") | not) |
+select(($cp and (.key == "node-role.kubernetes.io/control-plane" or .key == "node-role.kubernetes.io/master")) | not) |
+"\($n)\t\(.key)\(if (.value // "") != "" then "=" + .value else "" end):\(.effect)"
+JQ
+
 main() {
     local rows f names problems=0 width=4 w_st=6 w_role=4 w_ver=7 cond=0 now
     tb_need kubectl jq
@@ -129,6 +141,14 @@ main() {
             printf "$fmt\n" "${f[0]}" "${f[1]}" "${f[2]}" "$(tb_age "${f[3]}")" "${f[4]}" | sed 's/ *$//'
         fi
     done <<<"$rows"
+    if (( ! TB_QUIET )); then
+        local tn taint
+        while IFS=$'\t' read -r tn taint; do
+            [[ -n $tn ]] || continue
+            [[ -z $node || $tn == "$node" ]] || continue
+            printf "taint  %-$((width + 2))s%s\n" "$tn" "$taint"
+        done < <(jq -r "$TAINTS_JQ" "$TMP/nodes" 2>/dev/null)
+    fi
     if (( ! cond )); then
         (( TB_QUIET )) || echo "all conditions normal"
         return 0

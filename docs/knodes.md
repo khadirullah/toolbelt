@@ -19,6 +19,11 @@ conditions.
 any node has a problem, and says `ok` for the others. When every node is fine, the table ends with
 `all conditions normal`.
 
+A taint on a node keeps pods off it unless they tolerate it, which is a common reason a node gets no pods. Each
+taint gets a line under the table, such as `taint  k8s-worker-1  dedicated=db:NoSchedule`. Two kinds are left out.
+The control-plane taint on a node with the control-plane role is expected there. The `node.kubernetes.io/` taints
+that Kubernetes adds for NotReady, pressure or a cordon repeat what the table already shows.
+
 Each problem then gets a short block under the table.
 
 - The first line names the node, the condition and how long it has held, such as `MemoryPressure since 12m`.
@@ -34,7 +39,7 @@ Name a node to see only that one.
 
 | Option | What it does |
 |---|---|
-| `-q`, `--quiet` | Print only the table, no detail blocks and no closing line. |
+| `-q`, `--quiet` | Print only the table, no taints, no detail blocks and no closing line. |
 | `-v`, `--verbose` | Print each kubectl command before it runs. |
 | `-h`, `--help` | Show the help. |
 
@@ -112,6 +117,20 @@ all conditions normal
 $ echo $?
 0
 ```
+
+### A tainted node
+
+```console
+$ knodes
+NODE                     STATUS  ROLE           AGE  VERSION
+toolbelt-control-plane   Ready   control-plane  40m  v1.37.0
+taint  toolbelt-control-plane  dedicated=db:NoSchedule
+taint  toolbelt-control-plane  gpu:PreferNoSchedule
+all conditions normal
+```
+
+A taint is not a problem, so the exit status stays 0. Pods that should run there need a matching toleration, and
+`kubectl taint node NAME dedicated-` removes the taint.
 
 ### Only the table
 
