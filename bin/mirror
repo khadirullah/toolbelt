@@ -57,6 +57,18 @@ existing_part() {
     echo "$p"
 }
 
+# readlink -m, which BusyBox lacks. Resolve the part that exists and add the rest.
+full_path() {
+    local p=$1 base
+    readlink -m -- "$p" 2>/dev/null && return
+    [[ $p == /* ]] || p=$PWD/$p
+    while [[ $p == */ && $p != / ]]; do p=${p%/}; done
+    base=$(existing_part "$p")
+    p=${p#"$base"}
+    base=$(readlink -f -- "$base")
+    echo "${base%/}$p"
+}
+
 # The mount point that holds a path.
 mount_of() {
     df -P -- "$1" 2>/dev/null | awk 'NR == 2 { sub(/^([^ ]+ +){5}/, ""); print }'
@@ -238,7 +250,7 @@ main() {
     tb_need rsync
     dest_real=""
     if ! is_remote "$dest"; then
-        dest_real=$(readlink -m -- "$dest")
+        dest_real=$(full_path "$dest")
     fi
     check_paths
     tb_tmpdir work || tb_die 1 "could not make a temp folder"
