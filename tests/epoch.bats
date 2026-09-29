@@ -5,7 +5,9 @@ load helpers
 
 setup() {
     tb_setup
-    export TZ=Asia/Kolkata
+    # A POSIX rule, so the tests need no tzdata. Minimal images such as
+    # ubuntu:22.04 have none, and a zone name there falls back to UTC.
+    export TZ=IST-5:30
 }
 
 @test "help prints usage and exits 0" {
