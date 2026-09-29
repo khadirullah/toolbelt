@@ -402,8 +402,8 @@ tb_human() {
     fi
 }
 
-# Total size in bytes of files and folders. Exact with GNU find, to the
-# kilobyte with BusyBox.
+# Total size in bytes of files and folders, counting the files only. du -sb
+# before coreutils 9 adds 4KB per folder.
 tb_bytes() {
     local total=0 p s
     for p in "$@"; do
@@ -411,8 +411,10 @@ tb_bytes() {
         if [[ -f $p ]]; then
             s=$(stat -c %s -- "$p" 2>/dev/null || wc -c <"$p")
         elif find "$p" -maxdepth 0 -printf '' 2>/dev/null; then
-            # The files only. du -sb before coreutils 9 adds 4KB per folder.
             s=$(find "$p" -type f -printf '%s\n' 2>/dev/null | awk '{ s += $1 } END { printf "%.0f", s }')
+        elif [[ -d $p ]]; then
+            # BusyBox find has no -printf.
+            s=$(find "$p" -type f -exec stat -c %s -- {} + 2>/dev/null | awk '{ s += $1 } END { printf "%.0f", s }')
         else
             s=$(du -sk -- "$p" 2>/dev/null)
             s=$(( ${s%%[[:space:]]*} * 1024 ))
