@@ -105,7 +105,11 @@ events() {
     run autounpack enable
     [ "$status" -eq 3 ]
     [[ $output == *"systemctl --user cannot reach one"* ]]
-    [[ $output == *"loginctl enable-linger"* ]]
+    [[ $output == *"loginctl enable-linger $(id -un)"* ]]
+    # Containers, cron and system services often run without USER set.
+    run env -u USER autounpack enable
+    [ "$status" -eq 3 ]
+    [[ $output == *"loginctl enable-linger $(id -un)"* ]]
     [ ! -e "$UNIT" ]
 }
 

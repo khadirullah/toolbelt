@@ -107,7 +107,7 @@ need_systemd() {
         tb_die "$E_TOOL" "needs a systemd user session, this machine runs ${init:-another init}"
     fi
     if ! systemctl --user show-environment >/dev/null 2>&1; then
-        tb_die "$E_TOOL" "needs a systemd user session, and systemctl --user cannot reach one. Log in to a desktop session, or run: loginctl enable-linger $USER"
+        tb_die "$E_TOOL" "needs a systemd user session, and systemctl --user cannot reach one. Log in to a desktop session, or run: loginctl enable-linger ${USER:-$(id -un)}"
     fi
 }
 
