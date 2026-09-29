@@ -136,9 +136,21 @@ tar_names() { tar -tf - | sort; }
     [ -f photos.tar.zst ]
 }
 
+# True when the tool for a format is installed.
+have_fmt() {
+    case ${1#tar.} in
+        tar) return 0 ;;
+        gz) tb_has_any gzip ;; bz2) tb_has_any bzip2 ;; xz|lzma) tb_has_any xz ;; zst) tb_has_any zstd ;;
+        lz4) tb_has_any lz4 ;; lz) tb_has_any lzip plzip ;; lzo) tb_has_any lzop ;;
+        zip) tb_has_any zip ;; 7z) tb_has_any 7z ;;
+    esac
+}
+tb_has_any() { local t; for t; do command -v "$t" >/dev/null && return 0; done; return 1; }
+
 @test "every installed format round-trips and passes -t" {
     local fmt
     for fmt in tar tar.gz tar.bz2 tar.xz tar.lzma tar.zst tar.lz4 tar.lz tar.lzo zip 7z; do
+        have_fmt "$fmt" || continue
         run squash -q -t -T 1 -f "$fmt" -o "out-${fmt//./-}" photos
         [ "$status" -eq 0 ]
         [[ ${lines[1]} == "test passed: out-${fmt//./-}."*", 5 entries, the same as the source" ]]
@@ -146,13 +158,14 @@ tar_names() { tar -tf - | sort; }
     [ "$(tar -tf out-tar.tar | wc -l)" -eq 5 ]
     [ "$(gzip -dc out-tar-gz.tar.gz | tar -tf - | wc -l)" -eq 5 ]
     [ "$(xz --format=lzma -dc out-tar-lzma.tar.lzma | tar -tf - | wc -l)" -eq 5 ]
-    [ "$(lzop -dc out-tar-lzo.tar.lzo | tar -tf - | wc -l)" -eq 5 ]
+    if have_fmt lzo; then [ "$(lzop -dc out-tar-lzo.tar.lzo | tar -tf - | wc -l)" -eq 5 ]; fi
     [ "$(unzip -Z1 out-zip.zip | wc -l)" -eq 5 ]
 }
 
 @test "every single-file format round-trips" {
     local fmt
     for fmt in gz bz2 xz lzma zst lz4 lz lzo; do
+        have_fmt "$fmt" || continue
         run squash -q -t -f "$fmt" photos/sub/n.txt
         [ "$status" -eq 0 ]
         [[ $output == *"test passed: n.txt.$fmt, unpacks to the same"* ]]
@@ -352,6 +365,7 @@ tar_names() { tar -tf - | sort; }
 }
 
 @test "-x works for zip and 7z too" {
+    tb_needs 7z
     run squash -f zip -x '*.bin' -x sub photos
     [ "$status" -eq 0 ]
     run bash -c 'unzip -Z1 photos.zip | sort'
@@ -375,6 +389,7 @@ tar_names() { tar -tf - | sort; }
 }
 
 @test "-s uses 7z volumes and zip parts" {
+    tb_needs 7z
     head -c 150K /dev/urandom > photos/big.bin
     run squash -t -f 7z -s 64K photos
     [ "$status" -eq 0 ]
@@ -394,6 +409,7 @@ tar_names() { tar -tf - | sort; }
 }
 
 @test "-p asks twice and writes an encrypted 7z" {
+    tb_needs 7z
     tb_tty
     run bash -c 'printf "s3cret\ns3cret\n" | squash -k -t -f 7z -p photos'
     [ "$status" -eq 0 ]
@@ -409,6 +425,7 @@ tar_names() { tar -tf - | sort; }
 }
 
 @test "-p for zip uses 7z with AES" {
+    tb_needs 7z
     tb_tty
     run bash -c 'printf "pw\npw\n" | squash -k -v -f zip -p photos'
     [ "$status" -eq 0 ]
@@ -418,6 +435,7 @@ tar_names() { tar -tf - | sort; }
 }
 
 @test "-p with different answers exits 1 and writes nothing" {
+    tb_needs 7z
     tb_tty
     run bash -c 'printf "one\ntwo\n" | squash -f 7z -p photos'
     [ "$status" -eq 1 ]
@@ -426,6 +444,7 @@ tar_names() { tar -tf - | sort; }
 }
 
 @test "-p without a terminal refuses with exit 4" {
+    tb_needs 7z
     run squash -f 7z -p photos </dev/null
     [ "$status" -eq 4 ]
     [ ! -e photos.7z ]
@@ -447,8 +466,10 @@ tar_names() { tar -tf - | sort; }
     [[ $output == *"zstd -10"* ]]
     run squash -v -l 5 -f lz4 -o b photos
     [[ $output == *"lz4 -c -q -6"* ]]
-    run squash -v -l 4 -f 7z -o c photos
-    [[ $output == *"-mx=5"* ]]
+    if command -v 7z >/dev/null; then
+        run squash -v -l 4 -f 7z -o c photos
+        [[ $output == *"-mx=5"* ]]
+    fi
     run squash -v -l 3 -f gz -T 1 -o d photos
     [[ $output == *" -3 "* ]]
 }
@@ -458,7 +479,11 @@ tar_names() { tar -tf - | sort; }
     [ "$status" -eq 0 ]
     [[ $output == *"--ultra -22"* ]]
     run squash -v --max -f gz -T 1 -o b photos
-    [[ $output == *"pigz -c -11"* ]]
+    if command -v pigz >/dev/null; then
+        [[ $output == *"pigz -c -11"* ]]
+    else
+        [[ $output == *"gzip -c -9"* ]]
+    fi
     run squash -v --max -f lz4 -o c photos
     [[ $output == *"lz4 -c -q -12"* ]]
     tb_stub xz 'cat'

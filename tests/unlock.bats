@@ -137,6 +137,7 @@ teardown() {
 }
 
 @test "reads a gpg file by its header, armoured or not" {
+    tb_needs gpg
     printf 'plain text\n' > notes.txt
     gpg --batch --pinentry-mode loopback --passphrase-fd 3 --symmetric -o notes.bin notes.txt 3<<<'pw'
     gpg --batch --pinentry-mode loopback --passphrase-fd 3 --symmetric --armor -o notes.txt.asc notes.txt 3<<<'pw'

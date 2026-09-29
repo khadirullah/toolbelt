@@ -84,6 +84,7 @@ printf "%s\n" "${KC:-$none}"'
 }
 
 @test "without yamllint python3 finds duplicate keys and tabs" {
+    python3 -c "import yaml" 2>/dev/null || skip "python3 has no yaml module"
     tb_without yamllint
     run yamlcheck values.yaml tabs.yaml deploy
     [ "$status" -eq 1 ]
@@ -95,6 +96,7 @@ printf "%s\n" "${KC:-$none}"'
 }
 
 @test "a syntax error shows its line" {
+    python3 -c "import yaml" 2>/dev/null || skip "python3 has no yaml module"
     tb_without yamllint
     printf 'ports: [80, 443\nname: x\n' > broken.yml
     run yamlcheck broken.yml
@@ -104,6 +106,7 @@ printf "%s\n" "${KC:-$none}"'
 }
 
 @test "a clean file passes and exits 0" {
+    python3 -c "import yaml" 2>/dev/null || skip "python3 has no yaml module"
     tb_without yamllint
     run yamlcheck -q deploy/cm.yaml
     [ "$status" -eq 0 ]
@@ -167,6 +170,7 @@ printf "%s\n" "${KC:-$none}"'
 }
 
 @test "-k leaves out files that are not valid YAML" {
+    python3 -c "import yaml" 2>/dev/null || skip "python3 has no yaml module"
     kube_stub
     tb_stub kubectl 'exit 1'
     tb_without yamllint

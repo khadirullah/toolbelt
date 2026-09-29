@@ -119,6 +119,7 @@ teardown() {
 }
 
 @test "gpg is the fallback, and unlock opens the result" {
+    tb_needs gpg
     tb_without age
     run lock -v secrets.env "${GPG_ARGS[@]}" 3<<<'correct horse'
     [ "$status" -eq 0 ]
@@ -132,6 +133,7 @@ teardown() {
 }
 
 @test "gpg locks a folder, and unlock gives the folder back" {
+    tb_needs gpg
     tb_without age
     run lock photos "${GPG_ARGS[@]}" 3<<<'pw'
     [ "$status" -eq 0 ]
@@ -144,6 +146,7 @@ teardown() {
 }
 
 @test "an age key with only gpg exits 3" {
+    tb_needs gpg
     tb_without age
     run lock -r age1qqqexample secrets.env
     [ "$status" -eq 3 ]
@@ -151,6 +154,7 @@ teardown() {
 }
 
 @test "--shred removes the plain copy after a checked round trip" {
+    tb_needs gpg
     tb_without age
     printf 'pw\n' > "$BATS_TEST_TMPDIR/pass"
     local p=(-- --batch --pinentry-mode loopback --passphrase-file "$BATS_TEST_TMPDIR/pass")
@@ -166,6 +170,7 @@ teardown() {
 }
 
 @test "--shred asks, and without a terminal it keeps the file" {
+    tb_needs gpg
     tb_without age
     printf 'pw\n' > "$BATS_TEST_TMPDIR/pass"
     run lock --shred secrets.env -- --batch --pinentry-mode loopback --passphrase-file "$BATS_TEST_TMPDIR/pass" </dev/null

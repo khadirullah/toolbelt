@@ -74,6 +74,7 @@ EOF
 }
 
 @test "the full view with nothing in production" {
+    tb_needs kubectl
     run ctx
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "kube       kind-kind, namespace shop" ]
@@ -86,6 +87,7 @@ EOF
 }
 
 @test "production anywhere exits 1 and says where" {
+    tb_needs kubectl
     echo work > "$HOME/.config/gcloud/active_config"
     mkdir .terraform
     echo prod > .terraform/environment
@@ -101,6 +103,7 @@ EOF
 }
 
 @test "the default pattern ignores prod inside a word, --prod and CTX_PROD replace it" {
+    tb_needs kubectl
     kubectl config use-context kind-delivery >/dev/null
     run ctx -q
     [ "$status" -eq 0 ]
@@ -113,6 +116,7 @@ EOF
 }
 
 @test "-s prints one line for a prompt" {
+    tb_needs kubectl
     run ctx -s
     [ "$status" -eq 0 ]
     [ "$output" = "kind-kind/shop aws:default gcp:shop-dev-1234 tf:default" ]
@@ -159,6 +163,7 @@ EOF
 }
 
 @test "switch by name or part of a name, and back with -" {
+    tb_needs kubectl
     run ctx prod-eks
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "switched to arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks, namespace payments" ]
@@ -171,6 +176,7 @@ EOF
 }
 
 @test "switch refuses an unknown or unclear name" {
+    tb_needs kubectl
     run ctx nope
     [ "$status" -eq 1 ]
     [ "$output" = "ctx: no context named nope. List them with: ctx -l" ]
@@ -184,6 +190,7 @@ EOF
 }
 
 @test "-n sets the namespace, -v shows the kubectl command" {
+    tb_needs kubectl
     run ctx -v -n billing
     [ "$status" -eq 0 ]
     [[ $output == *"+ kubectl config set-context --current --namespace=billing"* ]]
@@ -194,6 +201,7 @@ EOF
 }
 
 @test "-l lists contexts with the current and production ones marked" {
+    tb_needs kubectl
     run ctx -l
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "  arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks  payments  ! production" ]

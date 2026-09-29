@@ -108,6 +108,7 @@ tgz_pair() {
 }
 
 @test "zip against 7z" {
+    tb_needs 7z
     (cd v1 && zip -qr ../a.zip app)
     (cd v2 && 7z a -bso0 -bsp0 ../b.7z app)
     run archdiff a.zip b.7z
@@ -229,6 +230,7 @@ tgz_pair() {
 # ---------------------------------------------------------------- missing tools
 
 @test "a missing 7z exits 3 with an install line" {
+    tb_needs 7z
     (cd v1 && 7z a -bso0 -bsp0 ../a.7z app)
     tb_without 7z
     run archdiff a.7z a.7z

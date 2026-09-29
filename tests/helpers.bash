@@ -41,6 +41,13 @@ tb_without() {
     export PATH=$d
 }
 
+# Skip the test unless every named tool is installed. CI installs only the
+# common ones, so tests that run a real 7z, gpg or kubectl use this.
+tb_needs() {
+    local t
+    for t; do command -v "$t" >/dev/null || skip "$t is not installed"; done
+}
+
 # Answer questions through stdin, as if a person typed at a terminal.
 # Usage: tb_tty; run bash -c 'echo y | unpack x.zip'
 tb_tty() { export TB_TEST_TTY=1; }

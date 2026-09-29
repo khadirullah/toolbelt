@@ -38,6 +38,7 @@ head -c $(( (k + 96) * 250 * ${FAKE_OVER:-100} / 100 )) /dev/zero > "$out"'
 
 # A small PDF with an uncompressed font, which Ghostscript can squeeze.
 make_pdf() {
+    tb_needs gs
     gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -dCompressPages=false -dCompressFonts=false \
         -sOutputFile="$1" -c "/Times-Roman findfont 14 scalefont setfont 1 1 40 { 72 exch 18 mul moveto (The quick brown fox jumps over the lazy dog 0123456789) show } for showpage"
 }
