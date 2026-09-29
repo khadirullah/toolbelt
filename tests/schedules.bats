@@ -76,7 +76,7 @@ case \"\$*\" in
     *is-active*) exit \$CRON_RC ;;
 esac"
     tb_stub crontab "[ -s '$f/crontab' ] || { echo 'no crontab for test' >&2; exit 1; }; cat '$f/crontab'"
-    tb_stub journalctl "echo \"\$(( $NOW - 1500 )) host CRON[4411]: (test) CMD ($HOME/bin/sync-notes.sh)\""
+    tb_stub journalctl "echo \"\$(( $NOW - 1500 )) host CRON[4411]: ($(id -un)) CMD ($HOME/bin/sync-notes.sh)\""
 }
 
 @test "help prints usage and exits 0" {
@@ -108,7 +108,7 @@ esac"
     run schedules
     [ "$status" -eq 0 ]
     [[ ${lines[0]} =~ ^NEXT\ +LEFT\ +JOB\ +FROM$ ]]
-    local re=" [0-9]+m +~/bin/sync-notes.sh +cron, test"
+    local re=" [0-9]+m +~/bin/sync-notes.sh +cron, $(id -un)"
     [[ $output =~ $re ]]
     [[ $output == *"  38m       logrotate                  timer"* ]]
     [[ $output == *"  1d 1h     fstrim                     timer"* ]]
