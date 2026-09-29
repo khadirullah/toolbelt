@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# ctx: where your commands will land, on one screen.
+set -uo pipefail
+TB_CMD=ctx
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: ctx [-s] [--prod REGEX]
+       ctx [-n NAMESPACE] [CONTEXT | -]
+       ctx -l
+
+Where your commands will land, on one screen.
+
+Options:
+  -s, --short         one line, for a shell prompt
+  --prod REGEX        what counts as production, see below
+  -l, --list          list the kube contexts, * marks the current one
+  -n, --namespace NS  set the namespace of the kube context
+  -q, --quiet         only the production warning
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+It shows the kube context and namespace, AWS profile and region, gcloud
+project, Terraform workspace, git user and signing key. A name with
+prod, prd or live at the start of a word counts as production, unless
+--prod or CTX_PROD gives another pattern. CONTEXT switches kubectl to
+that context, - to the one before.
+
+Examples:
+  ctx
+  ctx -s
+  ctx kind-kind -n shop
+  ctx -
+  ctx --prod 'prod|pci'
+
+Needs: nothing. It reads kubectl, aws, gcloud, terraform and git
+settings when they are there. See man ctx.
+Exit: 0 ok, 1 something looks like production or the switch failed,
+      2 bad usage, 3 kubectl missing for a switch.
+EOF
+}
+
+# ---------------------------------------------------------------- helpers
+
+# A path with the home folder as ~.
+tilde() {
+    local p=$1
+    if [[ $p == "$HOME" ]]; then echo "~"
+    elif [[ $p == "$HOME"/* ]]; then echo "~/${p#"$HOME"/}"
+    else echo "$p"; fi
+}
+
+# True when a name looks like production.
+is_prod() {
+    local name=${1,,} re=$prod_re rc
+    [[ -n $name ]] || return 1
+    [[ -n $re ]] || re='(^|[^a-z0-9])(prod|prd|live)'
+    shopt -s nocasematch
+    [[ $name =~ $re ]]
+    rc=$?
+    shopt -u nocasematch
+    return "$rc"
+}
+
+# A value from an ini file: section and key. Handles "key = value".
+ini_get() {
+    local file=$1 section=$2 key=$3
+    [[ -r $file ]] || return 1
+    awk -v s="[$section]" -v k="$key" '
+        { line = $0; sub(/[ \t]+$/, "", line) }
+        line ~ /^\[/ { in_s = (line == s); next }
+        in_s {
+            split(line, kv, "=")
+            name = kv[1]; gsub(/[ \t]/, "", name)
+            if (name == k) { v = substr(line, index(line, "=") + 1); sub(/^[ \t]+/, "", v); print v; found = 1; exit }
+        }
+        END { exit !found }' "$file"
+}
+
+# Print "label  text" for the full view.
+line() { printf '%-11s%s\n' "$1" "$2"; }
+
+# Print a line in red when it is flagged.
+flag_line() {
+    if [[ $2 == 1 ]]; then
+        printf '%s%-11s%s%s\n' "$C_RED" "$1" "$3" "$C_OFF"
+    else
+        line "$1" "$3"
+    fi
+}
+
+# ---------------------------------------------------------------- readers
+
+# Sets KUBE_CTX, KUBE_NS and KUBE_STATE (ok, missing, none).
+read_kube() {
+    KUBE_CTX="" KUBE_NS="" KUBE_STATE=ok
+    if ! tb_has kubectl; then KUBE_STATE=missing; return; fi
+    tb_show kubectl config current-context
+    KUBE_CTX=$(kubectl config current-context 2>/dev/null) || KUBE_CTX=""
+    if [[ -z $KUBE_CTX ]]; then KUBE_STATE=none; return; fi
+    tb_show kubectl config view --minify -o 'jsonpath={..namespace}'
+    KUBE_NS=$(kubectl config view --minify -o 'jsonpath={..namespace}' 2>/dev/null)
+    KUBE_NS=${KUBE_NS%% *}
+    [[ -n $KUBE_NS ]] || KUBE_NS=default
+}
+
+# Sets AWS_P, AWS_R, AWS_KEYS and AWS_STATE (ok, missing, none).
+read_aws() {
+    local cfg=${AWS_CONFIG_FILE:-$HOME/.aws/config} creds=${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials} section
+    AWS_P=${AWS_PROFILE:-${AWS_DEFAULT_PROFILE:-}} AWS_R=${AWS_REGION:-${AWS_DEFAULT_REGION:-}} AWS_KEYS=0 AWS_STATE=ok
+    [[ -n ${AWS_ACCESS_KEY_ID:-} ]] && AWS_KEYS=1
+    if [[ -z $AWS_P && -z $AWS_R && $AWS_KEYS == 0 && ! -e $cfg && ! -e $creds ]]; then
+        if tb_has aws; then AWS_STATE=none; else AWS_STATE=missing; fi
+        return
+    fi
+    [[ -n $AWS_P ]] || AWS_P=default
+    tb_say "reading $cfg"
+    if [[ -z $AWS_R ]]; then
+        if [[ $AWS_P == default ]]; then section=default; else section="profile $AWS_P"; fi
+        AWS_R=$(ini_get "$cfg" "$section" region) || AWS_R=""
+    fi
+}
+
+# Sets GC_PROJECT, GC_CONFIG and GC_STATE (ok, missing, none).
+read_gcloud() {
+    local dir=${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}
+    GC_PROJECT=${CLOUDSDK_CORE_PROJECT:-} GC_CONFIG=${CLOUDSDK_ACTIVE_CONFIG_NAME:-} GC_STATE=ok
+    if [[ -z $GC_PROJECT && ! -d $dir ]]; then
+        if tb_has gcloud; then GC_STATE=none; else GC_STATE=missing; fi
+        return
+    fi
+    if [[ -z $GC_CONFIG ]]; then
+        GC_CONFIG=$(head -n 1 "$dir/active_config" 2>/dev/null) || GC_CONFIG=""
+        [[ -n $GC_CONFIG ]] || GC_CONFIG=default
+    fi
+    tb_say "reading $dir/configurations/config_$GC_CONFIG"
+    [[ -n $GC_PROJECT ]] || GC_PROJECT=$(ini_get "$dir/configurations/config_$GC_CONFIG" core project) || GC_PROJECT=""
+}
+
+# Sets TF_WS, TF_DIR and TF_STATE (ok, missing, none).
+read_terraform() {
+    local data=${TF_DATA_DIR:-.terraform} f
+    TF_WS="" TF_DIR=$PWD TF_STATE=ok
+    f=$(compgen -G "*.tf" | head -n 1)
+    if [[ -z $f ]]; then
+        if tb_has terraform || tb_has tofu; then TF_STATE=none; else TF_STATE=missing; fi
+        return
+    fi
+    TF_WS=${TF_WORKSPACE:-}
+    [[ -n $TF_WS ]] || TF_WS=$(head -n 1 "$data/environment" 2>/dev/null) || TF_WS=""
+    [[ -n $TF_WS ]] || TF_WS=default
+}
+
+# Sets GIT_WHO, GIT_SIGN and GIT_STATE (ok, missing).
+read_git() {
+    local name email fmt key sign kind
+    GIT_STATE=ok GIT_WHO="" GIT_SIGN=""
+    if ! tb_has git; then GIT_STATE=missing; return; fi
+    tb_show git config user.name
+    name=$(git config user.name 2>/dev/null)
+    email=$(git config user.email 2>/dev/null)
+    if [[ -n $name && -n $email ]]; then GIT_WHO="$name, $email"
+    elif [[ -n $name$email ]]; then GIT_WHO="$name$email, the other of user.name and user.email is not set"
+    else GIT_WHO="no user.name or user.email set, commits will fail"; fi
+    fmt=$(git config gpg.format 2>/dev/null) || fmt=openpgp
+    key=$(git config user.signingkey 2>/dev/null)
+    sign=$(git config --type=bool commit.gpgsign 2>/dev/null) || sign=false
+    if [[ -z $key && $sign != true ]]; then
+        GIT_SIGN="none, commits are not signed"
+        return
+    fi
+    case $fmt in
+        ssh) kind="ssh key" ;;
+        x509) kind="x509 key" ;;
+        *) kind="gpg key" ;;
+    esac
+    if [[ -n $key ]]; then
+        [[ $key == key::* ]] && key="${key:5:30}..."
+        GIT_SIGN="$kind $(tilde "$key")"
+    else
+        GIT_SIGN="$kind, no user.signingkey set"
+    fi
+    if [[ $sign == true ]]; then GIT_SIGN+=", commits signed"; else GIT_SIGN+=", commits are not signed"; fi
+}
+
+# ---------------------------------------------------------------- views
+
+show_full() {
+    local flagged=() f text
+    read_kube; read_aws; read_gcloud; read_terraform
+    (( short )) || read_git
+
+    # Which parts look like production.
+    local fk=0 fa=0 fg=0 ft=0
+    [[ $KUBE_STATE == ok ]] && { is_prod "$KUBE_CTX" || is_prod "$KUBE_NS"; } && { fk=1; flagged+=(kube); }
+    [[ $AWS_STATE == ok ]] && is_prod "$AWS_P" && { fa=1; flagged+=(aws); }
+    [[ $GC_STATE == ok ]] && is_prod "$GC_PROJECT" && { fg=1; flagged+=(gcloud); }
+    [[ $TF_STATE == ok ]] && is_prod "$TF_WS" && { ft=1; flagged+=(terraform); }
+
+    if (( short )); then
+        local parts=() k
+        if [[ $KUBE_STATE == ok ]]; then
+            k=$KUBE_CTX
+            [[ $k == arn:aws:eks:*:cluster/* ]] && k=${k##*/}
+            parts+=("$k/$KUBE_NS")
+        fi
+        [[ $AWS_STATE == ok ]] && parts+=("aws:$AWS_P")
+        [[ $GC_STATE == ok && -n $GC_PROJECT ]] && parts+=("gcp:$GC_PROJECT")
+        [[ $TF_STATE == ok ]] && parts+=("tf:$TF_WS")
+        (( ${#flagged[@]} )) && parts=("!" "${parts[@]}")
+        (( TB_QUIET && ! ${#flagged[@]} )) || echo "${parts[*]}"
+        (( ${#flagged[@]} == 0 ))
+        return
+    fi
+
+    tb_color_stdout
+    if (( ! TB_QUIET )); then
+        case $KUBE_STATE in
+            missing) line kube "kubectl not installed" ;;
+            none)    line kube "no current context" ;;
+            *)
+                if (( ${#KUBE_CTX} > 40 )); then
+                    flag_line kube "$fk" "$KUBE_CTX"
+                    flag_line "" "$fk" "namespace $KUBE_NS"
+                else
+                    flag_line kube "$fk" "$KUBE_CTX, namespace $KUBE_NS"
+                fi ;;
+        esac
+        case $AWS_STATE in
+            missing) line aws "not installed" ;;
+            none)    line aws "no profile or keys set up" ;;
+            *)
+                if (( AWS_KEYS )); then text="keys from AWS_ACCESS_KEY_ID"; else text="profile $AWS_P"; fi
+                flag_line aws "$fa" "$text, ${AWS_R:+region }${AWS_R:-no region set}" ;;
+        esac
+        case $GC_STATE in
+            missing) line gcloud "not installed" ;;
+            none)    line gcloud "not set up" ;;
+            *)
+                text="project ${GC_PROJECT:-none set}"
+                [[ $GC_CONFIG != default && -n $GC_CONFIG ]] && text+=", config $GC_CONFIG"
+                flag_line gcloud "$fg" "$text" ;;
+        esac
+        case $TF_STATE in
+            missing) line terraform "not installed" ;;
+            none)    line terraform "no .tf files here" ;;
+            *)       flag_line terraform "$ft" "workspace $TF_WS, in $(tilde "$TF_DIR")" ;;
+        esac
+        if [[ $GIT_STATE == missing ]]; then
+            line git "not installed"
+        else
+            line git "$GIT_WHO"
+            line signing "$GIT_SIGN"
+        fi
+    fi
+    if (( ${#flagged[@]} )); then
+        f=${flagged[*]}
+        printf '%s! context looks like production: %s%s\n' "$C_RED" "${f// /, }" "$C_OFF"
+        return 1
+    fi
+    return 0
+}
+
+list_contexts() {
+    local rows cur name ns w=4 mark flag
+    tb_need kubectl
+    cur=$(kubectl config current-context 2>/dev/null)
+    tb_show kubectl config view -o 'jsonpath={range .contexts[*]}{.name}{"\t"}{.context.namespace}{"\n"}{end}'
+    rows=$(kubectl config view -o 'jsonpath={range .contexts[*]}{.name}{"\t"}{.context.namespace}{"\n"}{end}' 2>/dev/null)
+    rows=$(sed '/^$/d' <<<"$rows" | sort)
+    [[ -n $rows ]] || tb_die 1 "no kube contexts in ${KUBECONFIG:-~/.kube/config}"
+    while IFS=$'\t' read -r name ns; do
+        (( ${#name} > w )) && w=${#name}
+    done <<<"$rows"
+    tb_color_stdout
+    while IFS=$'\t' read -r name ns; do
+        mark=" " flag=""
+        [[ $name == "$cur" ]] && mark="*"
+        { is_prod "$name" || is_prod "$ns"; } && flag="  ! production"
+        if [[ -n $flag ]]; then
+            printf '%s%s %-*s  %s%s%s\n' "$C_RED" "$mark" "$w" "$name" "${ns:-default}" "$flag" "$C_OFF"
+        else
+            printf '%s %-*s  %s\n' "$mark" "$w" "$name" "${ns:-default}"
+        fi
+    done <<<"$rows"
+}
+
+# Switch the kube context, the namespace, or both.
+switch() {
+    local want=$target all=() matches=() c cur prev_file
+    tb_need kubectl
+    prev_file=$(tb_state_dir)/ctx-previous
+    cur=$(kubectl config current-context 2>/dev/null)
+    if [[ -n $want ]]; then
+        if [[ $want == - ]]; then
+            want=$(head -n 1 "$prev_file" 2>/dev/null)
+            [[ -n $want ]] || tb_die 1 "no previous context yet"
+        fi
+        mapfile -t all < <(kubectl config get-contexts -o name 2>/dev/null)
+        for c in "${all[@]}"; do
+            if [[ $c == "$want" ]]; then matches=("$c"); break; fi
+            [[ ${c,,} == *"${want,,}"* ]] && matches+=("$c")
+        done
+        if (( ${#matches[@]} == 0 )); then
+            tb_die 1 "no context named $want. List them with: ctx -l"
+        elif (( ${#matches[@]} > 1 )); then
+            local m=${matches[*]}
+            tb_die 1 "$want matches ${#matches[@]} contexts: ${m// /, }. Give more of the name"
+        fi
+        want=${matches[0]}
+        if [[ $want != "$cur" ]]; then
+            tb_run kubectl config use-context "$want" >/dev/null || tb_die 1 "kubectl could not switch to $want"
+            [[ -n $cur ]] && printf '%s\n' "$cur" > "$prev_file"
+        fi
+    fi
+    if [[ -n $namespace ]]; then
+        [[ -n $want || -n $cur ]] || tb_die 1 "no current context to set a namespace on. Pick one first with: ctx NAME"
+        tb_run kubectl config set-context --current --namespace="$namespace" >/dev/null ||
+            tb_die 1 "kubectl could not set the namespace"
+    fi
+    read_kube
+    echo "switched to $KUBE_CTX, namespace $KUBE_NS"
+    if is_prod "$KUBE_CTX" || is_prod "$KUBE_NS"; then
+        tb_warn "! $KUBE_CTX looks like production"
+    fi
+    return 0
+}
+
+main() {
+    if (( list )); then
+        (( short )) || [[ -n $target || -n $namespace ]] && tb_usage_error "-l lists the contexts, it takes no other option"
+        list_contexts
+    elif [[ -n $target || -n $namespace ]]; then
+        (( short )) && tb_usage_error "-s shows the context, it cannot switch it"
+        switch
+    else
+        show_full
+    fi
+}
+
+short=0
+list=0
+target=""
+namespace=""
+prod_re=${CTX_PROD:-}
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -s|--short)     short=1 ;;
+        -l|--list)      list=1 ;;
+        --prod)         tb_optarg "$@"; prod_re=$2; shift ;;
+        -n|--namespace) tb_optarg "$@"
+                        [[ $2 =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || tb_usage_error "not a namespace name: $2"
+                        namespace=$2; shift ;;
+        -)              [[ -z $target ]] || tb_usage_error "one context at a time"; target=- ;;
+        -*)             tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)              [[ -z $target ]] || tb_usage_error "one context at a time, not $target and $1"
+                        target=$1 ;;
+    esac
+    shift
+done
+# A bad pattern would fail every match, so check it once here.
+if [[ -n $prod_re ]]; then
+    [[ x =~ $prod_re ]]
+    (( $? == 2 )) && tb_usage_error "--prod is not a valid pattern: $prod_re"
+fi
+
+main
+exit $?

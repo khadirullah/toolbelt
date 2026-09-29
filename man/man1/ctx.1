@@ -1,0 +1,238 @@
+.TH "CTX" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+ctx \- where your commands will land, on one screen
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+ctx [-s] [--prod REGEX]
+ctx [-n NAMESPACE] [CONTEXT | -]
+ctx -l
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBkubectl delete\fR, \fBterraform apply\fR and \fBaws s3 rm\fR act on whatever cluster, account or workspace the current settings point at. Those settings live in five different places, and each tool has its own command to show them. The classic mistake is a delete meant for a test cluster that runs against production, because a context switched an hour ago in another terminal.
+.PP
+\fBctx\fR reads all of them and prints one screen:
+.TP
+\fBkube\fR
+The current context and its namespace, from \fBkubectl config\fR. \fBKUBECONFIG\fR is honoured.
+.TP
+\fBaws\fR
+The profile from \fBAWS_PROFILE\fR, and the region from \fBAWS_REGION\fR or the profile in \fB~/.aws/config\fR.
+.TP
+\fBgcloud\fR
+The project of the active gcloud configuration, from \fB~/.config/gcloud\fR.
+.TP
+\fBterraform\fR
+The workspace of the Terraform folder you are in, from \fBTF_WORKSPACE\fR or \fB.terraform/environment\fR.
+.TP
+\fBgit\fR
+The \fBuser.name\fR and \fBuser.email\fR that a commit here would get.
+.TP
+\fBsigning\fR
+The key git signs commits with, and whether it signs them.
+.PP
+Any line whose name looks like production is printed in red in a terminal, and a last line starting with \fB!\fR names them. Then \fBctx\fR exits 1, so a script can stop before it touches production.
+.PP
+With a context name, \fBctx\fR switches kubectl to that context. With \fB\-n\fR, it sets the namespace.
+.PP
+\fBctx\fR only reads files and runs \fBkubectl config\fR and \fBgit config\fR. It never talks to a cluster or a cloud API, so it is fast enough for a shell prompt and works offline. It never prints secrets. With keys in \fBAWS_ACCESS_KEY_ID\fR, it says the keys come from there, and never shows them.
+.SH OPTIONS
+.TP
+\fB\-s\fR, \fB\-\-short\fR
+One line for a shell prompt, such as \fBkind\-kind/shop aws:default tf:default\fR. It starts with \fB!\fR when something looks like production.
+.TP
+\fB\-\-prod REGEX\fR
+What counts as production. See below.
+.TP
+\fB\-l\fR, \fB\-\-list\fR
+List the kube contexts with their namespace. \fB*\fR marks the current one, and production ones are flagged.
+.TP
+\fB\-n\fR, \fB\-\-namespace NS\fR
+Set the namespace of the current context, or of the one you switch to.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the production line. Nothing at all means nothing looks like production.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each \fBkubectl\fR and \fBgit\fR command and each file it reads.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH WHAT COUNTS AS PRODUCTION
+.PP
+By default, a name counts as production when \fBprod\fR, \fBprd\fR or \fBlive\fR starts a word in it. A word starts at the beginning of the name or after any character that is not a letter or digit. These match:
+.IP \(bu 2
+\fBprod\fR, \fBproduction\fR, \fBprod\-eks\fR, \fBshop\-prod\-4821\fR, \fBeu_prd\fR, \fBlive\fR
+.IP \(bu 2
+\fBarn:aws:eks:ap\-south\-1:123456789012:cluster/prod\-eks\fR, because of the \fB/\fR before \fBprod\fR
+.PP
+These do not, because the letters sit inside a word:
+.IP \(bu 2
+\fBdelivery\fR, \fBreproduce\fR, \fBolive\-dev\fR
+.PP
+\fBctx\fR checks the kube context name and namespace, the AWS profile, the gcloud project and the Terraform workspace. It does not check git.
+.PP
+To use your own rule, set \fBCTX_PROD\fR in your shell profile or pass \fB\-\-prod\fR. The value is an extended regular expression, matched anywhere in the name, with case ignored.
+.PP
+.RS 4
+.nf
+export CTX_PROD='prod|pci|^customer-'
+.fi
+.RE
+.SH SWITCHING CONTEXTS
+.PP
+\fBctx NAME\fR runs \fBkubectl config use\-context NAME\fR. The name can be the full context name or any part of it that only one context has. \fBctx prod\fR works for \fBarn:aws:eks:ap\-south\-1:123456789012:cluster/prod\-eks\fR when no other context has \fBprod\fR in it. When two or more match, \fBctx\fR lists them and changes nothing.
+.PP
+\fBctx \-\fR switches back to the context you had before the last switch, like \fBcd \-\fR. \fBctx\fR keeps that name in \fB~/.local/state/toolbelt/ctx\-previous\fR.
+.PP
+\fBctx \-n NAMESPACE\fR runs \fBkubectl config set\-context \-\-current \-\-namespace=NAMESPACE\fR. Combine the two with \fBctx NAME \-n NAMESPACE\fR.
+.PP
+Switching to a context that looks like production prints a warning, and still switches. It exits 0, since you asked for it.
+.PP
+The switch writes to your kubeconfig, the same way \fBkubectl config use\-context\fR does. With several files in \fBKUBECONFIG\fR, kubectl writes the current context to the first one.
+.SH IN A SHELL PROMPT
+.PP
+Add the short form to your prompt, so every line shows where commands go. For bash, in \fB~/.bashrc\fR:
+.PP
+.RS 4
+.nf
+PS1='$(ctx -s 2>/dev/null) \ew \e$ '
+.fi
+.RE
+.PP
+For zsh, in \fB~/.zshrc\fR:
+.PP
+.RS 4
+.nf
+setopt prompt_subst
+PROMPT='$(ctx -s 2>/dev/null) %~ %# '
+.fi
+.RE
+.PP
+\fBctx \-s\fR runs \fBkubectl config\fR twice, which takes about 50 ms. On a slow machine, show it only in folders that matter, or only when \fBKUBECONFIG\fR is set.
+.SH PASS\-THROUGH
+.PP
+None. \fBctx\fR only reads the config of each tool.
+.SH NEEDS
+.PP
+Nothing is required. Each line needs its tool or its files.
+.IP \(bu 2
+\fBkubectl\fR for the \fBkube\fR line and for switching. Without it the line says \fBkubectl not installed\fR, and a switch exits 3 with the install line.
+.IP \(bu 2
+The \fBaws\fR line reads \fB~/.aws/config\fR and the \fBAWS_\fR variables. It does not need the \fBaws\fR command.
+.IP \(bu 2
+The \fBgcloud\fR line reads \fB~/.config/gcloud\fR, or \fBCLOUDSDK_CONFIG\fR, and \fBCLOUDSDK_CORE_PROJECT\fR. It does not need the \fBgcloud\fR command.
+.IP \(bu 2
+The \fBterraform\fR line reads \fB.terraform/environment\fR, or \fBTF_DATA_DIR\fR, and \fBTF_WORKSPACE\fR. It only shows a workspace in a folder with \fB.tf\fR files, since a workspace belongs to a folder.
+.IP \(bu 2
+\fBgit\fR for the \fBgit\fR and \fBsigning\fR lines.
+.PP
+A line reads \fBnot installed\fR when neither the tool nor its settings are on the machine, and \fBnot set up\fR when the tool is there with no settings.
+.SH EXAMPLES
+.SS Before an apply
+.PP
+.RS 4
+.nf
+$ ctx
+kube       kind-kind, namespace shop
+aws        profile default, region ap-south-1
+gcloud     not installed
+terraform  workspace default, in ~/lab/infra/eks
+git        Khadirullah, khadirullah@example.com
+signing    none, commits are not signed
+.fi
+.RE
+.SS Production everywhere
+.PP
+.RS 4
+.nf
+$ AWS_PROFILE=prod-admin ctx
+kube       arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks
+           namespace payments
+aws        profile prod-admin, region ap-south-1
+gcloud     project shop-prod-4821
+terraform  workspace prod, in ~/work/infra
+git        Khadirullah, khadirullah@example.com
+signing    ssh key ~/.ssh/id_ed25519.pub, commits signed
+! context looks like production: kube, aws, gcloud, terraform
+$ echo $?
+1
+.fi
+.RE
+.PP
+A long context name, such as an EKS ARN, gets the namespace on its own line.
+.SS Stop a script before production
+.PP
+.RS 4
+.nf
+ctx -q || { echo "refusing to run against production"; exit 1; }
+kubectl delete pod -l app=test
+.fi
+.RE
+.SS The prompt line
+.PP
+.RS 4
+.nf
+$ ctx -s
+kind-kind/shop aws:default tf:default
+.fi
+.RE
+.SS List and switch
+.PP
+.RS 4
+.nf
+$ ctx -l
+* arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks  payments  ! production
+  kind-kind                                             shop
+  minikube                                              default
+$ ctx -
+switched to kind-kind, namespace shop
+$ ctx mini -n kube-system
+switched to minikube, namespace kube-system
+.fi
+.RE
+.SS What it reads
+.PP
+.RS 4
+.nf
+$ ctx -v -q
++ kubectl config current-context
++ kubectl config view --minify -o 'jsonpath={..namespace}'
+ctx: reading /home/khadirullah/.aws/config
+ctx: reading /home/khadirullah/.config/gcloud/configurations/config_default
++ git config user.name
+! context looks like production: gcloud, terraform
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBkube       no current context\fR : Your kubeconfig has contexts but none is selected, or it has none. Run \fBctx \-l\fR, then \fBctx NAME\fR. A new kind or minikube cluster adds its own context.
+.PP
+\fBctx: NAME matches 2 contexts: a, b. Give more of the name\fR : Type more of the name, or the whole name from \fBctx \-l\fR.
+.PP
+\fBctx: no previous context yet\fR : \fBctx \-\fR only works after one switch made with \fBctx\fR. A switch made with \fBkubectl config use\-context\fR is not recorded.
+.PP
+The \fBaws\fR line shows a region you did not expect : \fBAWS_REGION\fR and \fBAWS_DEFAULT_REGION\fR win over the config file, in that order. Run \fBenv | grep ^AWS_\fR to see what your shell has set.
+.PP
+\fBterraform  no .tf files here\fR : Change into the Terraform folder first. The workspace belongs to the folder, not to your shell.
+.PP
+A namespace called \fBdelivery\fR or \fBlive\-stream\fR is flagged, or a real production one is not : Set \fBCTX_PROD\fR to a pattern that fits your names, such as \fBCTX_PROD='^prod\-|\-prod$'\fR.
+.SH EXIT STATUS
+.TP
+0
+Nothing looks like production, or a switch worked.
+.TP
+1
+Something looks like production, or a switch failed, such as an unknown or unclear name.
+.TP
+2
+Bad usage, such as two context names, \fB\-s\fR with a switch, or a \fB\-\-prod\fR pattern that is not valid.
+.TP
+3
+\fBkubectl\fR is not installed, for \fB\-l\fR, a switch or \fB\-n\fR.
+.SH SEE ALSO
+.PP
+\fBkwhy\fR, \fBkres\fR, \fBgit\-whoami\fR, \fBtfcheck\fR, \fBkubectl\-config(1)\fR

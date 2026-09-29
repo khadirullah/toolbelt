@@ -153,6 +153,7 @@ pbcopy         -                    -                    -                    - 
 pbpaste        -                    -                    -                    -                    -
 cksum          coreutils            coreutils            coreutils            coreutils            coreutils
 stty           coreutils            coreutils            coreutils            coreutils            coreutils
+tofu           -                    opentofu             opentofu             opentofu             opentofu
 kubectl        kubectl              -                    kubectl              kubernetes-client    kubectl
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
