@@ -1,0 +1,196 @@
+.TH "GENPASS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+genpass \- random passwords and passphrases
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+genpass [-l length] [-n count] [--no-symbols] [-c]
+genpass -w words [-s separator] [-n count] [-c]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBgenpass\fR prints a random password, 20 characters long by default. \fB\-w\fR prints a passphrase of whole words instead, such as \fBblot\-geriatric\-robin\-germinate\-undated\fR, which is easier to read out or to type on a phone.
+.PP
+Everything happens on your machine. \fBgenpass\fR reads random bytes from \fB/dev/urandom\fR, the kernel's random source, the same one \fBssh\-keygen\fR and \fBopenssl\fR use. Nothing goes over the network, and nothing is saved or logged.
+.PP
+The result goes to stdout, one per line, so a script can catch it with \fB$(genpass)\fR. \fB\-c\fR puts it on the clipboard instead and prints nothing, so the password never shows on the screen or in your scrollback.
+.SS What a password is made of
+.PP
+A password draws from 74 characters: 26 lower case letters, 26 capitals, 10 digits and 12 symbols.
+.PP
+.RS 4
+.nf
+!#%*+=?@^_~-
+.fi
+.RE
+.PP
+The symbols leave out quotes, backslashes, \fB$\fR, backticks, spaces, \fB&\fR, \fB;\fR, \fB|\fR, \fB<\fR and \fB>\fR. Those break shell commands, YAML, \fB.env\fR files and URLs, and many login forms reject them. With \fB\-\-no\-symbols\fR the set is 62 letters and digits.
+.PP
+Every password has at least one lower case letter, one capital and one digit, and one symbol unless you gave \fB\-\-no\-symbols\fR. Many sites refuse a password without them. When a draw misses one, \fBgenpass\fR throws it away and draws again. That costs about 0.1 bits at 20 characters, and about 1 bit at the minimum of 8.
+.SS How it stays fair
+.PP
+For a password, \fBtr\fR reads random bytes and keeps only the ones that are in the set, so every character in the set is equally likely. A shortcut such as "random byte modulo 74" would favour some characters.
+.PP
+For a passphrase, \fBgenpass\fR reads two random bytes per word, a number from 0 to 65535. It drops numbers from 62208 up and takes the rest modulo 7776, so every word is equally likely.
+.SS The word list
+.PP
+The words come from the EFF large word list, 7776 common English words from 3 to 9 letters, made by the Electronic Frontier Foundation for dice passphrases. It ships with toolbelt as \fBlib/words\fR. The list avoids words that are hard to spell, and no word is the start of another, so a phrase with no separator still reads only one way.
+.SS How strong it is
+.PP
+\fB\-v\fR prints the strength in bits. Each bit doubles the guesses an attacker needs.
+.TP
+\fBgenpass\fR (20 characters with symbols)
+124
+.TP
+\fBgenpass \-l 16\fR
+99
+.TP
+\fBgenpass \-l 12 \-\-no\-symbols\fR
+71
+.TP
+\fBgenpass \-w 4\fR
+51
+.TP
+\fBgenpass \-w 5\fR
+64
+.TP
+\fBgenpass \-w 6\fR
+77
+.PP
+For a password a program stores, such as a database password, the default is plenty. For one you type, 5 or 6 words is a good trade. For a disk or a password manager's main password, use 6 or 7 words.
+.SH OPTIONS
+.TP
+\fB\-l\fR, \fB\-\-length N\fR
+Characters per password. 20 by default, 8 at least, 1024 at most.
+.TP
+\fB\-n\fR, \fB\-\-count N\fR
+How many to print, one per line. 1 by default, 1000 at most.
+.TP
+\fB\-\-no\-symbols\fR
+Letters and digits only, for systems that reject symbols.
+.TP
+\fB\-w\fR, \fB\-\-words N\fR
+A passphrase of N words, from 3 to 64, instead of a password.
+.TP
+\fB\-s\fR, \fB\-\-sep TEXT\fR
+What goes between the words. A hyphen by default. It can be empty, a space or several characters.
+.TP
+\fB\-c\fR, \fB\-\-copy\fR
+Copy the result with \fBclip\fR and print nothing. Takes one password, not \fB\-n\fR.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print no lines of its own. With \fB\-c\fR, hides the line from \fBclip\fR too.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the strength in bits after the result, on stderr.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-\-length\fR and \fB\-\-no\-symbols\fR are for passwords, and \fB\-\-sep\fR is for passphrases. Mixing them exits 2.
+.PP
+\fBgenpass\fR has no \fB\-p\fR. In toolbelt \fB\-p\fR always means a password you type in, and \fBgenpass\fR takes none.
+.SH PASS\-THROUGH
+.PP
+None. It reads \fB/dev/urandom\fR directly.
+.SH NEEDS
+.PP
+\fBod\fR, \fBtr\fR and \fBhead\fR from coreutils, and \fBawk\fR. Every Linux system has them, BusyBox too. \fB\-c\fR needs whatever \fBclip\fR needs for your session, such as \fBwl\-clipboard\fR or \fBxclip\fR.
+.SH EXAMPLES
+.SS A password
+.PP
+.RS 4
+.nf
+$ genpass
+WVAkbXNkPKGKrX-9kCw!
+.fi
+.RE
+.SS With its strength
+.PP
+.RS 4
+.nf
+$ genpass -v
+EpKLuELzveKgGps=rm-9
+genpass: 20 characters from 74, about 124 bits
+.fi
+.RE
+.SS Several long ones with no symbols
+.PP
+.RS 4
+.nf
+$ genpass -n 3 -l 32 --no-symbols
+HW6V38wJWkD1DLe1nIbCtk63hGMhRQ9i
+RW1AYQEQnTtz5JUlppHCDKtIbGiqTKXc
+DYGNMZxM2hoR6tWGiflOLqWzf7p42iMw
+.fi
+.RE
+.SS A passphrase
+.PP
+.RS 4
+.nf
+$ genpass -v -w 5
+blot-geriatric-robin-germinate-undated
+genpass: 5 words from 7776, about 64 bits
+.fi
+.RE
+.SS Another separator
+.PP
+.RS 4
+.nf
+$ genpass -w 4 -s .
+turbojet.identity.bobsled.glowworm
+$ genpass -w 6 -s ' '
+trustful imprison squash evasion liver daycare
+.fi
+.RE
+.SS Straight to the clipboard
+.PP
+.RS 4
+.nf
+$ genpass -c
+clip: copied 20 bytes with wl-copy
+.fi
+.RE
+.PP
+The clipboard holds the password with no newline, ready to paste into a form.
+.SS In a script
+.PP
+.RS 4
+.nf
+$ kubectl create secret generic db-creds --from-literal=password="$(genpass -l 32)"
+secret/db-creds created
+.fi
+.RE
+.SS Too short
+.PP
+.RS 4
+.nf
+$ genpass -l 4
+genpass: length 4 is below the minimum of 8
+Try 'genpass --help' for the options.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBgenpass: length 4 is below the minimum of 8\fR : Passwords under 8 characters fall to a guessing attack in minutes. If a system caps the length, use the longest it takes.
+.PP
+A site says the password has a character it does not allow : Use \fB\-\-no\-symbols\fR, and make it longer to keep the strength, such as \fBgenpass \-l 24 \-\-no\-symbols\fR.
+.PP
+\fBgenpass: could not copy, nothing was printed\fR : \fBclip\fR found no clipboard tool. The line above it says which one to install. \fBgenpass\fR prints nothing in this case, on purpose, so the password never lands on the screen by surprise. Run it without \fB\-c\fR if you want to see it.
+.PP
+\fBgenpass: the word list /home/me/.local/share/toolbelt/lib/words is missing, reinstall toolbelt\fR : The install is broken. Run \fBtoolbelt update\fR, or install toolbelt again.
+.SH EXIT STATUS
+.TP
+0
+It worked.
+.TP
+1
+It failed, such as \fB/dev/urandom\fR not readable, or \fB\-c\fR could not copy.
+.TP
+2
+Bad usage, such as a length under 8 or \fB\-l\fR with \fB\-w\fR.
+.SH SEE ALSO
+.PP
+\fBclip\fR, \fBlock\fR, \fBksecret\fR, \fBopenssl\-rand(1)\fR, https://www.eff.org/dice

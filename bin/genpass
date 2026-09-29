@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# genpass: random passwords and passphrases.
+set -uo pipefail
+TB_CMD=genpass
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: genpass [-l length] [-n count] [--no-symbols] [-c]
+       genpass -w words [-s separator] [-n count] [-c]
+
+Random passwords and passphrases.
+
+Options:
+  -l, --length N      characters per password, 20 by default, 8 at least
+  -n, --count N       how many to print, 1 by default
+  --no-symbols        letters and digits only
+  -w, --words N       a passphrase of N words from a list of 7776
+  -s, --sep TEXT      what goes between words, a hyphen by default
+  -c, --copy          copy it with clip and print nothing
+  -q, --quiet         no lines of its own
+  -v, --verbose       how strong it is, in bits
+  -h, --help          this help
+
+Examples:
+  genpass
+  genpass -n 3 -l 32 --no-symbols
+  genpass -w 5
+  genpass -c
+
+Needs: od, tr and head from coreutils. See man genpass.
+Exit: 0 ok, 1 failed, 2 bad usage, such as a length under 8.
+EOF
+}
+
+LOWER=abcdefghijklmnopqrstuvwxyz
+UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+DIGITS=0123456789
+SYMBOLS='!#%*+=?@^_~-'
+WORDS=$TB_ROOT/lib/words
+
+# A whole number in a range. Usage: check_num value min max what
+check_num() {
+    [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= $2 && 10#$1 <= $3 )) && return 0
+    if [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 < $2 )); then
+        tb_usage_error "$4 $1 is below the minimum of $2"
+    fi
+    tb_usage_error "$4 needs a whole number from $2 to $3, not $1"
+}
+
+# One password of $length characters. tr keeps only bytes from the set and
+# drops the rest, so every character in the set is equally likely. A
+# password that lacks a lower case letter, a capital, a digit, or a symbol
+# when symbols are on, is thrown away and drawn again.
+one_password() {
+    local set=$LOWER$UPPER$DIGITS pw
+    (( symbols )) && set+=$SYMBOLS
+    while :; do
+        pw=$(LC_ALL=C tr -dc "$set" < /dev/urandom | head -c "$length")
+        [[ ${#pw} -eq $length ]] || tb_die 1 "could not read /dev/urandom"
+        [[ $pw == *[a-z]* && $pw == *[A-Z]* && $pw == *[0-9]* ]] || continue
+        (( symbols )) && [[ $pw != *[!A-Za-z0-9]* ]] && continue
+        echo "$pw"
+        return 0
+    done
+}
+
+# Random numbers from 0 to 7775, one per line, $1 of them. Each comes from
+# two random bytes. Values from 62208 up are dropped, so every word is
+# equally likely.
+word_numbers() {
+    local need=$1 got=0 n
+    while (( got < need )); do
+        for n in $(od -An -v -N 64 -tu2 /dev/urandom); do
+            (( n < 62208 )) || continue
+            echo $(( n % 7776 ))
+            (( ++got >= need )) && return 0
+        done
+    done
+}
+
+# One passphrase of $words words.
+one_phrase() {
+    word_numbers "$words" | SEP=$sep LIST=$WORDS awk '
+        { want[NR] = $1 + 1; n = NR }
+        END {
+            sep = ENVIRON["SEP"]; list = ENVIRON["LIST"]; i = 0
+            while ((getline line < list) > 0) {
+                if (line ~ /^#/ || line == "") continue
+                w[++i] = line
+            }
+            if (i != 7776) exit 1
+            out = w[want[1]]
+            for (j = 2; j <= n; j++) out = out sep w[want[j]]
+            print out
+        }'
+}
+
+# The strength of what was made, in whole bits.
+bits() {
+    local per
+    if (( words )); then
+        awk -v n="$words" 'BEGIN { printf "%d\n", n * log(7776) / log(2) }'
+    else
+        per=62
+        (( symbols )) && per=$(( 62 + ${#SYMBOLS} ))
+        awk -v n="$length" -v k="$per" 'BEGIN { printf "%d\n", n * log(k) / log(2) }'
+    fi
+}
+
+main() {
+    local i out
+    if (( words )); then
+        [[ -r $WORDS ]] || tb_die 1 "the word list $WORDS is missing, reinstall toolbelt"
+    fi
+    [[ -r /dev/urandom ]] || tb_die 1 "cannot read /dev/urandom"
+    if (( copy )); then
+        if (( words )); then out=$(one_phrase) || tb_die 1 "the word list $WORDS is damaged, reinstall toolbelt"
+        else out=$(one_password) || exit 1
+        fi
+        local clip_args=()
+        (( TB_QUIET )) && clip_args+=(-q)
+        printf '%s' "$out" | "$TB_ROOT/bin/clip" ${clip_args[@]+"${clip_args[@]}"} || tb_die 1 "could not copy, nothing was printed"
+    else
+        for (( i = 0; i < count; i++ )); do
+            if (( words )); then one_phrase || tb_die 1 "the word list $WORDS is damaged, reinstall toolbelt"
+            else one_password || exit 1
+            fi
+        done
+    fi
+    if (( words )); then
+        tb_say "$words words from 7776, about $(bits) bits"
+    else
+        tb_say "$length characters from $(( 62 + symbols * ${#SYMBOLS} )), about $(bits) bits"
+    fi
+    return 0
+}
+
+length=20 count=1 symbols=1 words=0 sep=- copy=0 set_length=0 set_sep=0
+tb_expand "lnws" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -l|--length) tb_optarg "$@"; check_num "$2" 8 1024 length; length=$(( 10#$2 )); set_length=1; shift ;;
+        -n|--count)  tb_optarg "$@"; check_num "$2" 1 1000 --count; count=$(( 10#$2 )); shift ;;
+        --no-symbols) symbols=0 ;;
+        -w|--words)  tb_optarg "$@"; check_num "$2" 3 64 --words; words=$(( 10#$2 )); shift ;;
+        -s|--sep)    (( $# >= 2 )) || tb_usage_error "$1 needs a value"; sep=$2; set_sep=1; shift ;;
+        -c|--copy)   copy=1 ;;
+        -*)          tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)           tb_usage_error "genpass takes no arguments, only options, not $1" ;;
+    esac
+    shift
+done
+
+if (( words )); then
+    (( set_length )) && tb_usage_error "--length is for passwords, a passphrase counts words with -w"
+    (( symbols )) || tb_usage_error "--no-symbols is for passwords, a passphrase has none"
+else
+    (( set_sep )) && tb_usage_error "--sep goes with -w"
+fi
+(( copy && count > 1 )) && tb_usage_error "--copy takes one password, drop --count"
+main
+exit $?
