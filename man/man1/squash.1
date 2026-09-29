@@ -1,0 +1,485 @@
+.TH "SQUASH" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+squash \- pack files and folders into any free format
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+squash [options] path ... [-- tool options]
+squash --compare path ...
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBsquash\fR packs one or more files and folders into one archive. It picks the tool, the level and the thread count, writes the archive, reads it back to test it, and prints one line:
+.PP
+.RS 4
+.nf
+site/ -> site.tar.zst (60KB to 26KB, 3 files, 0.0s)
+.fi
+.RE
+.PP
+The line gives the source, the archive, the size before and after, the number of files and the time it took.
+.PP
+With no options the archive is a \fBtar.zst\fR in the current folder. zstd packs about as small as gzip at its best level and runs many times faster, and every Linux release from the last few years can open it. Pick another format with \fB\-f\fR, or name the archive with \fB\-o\fR and let its extension pick the format.
+.PP
+\fBsquash\fR never overwrites anything. When the archive name is taken it stops and says which name \fB\-y\fR would use. It checks free disk space before it starts. For the levels that need a lot of memory, it checks free memory too and lowers the thread count to fit.
+.PP
+Every archive is tested before \fBsquash\fR offers to delete anything. The test reads the whole archive back through the same tool and counts the entries. When the count differs from the source, or the tool reports damage, the archive is removed and the source stays. When the test passes and you run \fBsquash\fR in a terminal, it asks whether to move the source to the trash. The answer defaults to no, and a no still exits 0. The source goes to the trash, never straight to \fBrm\fR.
+.PP
+A single file with a plain compressor format, such as \fB\-f xz\fR on a log file, skips tar and becomes \fBserver.log.xz\fR. A folder always goes through tar, zip or 7z, since a plain compressor holds one file.
+.SH OPTIONS
+.SS Format and strength
+.TP
+\fB\-f\fR, \fB\-\-format FMT\fR
+The format. \fBtar.zst\fR by default. The table under Formats lists every name.
+.TP
+\fB\-l\fR, \fB\-\-level 1..9\fR
+1 is the fastest and 9 the smallest, in every format. \fBsquash\fR maps it onto the tool's own scale.
+.TP
+\fB\-\-max\fR
+The tool's real top level, past what \fB\-l 9\fR gives, such as \fBzstd \-\-ultra \-22\fR. Slow, and hungry for memory.
+.TP
+\fB\-T\fR, \fB\-\-threads N\fR
+Threads for the tools that can use them. The default is every CPU, from \fBnproc\fR.
+.TP
+\fB\-\-compare\fR
+Pack a sample in every installed format and print a table of size, ratio and time. Writes no archive.
+.SS What goes in
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave out files and folders whose name matches, at any depth. Can repeat.
+.TP
+\fB\-o\fR, \fB\-\-out NAME\fR
+Name the archive. Its extension picks the format when there is no \fB\-f\fR. A folder puts the archive there.
+.TP
+\fB\-s\fR, \fB\-\-split SIZE\fR
+Write parts of SIZE, such as \fB25M\fR, \fB700M\fR or \fB4G\fR. Units are powers of 1024.
+.TP
+\fB\-p\fR, \fB\-\-password\fR
+Ask for a password, twice. zip and 7z only.
+.SS After writing
+.TP
+\fB\-t\fR, \fB\-\-test\fR
+Print the test result. The test runs anyway when \fBsquash\fR would offer to delete the source.
+.TP
+\fB\-\-rm\fR
+Move the source to the trash once the test passes, without asking.
+.TP
+\fB\-k\fR, \fB\-\-keep\fR
+Keep the source and never ask.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+When the archive exists, write the next free name, such as \fBsite\-1.tar.zst\fR.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the summary line and errors.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print each step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print the help.
+.PP
+\fB\-\-rm\fR and \fB\-k\fR contradict each other, and so do \fB\-l\fR and \fB\-\-max\fR. \fB\-\-rm\fR with \fB\-x\fR is refused, since it would delete the files that \fB\-x\fR left out of the archive. With \fB\-x\fR, \fBsquash\fR never offers to delete the source.
+.SH FORMATS
+.TP
+\fBtar.zst\fR
+Extension: \fB.tar.zst\fR. Tool, first choice then fallback: zstd. Package (apt): zstd. Threads: yes. \fB\-l 1..9\fR becomes: zstd 1, 3, 5, 7, 10, 12, 14, 16, 19
+.TP
+\fBtar.gz\fR
+Extension: \fB.tar.gz\fR. Tool, first choice then fallback: pigz, then gzip. Package (apt): pigz, gzip. Threads: pigz only. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fBtar.bz2\fR
+Extension: \fB.tar.bz2\fR. Tool, first choice then fallback: pbzip2, then bzip2. Package (apt): pbzip2, bzip2. Threads: pbzip2 only. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fBtar.xz\fR
+Extension: \fB.tar.xz\fR. Tool, first choice then fallback: xz. Package (apt): xz\-utils. Threads: yes. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fBtar.lzma\fR
+Extension: \fB.tar.lzma\fR. Tool, first choice then fallback: \fBxz \-\-format=lzma\fR. Package (apt): xz\-utils. Threads: no. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fBtar.lz4\fR
+Extension: \fB.tar.lz4\fR. Tool, first choice then fallback: lz4. Package (apt): lz4. Threads: no. \fB\-l 1..9\fR becomes: lz4 1, 2, 3, 5, 6, 7, 9, 10, 12
+.TP
+\fBtar.lz\fR
+Extension: \fB.tar.lz\fR. Tool, first choice then fallback: plzip, then lzip. Package (apt): plzip, lzip. Threads: plzip only. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fBtar.lzo\fR
+Extension: \fB.tar.lzo\fR. Tool, first choice then fallback: lzop. Package (apt): lzop. Threads: no. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fBtar.br\fR
+Extension: \fB.tar.br\fR. Tool, first choice then fallback: brotli. Package (apt): brotli. Threads: no. \fB\-l 1..9\fR becomes: brotli 1, 2, 3, 4, 6, 7, 8, 9, 11
+.TP
+\fBzip\fR
+Extension: \fB.zip\fR. Tool, first choice then fallback: zip, or 7z for a password. Package (apt): zip, 7zip. Threads: no. \fB\-l 1..9\fR becomes: 1 to 9
+.TP
+\fB7z\fR
+Extension: \fB.7z\fR. Tool, first choice then fallback: 7z. Package (apt): 7zip. Threads: yes. \fB\-l 1..9\fR becomes: 7z 1, 3, 3, 5, 5, 7, 7, 9, 9
+.TP
+\fBtar\fR
+Extension: \fB.tar\fR. Tool, first choice then fallback: tar. Package (apt): tar. Threads: no. \fB\-l 1..9\fR becomes: no compression
+.PP
+The plain forms \fBzst\fR, \fBgz\fR, \fBbz2\fR, \fBxz\fR, \fBlzma\fR, \fBlz4\fR, \fBlz\fR, \fBlzo\fR and \fBbr\fR compress one file without tar. On a folder they become the tar form, so \fB\-f zst\fR on a folder writes a \fB.tar.zst\fR. \fB\-f\fR also takes the short names \fBtgz\fR, \fBtbz2\fR, \fBtxz\fR, \fBtzst\fR and \fBtzo\fR, and the tool names \fBgzip\fR, \fBzstd\fR, \fBlzip\fR, \fBlzop\fR and \fBbrotli\fR.
+.PP
+rar is refused. Only the paid WinRAR tool can write rar, and \fBsquash\fR sticks to free tools. \fBunpack\fR still opens rar archives.
+.PP
+With no \fB\-l\fR, each tool runs at its own default level. zstd uses 3, gzip and xz use 6, bzip2 uses 9, lz4 uses 1, and 7z uses 5. brotli defaults to 11, which is far too slow for an archive, so \fBsquash\fR gives it \fB\-q 6\fR instead.
+.PP
+\fB\-\-max\fR means the level past 9 where a tool has one.
+.TP
+\fBtar.zst\fR
+\fBzstd \-\-ultra \-22\fR
+.TP
+\fBtar.gz\fR
+\fBpigz \-11\fR, which runs zopfli, or \fBgzip \-9\fR without pigz
+.TP
+\fBtar.xz\fR, \fBtar.lzma\fR
+\fBxz \-9e\fR
+.TP
+\fBtar.lz4\fR
+\fBlz4 \-12\fR
+.TP
+\fBtar.br\fR
+\fBbrotli \-q 11 \-w 24\fR
+.TP
+the others
+the same as \fB\-l 9\fR
+.SS Which one to pick
+.IP \(bu 2
+\fBtar.zst\fR for almost everything. Fast at every level, small at \fB\-l 9\fR, and it uses every CPU.
+.IP \(bu 2
+\fBzip\fR for someone on Windows or macOS. Both open it without installing anything. It compresses each file on its own, so many small similar files pack worse than in a tar format.
+.IP \(bu 2
+\fB7z\fR for the smallest archive a Windows user can still open, and for a password that also hides the file names.
+.IP \(bu 2
+\fBtar.xz\fR for a source release, where people expect it, or when size matters more than time. \fB\-l 9\fR needs about 674MB of memory a thread.
+.IP \(bu 2
+\fBtar.gz\fR for an old machine or a tool that only knows gzip. With pigz installed it uses every CPU.
+.IP \(bu 2
+\fBtar.lz4\fR when speed is all that matters, such as a backup piped to another disk. It packs worst of all.
+.IP \(bu 2
+\fBtar.bz2\fR, \fBtar.lz\fR, \fBtar.lzo\fR, \fBtar.lzma\fR and \fBtar.br\fR when someone asks for them. None of them beats zstd or xz for a new archive.
+.IP \(bu 2
+\fBtar\fR with no compression for files that are already compressed, such as photos, videos and other archives. It is the fastest, and compressing a JPEG again saves almost nothing.
+.PP
+\fB\-\-compare\fR answers the question for your own files. See the example below.
+.SH OUTPUT NAME
+.PP
+With no \fB\-o\fR, the archive goes in the current folder and takes the source's name plus the extension, so \fBsquash site/\fR writes \fBsite.tar.zst\fR. When the current folder is inside the source, as with \fBsquash .\fR, the archive goes next to the source instead, since it must not land inside what it packs. Several sources share one archive named after the first, as in \fBsite/, server.log \-> site.tar.zst\fR.
+.PP
+With \fB\-o NAME\fR, the name's extension picks the format when there is no \fB\-f\fR. \fB\-o site.zip\fR writes a zip.
+.IP \(bu 2
+When the name has no archive extension, \fBsquash\fR adds one, so \fB\-f 7z \-o backup\fR writes \fBbackup.7z\fR.
+.IP \(bu 2
+When the name ends in a folder, the archive goes there under its default name.
+.IP \(bu 2
+When \fB\-f\fR and the extension disagree, \fBsquash\fR stops, since one of them is a typo.
+.IP \(bu 2
+When the name holds a single file, such as \fB\-o site.zst\fR for a folder, \fBsquash\fR stops and names the fix, \fBsite.tar.zst\fR.
+.SH SPLIT ARCHIVES
+.PP
+\fB\-s SIZE\fR writes the archive in parts no bigger than SIZE, for a file host with a size limit or a FAT32 stick.
+.TP
+tar formats
+Parts: \fBname.tar.zst.001\fR, \fB.002\fR, .... Join or open with: \fBcat name.tar.zst.0* > name.tar.zst\fR, or \fBunpack name.tar.zst.001\fR
+.TP
+\fB7z\fR
+Parts: \fBname.7z.001\fR, \fB.002\fR, .... Join or open with: \fB7z x name.7z.001\fR, or \fBunpack name.7z.001\fR
+.TP
+\fBzip\fR
+Parts: \fBname.z01\fR, \fBname.z02\fR, ..., \fBname.zip\fR. Join or open with: \fB7z x name.zip\fR, or \fBunpack name.zip\fR
+.PP
+zip parts must be 64K or larger, a limit of zip itself. The test reads every part back, and the summary line names the first and last part.
+.SH PASSWORDS
+.PP
+\fB\-p\fR asks for the password twice, with no echo. The two answers must match, and an empty password is refused. Nothing is written until the password is settled. \fB\-p\fR needs a terminal, so a script or cron job gets exit 4 and never hangs on a prompt.
+.IP \(bu 2
+\fB7z\fR uses AES\-256 and hides the file names too (\fB\-mhe=on\fR). Nobody can list the archive without the password.
+.IP \(bu 2
+\fBzip\fR uses AES\-256 through 7z, since the zip tool only knows the old ZipCrypto, which known attacks break. The names inside stay visible. 7\-Zip and \fBunpack\fR open AES zips, and Windows Explorer on Windows 10 does not.
+.PP
+tar formats have no password. \fB\-p\fR with a tar format exits 2 and points to \fBlock\fR, which encrypts any file with age or gpg:
+.PP
+.RS 4
+.nf
+$ squash -p site/
+squash: -p works with zip and 7z only. For a tar.zst, run lock on the archive afterwards
+Try 'squash --help' for the options.
+.fi
+.RE
+.SH EXCLUDING FILES
+.PP
+\fB\-x PAT\fR leaves out files and folders whose name matches, at any depth. Repeat it for more patterns. Quote each pattern so the shell does not expand it first.
+.PP
+.RS 4
+.nf
+squash -x node_modules -x '*.o' -x .git src/
+.fi
+.RE
+.PP
+tar gets \fB\-\-exclude\fR, zip gets \fB\-x\fR with the same pattern at every depth, and 7z gets \fB\-xr!\fR. Since the archive now holds less than the source, the entry count cannot be checked. The test still reads every byte back.
+.SH CHECKS BEFORE WRITING
+.IP \(bu 2
+\fBDisk space.\fR \fBsquash\fR adds up the source and compares it with the free space where the archive goes. When the source is bigger, it stops with exit 4 and names both sizes. The archive is almost always smaller, so this check is strict on purpose.
+.IP \(bu 2
+\fBMemory.\fR \fBxz \-l 7\fR and above, and \fBzstd \-\-max\fR, need a lot of memory for each thread. \fBsquash\fR reads \fBMemAvailable\fR and uses the most threads that fit in 90% of it. When even one thread does not fit, it stops with exit 4 and asks for a lower \fB\-l\fR.
+.IP \(bu 2
+\fBPlace.\fR The archive may not land inside a folder it packs.
+.IP \(bu 2
+\fBName.\fR An existing file is never replaced. With \fB\-y\fR the archive takes the next free name.
+.PP
+\fBsquash\fR writes into a temporary file next to the final one and renames it only after the test passes. A failed or interrupted run leaves no half\-written archive behind.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to the tool that compresses, placed after the options \fBsquash\fR builds, so they win.
+.TP
+tar formats
+Gets the options: the compressor. Example: \fBsquash \-f xz src/ \-\- \-\-check=sha256\fR
+.TP
+\fBtar.zst\fR
+Gets the options: zstd. Example: \fBsquash photos/ \-\- \-\-long=27\fR
+.TP
+\fBtar\fR
+Gets the options: tar. Example: \fBsquash \-f tar src/ \-\- \-\-owner=0 \-\-group=0\fR
+.TP
+\fBzip\fR
+Gets the options: zip. Example: \fBsquash \-f zip site/ \-\- \-9\fR
+.TP
+\fB7z\fR
+Gets the options: 7z. Example: \fBsquash \-f 7z data/ \-\- \-ms=off\fR
+.PP
+\fB\-v\fR shows where they went:
+.PP
+.RS 4
+.nf
+$ squash -v -f 7z -o p.7z site/ -- -mx=9 -ms=off 2>&1 | grep '^+'
++ 7z a -t7z -bso0 -bsp0 -snl -mmt=4 -mx=9 -ms=off p.7z /home/sam/site
+$ squash -v -f tar.xz -o q.tar.xz site/ -- --check=sha256 2>&1 | grep '^+'
++ tar -cf - site | xz -c -T 4 --check=sha256 > q.tar.xz
+$ squash -v -f tar -o q.tar site/ -- --owner=0 --group=0 2>&1 | grep '^+'
++ tar -cf - --owner=0 --group=0 site > q.tar
+.fi
+.RE
+.PP
+With \fB\-\-compare\fR, options after \fB\-\-\fR are ignored.
+.SH NEEDS
+.PP
+\fBtar\fR and the tool for the format you pick. zstd is the default, so install it at least. \fBpv\fR is optional and draws a progress bar in a terminal.
+.TP
+zstd
+apt: zstd. dnf: zstd. pacman: zstd. zypper: zstd. apk: zstd
+.TP
+gzip
+apt: gzip. dnf: gzip. pacman: gzip. zypper: gzip. apk: gzip
+.TP
+pigz
+apt: pigz. dnf: pigz. pacman: pigz. zypper: pigz. apk: pigz
+.TP
+bzip2
+apt: bzip2. dnf: bzip2. pacman: bzip2. zypper: bzip2. apk: bzip2
+.TP
+pbzip2
+apt: pbzip2. dnf: pbzip2. pacman: pbzip2. zypper: pbzip2. apk: pbzip2
+.TP
+xz
+apt: xz\-utils. dnf: xz. pacman: xz. zypper: xz. apk: xz
+.TP
+lz4
+apt: lz4. dnf: lz4. pacman: lz4. zypper: lz4. apk: lz4
+.TP
+lzip
+apt: lzip. dnf: lzip. pacman: lzip. zypper: lzip. apk: lzip
+.TP
+plzip
+apt: plzip. dnf: plzip. pacman: plzip. zypper: plzip. apk: none
+.TP
+lzop
+apt: lzop. dnf: lzop. pacman: lzop. zypper: lzop. apk: lzop
+.TP
+brotli
+apt: brotli. dnf: brotli. pacman: brotli. zypper: brotli. apk: brotli
+.TP
+zip, unzip
+apt: zip, unzip. dnf: zip, unzip. pacman: zip, unzip. zypper: zip, unzip. apk: zip, unzip
+.TP
+7z
+apt: 7zip. dnf: 7zip. pacman: 7zip. zypper: 7zip. apk: 7zip
+.PP
+Per distro:
+.IP \(bu 2
+\fBDebian and Ubuntu.\fR Newer releases have \fB7zip\fR. Older ones name the package \fBp7zip\-full\fR, and its \fB7z\fR works the same way here.
+.IP \(bu 2
+\fBFedora and RHEL.\fR Fedora has every tool. On RHEL and its rebuilds, several of them come from EPEL.
+.IP \(bu 2
+\fBArch.\fR Every tool is in the main repos.
+.IP \(bu 2
+\fBopenSUSE.\fR \fB7zip\fR on newer releases, \fBp7zip\-full\fR on older Leap.
+.IP \(bu 2
+\fBAlpine.\fR plzip has no package, so \fBtar.lz\fR uses lzip with one thread. \fBsquash\fR needs GNU \fBtar\fR, so install the \fBtar\fR package rather than relying on BusyBox.
+.PP
+When a tool is missing, \fBsquash\fR exits 3 and prints the install line for your package manager.
+.SH EXAMPLES
+.SS Pack a folder
+.PP
+.RS 4
+.nf
+$ squash site/
+site/ -> site.tar.zst (60KB to 26KB, 3 files, 0.0s)
+.fi
+.RE
+.SS A zip for someone on Windows
+.PP
+.RS 4
+.nf
+$ squash -f zip -o site.zip site/
+site/ -> site.zip (60KB to 29KB, 3 files, 0.0s)
+.fi
+.RE
+.SS Compress one log file
+.PP
+A single file with a plain format skips tar:
+.PP
+.RS 4
+.nf
+$ squash -f xz server.log
+server.log -> server.log.xz (106KB to 4.8KB, 1 file, 0.0s)
+.fi
+.RE
+.SS Keep or trash the source
+.PP
+In a terminal, \fBsquash\fR asks once the test passes:
+.PP
+.RS 4
+.nf
+$ squash -f 7z site2/
+site2/ -> site2.7z (60KB to 22KB, 3 files, 0.0s)
+Delete the source, site2/ (3 files, 60 KB)? It goes to the trash. [y/N] y
+site2/ is in the trash.
+.fi
+.RE
+.SS An archive name that is taken
+.PP
+.RS 4
+.nf
+$ squash site/
+squash: site.tar.zst already exists. Pass -y to write site-1.tar.zst, or pick a name with -o
+$ squash -y site/
+site.tar.zst exists, writing site-1.tar.zst
+site/ -> site-1.tar.zst (60KB to 26KB, 3 files, 0.0s)
+.fi
+.RE
+.SS Leave out build output and print the test
+.PP
+.RS 4
+.nf
+$ squash -t -x node_modules -x '*.o' -f 7z src/
+src/ -> src.7z (40KB to 1.9KB, 3 files, 0.0s)
+test passed: src.7z, 3 entries
+src/ stays, -x left files out of the archive.
+.fi
+.RE
+.SS Split into parts
+.PP
+.RS 4
+.nf
+$ squash -s 10K -f tar.gz -o parts site/
+site/ -> parts.tar.gz.001 to .004 (60KB to 31KB, 3 files, 0.0s)
+$ ls parts*
+parts.tar.gz.001  parts.tar.gz.002  parts.tar.gz.003  parts.tar.gz.004
+.fi
+.RE
+.SS A 7z with a password
+.PP
+.RS 4
+.nf
+$ squash -f 7z -p -o secret.7z site/
+Password:
+Again:
+site/ -> secret.7z (60KB to 22KB, 3 files, 0.0s)
+.fi
+.RE
+.SS Every step, with the real commands
+.PP
+.RS 4
+.nf
+$ squash -v -l 9 -o v.tar.zst site/
+squash: site/: 3 files, 60KB
+squash: format: tar.zst, from the name v.tar.zst
+squash: level: -l 9 is zstd -19
+squash: threads: 4, zstd -T4
++ tar -cf - site | zstd -c -q --size-hint=61465 -19 -T4 > v.tar.zst
+site/ -> v.tar.zst (60KB to 25KB, 3 files, 0.0s)
+.fi
+.RE
+.SS Compare every format on your own files
+.PP
+\fB\-\-compare\fR packs up to the first 8MB of the source in each installed format at \fB\-l 6\fR, sorts the table by size, and writes no archive. When the source is bigger, the last line estimates the time for all of it.
+.PP
+.RS 4
+.nf
+$ squash --compare site/
+sample: all of site/ (60KB), every format at -l 6
+format        size   ratio    time
+tar.lz        21KB    3.2x    0.0s
+tar.lzma      22KB    3.2x    0.0s
+tar.xz        22KB    3.2x    0.0s
+7z            22KB    3.2x    0.0s
+tar.bz2       26KB    2.7x    0.0s
+tar.zst       26KB    2.7x    0.0s
+zip           30KB    2.3x    0.0s
+tar.gz        31KB    2.2x    0.0s
+tar.lz4       33KB    2.1x    0.0s
+tar.lzo       36KB    1.9x    0.0s
+skipped: tar.br, brotli is not installed
+.fi
+.RE
+.SS rar is refused
+.PP
+.RS 4
+.nf
+$ squash -f rar site/
+squash: rar is not supported for creating, it needs the paid WinRAR tool. Use -f 7z or -f zip. unpack still opens rar
+Try 'squash --help' for the options.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB"already exists. Pass \-y to write ..."\fR An archive with that name is there. Pass \fB\-y\fR to take the next free name, pick one with \fB\-o\fR, or move the old archive away first. \fBsquash\fR never replaces a file.
+.PP
+\fB"... is 2.1 GB and . has 1.4 GB free"\fR The disk check compares the whole source with the free space. Write somewhere else with \fB\-o /other/disk/\fR, or free some space.
+.PP
+\fB"xz at this level needs about 674 MB and 512 MB of memory is free. Use a lower \-l"\fR Even one thread does not fit. Use \fB\-l 6\fR or lower, close some programs, or pick \fBtar.zst\fR, which needs far less memory at \fB\-l 9\fR.
+.PP
+\fB"4 threads need about 3.4 GB of memory and 2.1 GB is free, using 2"\fR A warning, not an error. The archive comes out the same, only slower. Pass \fB\-T 1\fR to use one thread from the start.
+.PP
+\fB"the test failed. The archive was not kept and the source stays"\fR The tool wrote an archive it could not read back, or the entry count differs from the source. The message above it says which. The usual causes are a failing disk, too little space in the middle of the write, or a file removed while \fBsquash\fR read the folder. Run again with \fB\-v\fR to see each command.
+.PP
+\fB"a file changed while squash read it"\fR A log or database was written to during the pack. The archive holds the version tar saw. Stop the program that writes, or copy the file first, for a clean copy.
+.PP
+\fB"zip needs every path in one folder"\fR zip stores paths relative to one folder. Move the sources into one folder, or use a tar format, which handles paths from anywhere.
+.PP
+\fB"\-p asks for the password in a terminal, and there is none"\fR \fB\-p\fR never reads a password from a pipe. For a script, write a tar format and encrypt it with \fBlock\fR, which can read a key file.
+.PP
+\fBA zip with a password does not open in Windows Explorer.\fR Older Explorer versions only know ZipCrypto, and \fBsquash\fR uses AES\-256. Send a 7z instead, or tell the person to use 7\-Zip.
+.PP
+\fBThe archive is barely smaller than the source.\fR The files are already compressed, such as JPEG, MP4 or other archives. Use \fB\-f tar\fR, which is faster and comes out almost the same size.
+.SH EXIT STATUS
+.TP
+0
+The archive is written and tested. Also 0 when you answer no to the delete question.
+.TP
+1
+Packing or the test failed, the passwords differ, or a source is missing. Nothing was kept.
+.TP
+2
+Bad usage, including rar, \fB\-p\fR with a tar format, and a name whose extension disagrees with \fB\-f\fR.
+.TP
+3
+The tool for the format is missing. The message has the install line.
+.TP
+4
+A safety check refused, such as an existing name, too little disk or memory, or no terminal for \fB\-p\fR.
+.SH SEE ALSO
+.PP
+\fBunpack\fR, \fBarchdiff\fR, \fBarchmount\fR, \fBlock\fR, \fBtar(1)\fR, \fBzstd(1)\fR, \fBxz(1)\fR, \fB7z(1)\fR

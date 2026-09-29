@@ -62,8 +62,10 @@ find           findutils            findutils            findutils            fi
 head           coreutils            coreutils            coreutils            coreutils            coreutils
 mv             coreutils            coreutils            coreutils            coreutils            coreutils
 sed            sed                  sed                  sed                  sed                  sed
+sort           coreutils            coreutils            coreutils            coreutils            coreutils
 stat           coreutils            coreutils            coreutils            coreutils            coreutils
 split          coreutils            coreutils            coreutils            coreutils            coreutils
+nproc          coreutils            coreutils            coreutils            coreutils            coreutils
 od             coreutils            coreutils            coreutils            coreutils            coreutils
 tr             coreutils            coreutils            coreutils            coreutils            coreutils
 wc             coreutils            coreutils            coreutils            coreutils            coreutils
@@ -76,6 +78,7 @@ df             coreutils            coreutils            coreutils            co
 awk            mawk                 gawk                 gawk                 gawk                 gawk
 sudo           sudo                 sudo                 sudo                 sudo                 sudo
 rpm            rpm                  rpm                  rpm-tools            rpm                  rpm
+getconf        libc-bin             glibc-common         glibc                glibc                musl-utils
 readlink       coreutils            coreutils            coreutils            coreutils            coreutils
 grep           grep                 grep                 grep                 grep                 grep
 date           coreutils            coreutils            coreutils            coreutils            coreutils

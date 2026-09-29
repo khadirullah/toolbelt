@@ -1,0 +1,946 @@
+#!/usr/bin/env bash
+# squash: pack files and folders into any free format.
+set -uo pipefail
+TB_CMD=squash
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: squash [options] path ... [-- tool options]
+       squash --compare path ...
+
+Pack files and folders into any free format.
+
+Format and strength:
+  -f, --format FMT    tar.zst by default, or tar.gz, tar.xz, zip, 7z and more
+  -l, --level 1..9    1 is the fastest, 9 the smallest, in every format
+  --max               the tool's real top level, such as zstd --ultra -22
+  -T, --threads N     threads for the tools that can use them, default all
+  --compare           pack a sample in every installed format, print a table
+
+What goes in:
+  -x, --exclude PAT   leave out files that match, repeat for more patterns
+  -o, --out NAME      name the archive, its extension picks the format
+  -s, --split SIZE    write parts of SIZE, such as 25M or 1G
+  -p, --password      ask for a password, zip and 7z only
+
+After writing:
+  -t, --test          print the test result, the test runs anyway before
+                      the delete question
+  --rm                move the source to the trash once the test passes
+  -k, --keep          keep the source and never ask
+  -y, --yes           write the next free name when the archive exists
+  -q, --quiet         only the summary line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to the compressor, or to tar, zip or 7z.
+
+Examples:
+  squash photos/
+  squash -f zip -o site.zip site/
+  squash -s 25M talk.mp4
+  squash -f 7z -p taxes/
+  squash -f xz -l 9 -x node_modules -x '*.o' src/
+
+Needs: tar, plus the tool for each format. See man squash.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# ---------------------------------------------------------------- formats
+
+# Every format squash writes, in the order --compare tries them.
+COMPARE_FORMATS=(tar.gz tar.bz2 tar.xz tar.lzma tar.zst tar.lz4 tar.lz tar.lzo tar.br zip 7z)
+
+# The canonical name for a format as the user typed it, or return 1.
+canon_fmt() {
+    case ${1,,} in
+        tar.gz|tgz|tar.gzip)            echo tar.gz ;;
+        gz|gzip)                        echo gz ;;
+        tar.bz2|tbz|tbz2|tb2|tar.bzip2) echo tar.bz2 ;;
+        bz2|bzip2)                      echo bz2 ;;
+        tar.xz|txz)                     echo tar.xz ;;
+        xz)                             echo xz ;;
+        tar.lzma)                       echo tar.lzma ;;
+        lzma)                           echo lzma ;;
+        tar.zst|tzst|tar.zstd)          echo tar.zst ;;
+        zst|zstd)                       echo zst ;;
+        tar.lz4)                        echo tar.lz4 ;;
+        lz4)                            echo lz4 ;;
+        tar.lz|tar.lzip)                echo tar.lz ;;
+        lz|lzip)                        echo lz ;;
+        tar.lzo|tzo)                    echo tar.lzo ;;
+        lzo|lzop)                       echo lzo ;;
+        tar.br|tar.brotli)              echo tar.br ;;
+        br|brotli)                      echo br ;;
+        zip)                            echo zip ;;
+        7z|7zip)                        echo 7z ;;
+        tar)                            echo tar ;;
+        rar|tar.rar)                    echo rar ;;
+        *) return 1 ;;
+    esac
+}
+
+# The archive extension at the end of a file name, as typed, or return 1.
+name_ext() {
+    local n=${1,,} e
+    for e in tar.gz tar.bz2 tar.xz tar.lzma tar.zst tar.lz4 tar.lz tar.lzo tar.br \
+             tgz tbz2 tbz txz tzst tzo gz bz2 xz lzma zst lz4 lz lzo br zip 7z tar rar; do
+        if [[ $n == ?*."$e" ]]; then
+            echo "${1: -${#e}}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The compressor family of a format: tar.zst and zst are both zst.
+fam_of() { local f=${1#tar.}; [[ $1 == tar ]] && f=tar; echo "$f"; }
+
+# Map a level 1..9 onto the tool's own scale.
+map_level() {
+    local fam=$1 lv=$2
+    case $fam in
+        zst) echo $(( 1 + (lv - 1) * 18 / 8 )) ;;
+        lz4) echo $(( 1 + (lv - 1) * 11 / 8 )) ;;
+        br)  echo $(( 1 + (lv - 1) * 10 / 8 )) ;;
+        7z)  echo $(( lv % 2 ? lv : lv + 1 )) ;;
+        *)   echo "$lv" ;;
+    esac
+}
+
+# Quote arguments the way tb_show does, so a reader can copy the line.
+qargs() {
+    local out="" a
+    for a in "$@"; do
+        if [[ $a =~ ^[][A-Za-z0-9_./:=,@%+^-]+$ ]]; then
+            out+=" $a"
+        else
+            out+=" '${a//\'/\'\\\'\'}'"
+        fi
+    done
+    printf '%s' "${out# }"
+}
+
+# Pick the tool for a compressor family and build its command in COMP, the
+# stream command that reads stdin and writes stdout. Arguments: family and
+# level, where the level is empty for the tool's default, 1..9, or max.
+# Sets TOOL, COMP, DCOMP (the matching decompressor) and LVL_NOTE.
+pick_compressor() {
+    local fam=$1 lv=$2 n
+    local -a lvl=() thr=()
+    TOOL="" COMP=() DCOMP=() LVL_NOTE="" THR_NOTE=""
+    case $fam in
+        gz)
+            if tb_has pigz; then TOOL=pigz; thr=(-p "$THREADS"); else tb_need gzip; TOOL=gzip; fi
+            case $lv in
+                max) if [[ $TOOL == pigz ]]; then lvl=(-11); else lvl=(-9); fi ;;
+                "")  ;;
+                *)   lvl=("-$lv") ;;
+            esac
+            COMP=("$TOOL" -c) DCOMP=("$TOOL" -dc) ;;
+        bz2)
+            if tb_has pbzip2; then TOOL=pbzip2; thr=("-p$THREADS"); else tb_need bzip2; TOOL=bzip2; fi
+            case $lv in max) lvl=(-9) ;; "") ;; *) lvl=("-$lv") ;; esac
+            COMP=("$TOOL" -c) DCOMP=("$TOOL" -dc) ;;
+        xz)
+            tb_need xz; TOOL=xz; thr=(-T "$THREADS")
+            case $lv in max) lvl=(-9e) ;; "") ;; *) lvl=("-$lv") ;; esac
+            COMP=(xz -c) DCOMP=(xz -dc) ;;
+        lzma)
+            tb_need xz; TOOL=xz
+            case $lv in max) lvl=(-9e) ;; "") ;; *) lvl=("-$lv") ;; esac
+            COMP=(xz --format=lzma -c) DCOMP=(xz --format=lzma -dc) ;;
+        zst)
+            tb_need zstd; TOOL=zstd; thr=("-T$THREADS")
+            case $lv in
+                max) lvl=(--ultra -22) ;;
+                "")  ;;
+                *)   n=$(map_level zst "$lv"); lvl=("-$n") ;;
+            esac
+            COMP=(zstd -c -q) DCOMP=(zstd -dc -q)
+            (( ${SRC_BYTES:-0} > 0 )) && COMP+=("--size-hint=$SRC_BYTES") ;;
+        lz4)
+            tb_need lz4; TOOL=lz4
+            case $lv in
+                max) lvl=(-12) ;;
+                "")  ;;
+                *)   n=$(map_level lz4 "$lv"); lvl=("-$n") ;;
+            esac
+            COMP=(lz4 -c -q) DCOMP=(lz4 -dc -q) ;;
+        lz)
+            if tb_has plzip; then TOOL=plzip; thr=(-n "$THREADS"); else tb_need lzip; TOOL=lzip; fi
+            case $lv in max) lvl=(-9) ;; "") ;; *) lvl=("-$lv") ;; esac
+            COMP=("$TOOL" -c) DCOMP=("$TOOL" -dc) ;;
+        lzo)
+            tb_need lzop; TOOL=lzop
+            case $lv in max) lvl=(-9) ;; "") ;; *) lvl=("-$lv") ;; esac
+            COMP=(lzop -c) DCOMP=(lzop -dc) ;;
+        br)
+            tb_need brotli; TOOL=brotli
+            case $lv in
+                max) lvl=(-q 11 -w 24) ;;
+                "")  lvl=(-q 6) ;;
+                *)   n=$(map_level br "$lv"); lvl=(-q "$n") ;;
+            esac
+            COMP=(brotli -c) DCOMP=(brotli -dc) ;;
+    esac
+    case $lv in
+        max) LVL_NOTE="--max is $TOOL ${lvl[*]}" ;;
+        "")  if (( ${#lvl[@]} )); then LVL_NOTE="$TOOL ${lvl[*]}, squash's default for $TOOL"
+             else LVL_NOTE="$TOOL's own default"; fi ;;
+        *)   LVL_NOTE="-l $lv is $TOOL ${lvl[*]}" ;;
+    esac
+    if (( ${#thr[@]} )); then
+        THR_NOTE="$THREADS, $TOOL ${thr[*]}"
+    else
+        THR_NOTE="1, $TOOL runs on one core"
+    fi
+    COMP+=(${lvl[@]+"${lvl[@]}"} ${thr[@]+"${thr[@]}"})
+}
+
+# ---------------------------------------------------------------- sources
+
+# Check every source and fill SRC_ABS, SRC_SHOW and SINGLE.
+read_sources() {
+    local p abs
+    SRC_ABS=() SRC_SHOW=()
+    for p in "${SRCS[@]}"; do
+        [[ -e $p || -L $p ]] || tb_die "$E_FAIL" "$p: no such file or folder"
+        if [[ -d $p && ! -L $p ]]; then
+            abs=$(cd -- "$p" && pwd) || tb_die "$E_FAIL" "$p: cannot enter the folder"
+        else
+            abs=$(cd -- "$(dirname -- "$p")" && pwd) || tb_die "$E_FAIL" "$p: cannot read"
+            abs=${abs%/}/$(basename -- "$p")
+        fi
+        [[ $abs == / ]] && tb_usage_error "squash does not pack the whole disk, name the folders to pack"
+        SRC_ABS+=("$abs")
+        p=${p%/}
+        [[ -z $p ]] && p=/
+        if [[ -d $p && ! -L $p ]]; then SRC_SHOW+=("$p/"); else SRC_SHOW+=("$p"); fi
+    done
+    SINGLE=0
+    if (( ${#SRCS[@]} == 1 )) && [[ -f ${SRCS[0]} ]]; then SINGLE=1; fi
+}
+
+# The sources as one short string for messages.
+src_label() {
+    local n=${#SRC_SHOW[@]}
+    if (( n == 1 )); then echo "${SRC_SHOW[0]}"
+    elif (( n <= 3 )); then local IFS=,; echo "${SRC_SHOW[*]}" | sed 's/,/, /g'
+    else echo "${SRC_SHOW[0]} and $((n - 1)) more"; fi
+}
+
+# Count the entries and the files in the sources.
+count_sources() {
+    SRC_ENTRIES=$(find "${SRC_ABS[@]}" -print0 2>/dev/null | tr -dc '\0' | wc -c)
+    SRC_FILES=$(find "${SRC_ABS[@]}" ! -type d -print0 2>/dev/null | tr -dc '\0' | wc -c)
+    SRC_BYTES=$(tb_bytes "${SRC_ABS[@]}")
+}
+
+# Build the tar command in TAR. Each source is stored under its own name,
+# with -C to its folder when that is not the current one.
+build_tar() {
+    local cur=$PWD p dir base pat
+    TAR=(tar -cf -)
+    for pat in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do TAR+=("--exclude=$pat"); done
+    [[ -n ${1:-} ]] && TAR+=(-v "--index-file=$1")
+    [[ $FAM == tar ]] && TAR+=(${TB_PASS[@]+"${TB_PASS[@]}"})
+    for p in "${SRC_ABS[@]}"; do
+        dir=${p%/*}
+        [[ -z $dir ]] && dir=/
+        base=${p##*/}
+        if [[ $dir != "$cur" ]]; then
+            TAR+=(-C "$dir")
+            cur=$dir
+        fi
+        TAR+=("$base")
+    done
+}
+
+# ---------------------------------------------------------------- names
+
+# Decide FMT and FAM from -f, -o and the sources.
+resolve_format() {
+    local from="" oext="" ofmt=""
+    if [[ -n $OUT ]] && oext=$(name_ext "$OUT"); then
+        ofmt=$(canon_fmt "$oext")
+    fi
+    if [[ -n $FORMAT ]]; then
+        FMT=$(canon_fmt "$FORMAT") || tb_usage_error "unknown format $FORMAT. squash writes tar.zst, tar.gz, tar.bz2, tar.xz, tar.lzma, tar.lz4, tar.lz, tar.lzo, tar.br, zip, 7z and tar"
+        from="from -f"
+    elif [[ -n $ofmt ]]; then
+        FMT=$ofmt
+        from="from the name $(basename -- "$OUT")"
+    else
+        FMT=zst
+        from="the default"
+    fi
+    if [[ $FMT == rar || $ofmt == rar ]]; then
+        tb_usage_error "rar is not supported for creating, it needs the paid WinRAR tool. Use -f 7z or -f zip. unpack still opens rar"
+    fi
+    FAM=$(fam_of "$FMT")
+    # A plain compressor holds one file. Anything else goes through tar.
+    if [[ $FMT != tar* && $FMT != zip && $FMT != 7z ]] && (( ! SINGLE )); then
+        if [[ -n $ofmt && -z $FORMAT ]]; then
+            tb_usage_error "$(basename -- "$OUT") holds a single file, name it $(basename -- "${OUT%.*}").tar.$FAM to pack $(src_label)"
+        fi
+        FMT=tar.$FAM
+    fi
+    if [[ -n $ofmt ]]; then
+        # -o with its own extension must agree with the format.
+        local want=$FMT
+        if [[ $want == "tar.$ofmt" ]]; then
+            tb_usage_error "$(basename -- "$OUT") holds a single file, name it $(basename -- "${OUT%.*}").$want"
+        elif [[ $ofmt != "$want" ]]; then
+            tb_usage_error "the name $(basename -- "$OUT") says $ofmt, but the format is $want"
+        fi
+    fi
+    FMT_FROM=$from
+    EXT=.$FMT
+}
+
+# True when a name, or the first part of a split set, exists.
+name_taken() {
+    local n=$1
+    [[ -e $n || -L $n ]] && return 0
+    [[ -e $n.001 ]] && return 0
+    [[ $FMT == zip && -e ${n%.zip}.z01 ]] && return 0
+    return 1
+}
+
+# Decide DEST_DIR and OUT_NAME, the final archive path.
+resolve_output() {
+    local stem ext name p
+    if [[ -n $OUT && -d $OUT ]]; then
+        # -o names a folder: the archive goes there under its usual name.
+        DEST_DIR=$(cd -- "$OUT" && pwd)
+        stem=${SRC_ABS[0]##*/}
+        ext=$EXT
+    elif [[ -n $OUT ]]; then
+        if name_ext "$OUT" >/dev/null; then
+            ext=$(name_ext "$OUT")
+            stem=${OUT:0:${#OUT}-${#ext}-1}
+            ext=.$ext
+        else
+            stem=$OUT
+            ext=$EXT
+        fi
+        DEST_DIR=$(dirname -- "$stem")
+        [[ -d $DEST_DIR ]] || tb_die "$E_FAIL" "the folder $DEST_DIR does not exist"
+        DEST_DIR=$(cd -- "$DEST_DIR" && pwd)
+        stem=$(basename -- "$stem")
+    else
+        name=${SRC_ABS[0]##*/}
+        stem=$name
+        ext=$EXT
+        DEST_DIR=$PWD
+        # Never write inside a folder that is being packed.
+        for p in "${SRC_ABS[@]}"; do
+            if [[ -d $p && ( $DEST_DIR == "$p" || $DEST_DIR == "$p"/* ) ]]; then
+                DEST_DIR=${p%/*}
+                [[ -z $DEST_DIR ]] && DEST_DIR=/
+            fi
+        done
+    fi
+    for p in "${SRC_ABS[@]}"; do
+        if [[ -d $p && ! -L $p && ( $DEST_DIR == "$p" || $DEST_DIR == "$p"/* ) ]]; then
+            tb_die "$E_SAFE" "the archive would land inside $p, which it packs. Name a place outside it with -o"
+        fi
+    done
+    OUT_PATH=${DEST_DIR%/}/$stem$ext
+    [[ $DEST_DIR == / ]] && OUT_PATH=/$stem$ext
+    if name_taken "$OUT_PATH"; then
+        local n=1 try
+        try=${DEST_DIR%/}/$stem-$n$ext
+        while name_taken "$try"; do ((n++)); try=${DEST_DIR%/}/$stem-$n$ext; done
+        if (( TB_YES )); then
+            tb_info "$(show_path "$OUT_PATH") exists, writing $(show_path "$try")"
+            OUT_PATH=$try
+        else
+            tb_die "$E_SAFE" "$(show_path "$OUT_PATH") already exists. Pass -y to write $(show_path "$try"), or pick a name with -o"
+        fi
+    fi
+    OUT_BASE=${OUT_PATH##*/}
+}
+
+# A path as the user would write it: relative when it is in the current folder.
+show_path() {
+    local p=$1
+    if [[ $p == "$PWD"/* ]]; then echo "${p#"$PWD"/}"; else echo "$p"; fi
+}
+
+# ---------------------------------------------------------------- checks
+
+check_disk() {
+    local free need
+    free=${TB_TEST_FREE_KB:-$(tb_free_kb "$DEST_DIR")}
+    [[ -n $free ]] || return 0
+    need=$(( (SRC_BYTES + 1023) / 1024 ))
+    if (( free < need )); then
+        tb_die "$E_SAFE" "$(src_label) is $(tb_human "$SRC_BYTES" " ") and $(show_path "$DEST_DIR") has $(tb_human $((free * 1024)) " ") free. Free some space, or write to another disk with -o"
+    fi
+}
+
+# Memory in KB that one thread needs for the settings that need a lot, or 0.
+# The first argument is the number of threads, since threaded xz needs more.
+mem_per_thread_kb() {
+    local threads=$1
+    case $FAM in
+        xz|lzma)
+            local base=0 dict=0
+            case $LEVEL in
+                7) base=186 dict=16 ;;
+                8) base=370 dict=32 ;;
+                9|max) base=674 dict=64 ;;
+            esac
+            [[ $FAM == xz ]] && (( threads > 1 )) && base=$(( base + 3 * dict ))
+            echo $(( base * 1024 )) ;;
+        zst)
+            # zstd --ultra -22 needs about 1.3 GB a thread for a 128 MB window.
+            # A smaller input gets a smaller window, about ten times its size.
+            if [[ $LEVEL == max ]]; then
+                local kb=$(( ${SRC_BYTES:-0} * 10 / 1024 ))
+                (( kb < 16384 )) && kb=16384
+                (( kb > 1300 * 1024 )) && kb=$(( 1300 * 1024 ))
+                echo "$kb"
+            else
+                echo 0
+            fi ;;
+        *) echo 0 ;;
+    esac
+}
+
+# Check that the level and threads fit in free memory. Lowers THREADS when
+# they do not, and refuses when even one thread does not fit. Returns 1
+# when THREADS changed, so the caller rebuilds the command.
+check_memory() {
+    local per avail usable threads=$THREADS fit
+    [[ $FAM == lzma ]] && threads=1
+    per=$(mem_per_thread_kb "$threads")
+    (( per > 0 )) || return 0
+    avail=${TB_TEST_MEM_KB:-$(tb_mem_avail_kb)}
+    [[ -n $avail ]] || return 0
+    usable=$(( avail * 9 / 10 ))
+    (( per * threads <= usable )) && return 0
+    fit=$(( usable / per ))
+    if (( fit < 2 )); then
+        per=$(mem_per_thread_kb 1)
+        if (( per > usable )); then
+            tb_die "$E_SAFE" "$TOOL at this level needs about $(tb_human $((per * 1024)) " ") and $(tb_human $((avail * 1024)) " ") of memory is free. Use a lower -l"
+        fi
+        fit=1
+    fi
+    tb_warn "$threads threads need about $(tb_human $(( $(mem_per_thread_kb "$threads") * threads * 1024 )) " ") of memory and $(tb_human $((avail * 1024)) " ") is free, using $fit"
+    THREADS=$fit
+    return 1
+}
+
+# Ask for the password twice. It is never read from the command line.
+read_password() {
+    local a b
+    tb_is_tty || tb_die "$E_SAFE" "-p asks for the password in a terminal, and there is none"
+    printf 'Password: ' >&2
+    IFS= read -rs a || a=""
+    printf '\n' >&2
+    printf 'Again: ' >&2
+    IFS= read -rs b || b=""
+    printf '\n' >&2
+    [[ -n $a ]] || tb_die "$E_FAIL" "the password is empty, nothing was written"
+    [[ $a == "$b" ]] || tb_die "$E_FAIL" "the two passwords differ, nothing was written"
+    PASSWORD=$a
+}
+
+# ---------------------------------------------------------------- packing
+
+# The pieces of a stream pipeline, each run as one stage.
+stage_source() {
+    if (( SINGLE )) && [[ $FMT != tar* ]]; then cat -- "${SRC_ABS[0]}"; else "${TAR[@]}"; fi
+}
+stage_meter() { if (( USE_PV )); then pv -s "$SRC_BYTES"; else cat; fi; }
+stage_comp() { if (( ${#COMP[@]} )); then "${COMP[@]}"; else cat; fi; }
+stage_sink() {
+    if (( SPLIT_BYTES )); then
+        split -b "$SPLIT_BYTES" -a 3 --numeric-suffixes=1 - "$WORK/$OUT_BASE."
+    else
+        cat > "$WORK/$OUT_BASE"
+    fi
+}
+
+# The pipeline as one line for -v, with the final names.
+show_stream() {
+    local line
+    if (( SINGLE )) && [[ $FMT != tar* ]]; then
+        line="$(qargs "${COMP[@]}") < $(qargs "$(show_path "${SRC_ABS[0]}")")"
+    else
+        line=$(qargs "${TAR[@]}")
+        (( ${#COMP[@]} )) && line+=" | $(qargs "${COMP[@]}")"
+    fi
+    if (( SPLIT_BYTES )); then
+        line+=" | split -b $SPLIT_BYTES -a 3 --numeric-suffixes=1 - $(qargs "$(show_path "$OUT_PATH").")"
+    else
+        line+=" > $(qargs "$(show_path "$OUT_PATH")")"
+    fi
+    tb_show_text "$line"
+}
+
+pack_stream() {
+    local -a st
+    if [[ $FAM == tar ]]; then
+        COMP=()
+    else
+        COMP+=(${TB_PASS[@]+"${TB_PASS[@]}"})
+    fi
+    show_stream
+    stage_source | stage_meter | stage_comp | stage_sink
+    st=("${PIPESTATUS[@]}")
+    if (( st[0] == 1 )) && [[ $FMT == tar* ]]; then
+        tb_warn "a file changed while squash read it, the archive holds the version it saw"
+        st[0]=0
+    fi
+    local s
+    for s in "${st[@]}"; do
+        (( s == 0 )) || { tb_err "packing failed, see the message above. Nothing was written"; return 1; }
+    done
+}
+
+pack_zip() {
+    local -a cmd pats=() bases=()
+    local parent="" p pat rc lv=""
+    for p in "${SRC_ABS[@]}"; do
+        local d=${p%/*}
+        [[ -z $d ]] && d=/
+        if [[ -z $parent ]]; then parent=$d
+        elif [[ $d != "$parent" ]]; then
+            tb_die "$E_USAGE" "zip needs every path in one folder. Pack them as tar.zst, or move them together first"
+        fi
+        bases+=("${p##*/}")
+    done
+    case $LEVEL in max) lv=-9 ;; "") ;; *) lv=-$LEVEL ;; esac
+    if [[ -n $PASSWORD ]]; then
+        tb_need 7z
+        cmd=(7z a -tzip -mem=AES256 -bso0 -bsp0 "-mmt=$THREADS")
+        [[ -n $lv ]] && cmd+=("-mx=${lv#-}")
+        (( SPLIT_BYTES )) && cmd+=("-v${SPLIT_BYTES}b")
+        cmd+=(-p ${TB_PASS[@]+"${TB_PASS[@]}"} "$WORK/$OUT_BASE" "${SRC_ABS[@]}")
+        for pat in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do cmd+=("-xr!$pat"); done
+        local shown_pw
+        shown_pw=$(qargs "${cmd[@]}")
+        tb_show_text "${shown_pw//"$WORK/$OUT_BASE"/$(show_path "$OUT_PATH")}"
+        printf '%s\n' "$PASSWORD" | "${cmd[@]}"
+        rc=$?
+    else
+        tb_need zip
+        cmd=(zip -r -q -y)
+        [[ -n $lv ]] && cmd+=("$lv")
+        if (( SPLIT_BYTES )); then
+            local k=$(( SPLIT_BYTES / 1024 ))
+            (( k >= 64 )) || tb_usage_error "zip parts must be 64K or larger"
+            cmd+=(-s "${k}k")
+        fi
+        cmd+=(${TB_PASS[@]+"${TB_PASS[@]}"} "$WORK/$OUT_BASE" "${bases[@]}")
+        if (( ${#EXCLUDES[@]} )); then
+            cmd+=(-x)
+            for pat in "${EXCLUDES[@]}"; do
+                pat=${pat%/}
+                pats+=("$pat" "$pat/*" "*/$pat" "*/$pat/*")
+            done
+            cmd+=("${pats[@]}")
+        fi
+        local shown
+        shown=$(qargs "${cmd[@]}")
+        shown=${shown//"$WORK/$OUT_BASE"/$(show_path "$OUT_PATH")}
+        if [[ $parent == "$PWD" ]]; then tb_show_text "$shown"
+        else tb_show_text "(cd $(qargs "$parent") && $shown)"; fi
+        (cd -- "$parent" && "${cmd[@]}" </dev/null)
+        rc=$?
+    fi
+    (( rc == 0 )) || { tb_err "zip failed with code $rc. Nothing was written"; return 1; }
+}
+
+pack_7z() {
+    local -a cmd
+    local pat rc lv
+    tb_need 7z
+    cmd=(7z a -t7z -bso0 -bsp0 -snl "-mmt=$THREADS")
+    case $LEVEL in max) cmd+=(-mx=9) ;; "") ;; *) lv=$(map_level 7z "$LEVEL"); cmd+=("-mx=$lv") ;; esac
+    (( SPLIT_BYTES )) && cmd+=("-v${SPLIT_BYTES}b")
+    [[ -n $PASSWORD ]] && cmd+=(-mhe=on -p)
+    cmd+=(${TB_PASS[@]+"${TB_PASS[@]}"} "$WORK/$OUT_BASE" "${SRC_ABS[@]}")
+    for pat in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do cmd+=("-xr!${pat%/}"); done
+    local shown
+    shown=$(qargs "${cmd[@]}")
+    shown=${shown//"$WORK/$OUT_BASE"/$(show_path "$OUT_PATH")}
+    tb_show_text "$shown"
+    if [[ -n $PASSWORD ]]; then
+        printf '%s\n' "$PASSWORD" | "${cmd[@]}"
+    else
+        "${cmd[@]}" </dev/null
+    fi
+    rc=$?
+    (( rc == 0 )) || { tb_err "7z failed with code $rc. Nothing was written"; return 1; }
+}
+
+# The files squash wrote in the work folder, in order.
+collect_parts() {
+    local f
+    PARTS=()
+    shopt -s nullglob
+    if (( SPLIT_BYTES )); then
+        if [[ $FMT == zip && -z $PASSWORD ]]; then
+            for f in "$WORK/${OUT_BASE%.zip}".z[0-9][0-9]; do PARTS+=("$f"); done
+            PARTS+=("$WORK/$OUT_BASE")
+        else
+            for f in "$WORK/$OUT_BASE".[0-9][0-9][0-9]; do PARTS+=("$f"); done
+        fi
+    else
+        PARTS=("$WORK/$OUT_BASE")
+    fi
+    shopt -u nullglob
+    for f in "${PARTS[@]}"; do [[ -f $f ]] || return 1; done
+    (( ${#PARTS[@]} ))
+}
+
+# ---------------------------------------------------------------- test
+
+# "cat name" or "cat name.001 name.002" for -v, with the final names.
+show_read() {
+    local p out="cat"
+    for p in "${PARTS[@]}"; do
+        out+=" $(qargs "$(show_path "${DEST_DIR%/}/${p##*/}")")"
+    done
+    printf '%s' "$out"
+}
+
+# Test the archive in the work folder. Sets TEST_ENTRIES, TEST_FILES and
+# TEST_NOTE. Returns 1 when the archive is broken.
+test_archive() {
+    local counts=$WORK/.counts
+    local -a st
+    TEST_ENTRIES=0 TEST_FILES=0 TEST_NOTE=""
+    case $FMT in
+        zip|7z)
+            local -a seven
+            if [[ $FMT == zip && $SPLIT_BYTES -eq 0 && -z $PASSWORD ]] && tb_has unzip; then
+                tb_show_text "unzip -tqq $(qargs "$(show_path "$OUT_PATH")")"
+                unzip -tqq "${PARTS[0]}" >/dev/null 2>&1 || { tb_err "unzip -t found errors in the archive"; return 1; }
+                unzip -Z1 "${PARTS[0]}" 2>/dev/null | awk '{ n++ } !/\/$/ { f++ } END { print n + 0, f + 0 }' > "$counts"
+            else
+                if ! tb_has 7z; then
+                    tb_warn "no tool here can test a split or protected zip, install 7z. The source stays"
+                    TEST_SKIPPED=1
+                    return 0
+                fi
+                seven=(7z t -bso0 -bsp0 "${PARTS[0]}")
+                tb_show_text "$(qargs 7z t "$(show_path "$OUT_PATH")${PARTS[0]#"$WORK/$OUT_BASE"}")"
+                if [[ -n $PASSWORD ]]; then
+                    printf '%s\n' "$PASSWORD" | "${seven[@]}" >/dev/null 2>&1
+                else
+                    "${seven[@]}" </dev/null >/dev/null 2>&1
+                fi || { tb_err "7z t found errors in the archive"; return 1; }
+                { if [[ -n $PASSWORD ]]; then printf '%s\n' "$PASSWORD"; fi; } |
+                    7z l -slt "${PARTS[0]}" 2>/dev/null |
+                    awk '/^----------/ { s = 1; next }
+                         s && /^Path = / { n++ }
+                         s && /^Folder = \+/ { d++ }
+                         END { print n + 0, n - d }' > "$counts"
+            fi
+            read -r TEST_ENTRIES TEST_FILES < "$counts"
+            ;;
+        tar)
+            tb_show_text "$(show_read) | tar -tf -"
+            cat -- "${PARTS[@]}" | tar -tf - | awk '{ n++ } !/\/$/ { f++ } END { print n + 0, f + 0 }' > "$counts"
+            st=("${PIPESTATUS[@]}")
+            (( st[0] == 0 && st[1] == 0 )) || { tb_err "tar could not read the archive back"; return 1; }
+            read -r TEST_ENTRIES TEST_FILES < "$counts"
+            ;;
+        tar.*)
+            tb_show_text "$(show_read) | $(qargs "${DCOMP[@]}") | tar -tf -"
+            cat -- "${PARTS[@]}" | "${DCOMP[@]}" | tar -tf - | awk '{ n++ } !/\/$/ { f++ } END { print n + 0, f + 0 }' > "$counts"
+            st=("${PIPESTATUS[@]}")
+            (( st[1] == 0 )) || { tb_err "$TOOL found errors in the archive"; return 1; }
+            (( st[0] == 0 && st[2] == 0 )) || { tb_err "tar could not read the archive back"; return 1; }
+            read -r TEST_ENTRIES TEST_FILES < "$counts"
+            ;;
+        *)
+            local got
+            tb_show_text "$(show_read) | $(qargs "${DCOMP[@]}") | wc -c"
+            got=$(cat -- "${PARTS[@]}" | "${DCOMP[@]}" | wc -c)
+            st=("${PIPESTATUS[@]}")
+            (( st[1] == 0 )) || { tb_err "$TOOL found errors in the archive"; return 1; }
+            got=${got//[[:space:]]/}
+            if (( got != SRC_BYTES )); then
+                tb_err "the archive unpacks to $got bytes, the source has $SRC_BYTES"
+                return 1
+            fi
+            TEST_ENTRIES=1 TEST_FILES=1
+            TEST_NOTE="unpacks to the same $(tb_human "$SRC_BYTES" " ")"
+            return 0
+            ;;
+    esac
+    if (( ${#EXCLUDES[@]} == 0 )); then
+        if (( TEST_ENTRIES != SRC_ENTRIES )); then
+            tb_err "the archive lists $TEST_ENTRIES entries and the source has $SRC_ENTRIES"
+            return 1
+        fi
+        TEST_NOTE="$(tb_plural "$TEST_ENTRIES" entry entries), the same as the source"
+        tb_say "test: the archive lists $TEST_ENTRIES entries, the source has $SRC_ENTRIES"
+    else
+        TEST_NOTE="$(tb_plural "$TEST_ENTRIES" entry entries)"
+    fi
+}
+
+# ---------------------------------------------------------------- compare
+
+compare_formats() {
+    local tmp sample sbytes total fmt fam out t0 t1 size rc label
+    local -a rows=() skipped=()
+    tb_tmpdir tmp || tb_die "$E_FAIL" "cannot make a temp folder"
+    sample=$tmp/sample.tar
+    tb_need tar
+    SINGLE=0
+    FAM=zst
+    count_sources
+    total=$SRC_BYTES
+    build_tar
+    tb_show_text "$(qargs "${TAR[@]}") | head -c 8388608 > sample.tar"
+    "${TAR[@]}" 2>/dev/null | head -c 8388608 > "$sample"
+    sbytes=$(tb_bytes "$sample")
+    (( sbytes > 0 )) || tb_die "$E_FAIL" "nothing to compare, $(src_label) is empty"
+    label=$(src_label)
+    if (( sbytes >= 8388608 && total > sbytes )); then
+        tb_info "sample: $(tb_human "$sbytes") of $label ($(tb_human "$total")), every format at -l 6"
+    else
+        tb_info "sample: all of $label ($(tb_human "$total")), every format at -l 6"
+    fi
+    SRC_BYTES=$sbytes
+    for fmt in "${COMPARE_FORMATS[@]}"; do
+        fam=$(fam_of "$fmt")
+        out=$tmp/out
+        rm -f -- "$out" "$out.zip" "$out.7z"
+        case $fam in
+            zip)
+                tb_has zip || { skipped+=("zip, zip is not installed"); continue; }
+                tb_show_text "zip -q -j -6 out.zip sample.tar"
+                t0=$(tb_now_ms)
+                zip -q -j -6 "$out.zip" "$sample" </dev/null
+                rc=$?
+                t1=$(tb_now_ms)
+                size=$(tb_bytes "$out.zip") ;;
+            7z)
+                tb_has 7z || { skipped+=("7z, 7z is not installed"); continue; }
+                tb_show_text "7z a -mx=7 -mmt=$THREADS out.7z sample.tar"
+                t0=$(tb_now_ms)
+                7z a -t7z -bso0 -bsp0 -mx=7 "-mmt=$THREADS" "$out.7z" "$sample" </dev/null >/dev/null
+                rc=$?
+                t1=$(tb_now_ms)
+                size=$(tb_bytes "$out.7z") ;;
+            *)
+                local base
+                case $fam in
+                    gz) base=gzip ;; bz2) base=bzip2 ;; xz|lzma) base=xz ;; zst) base=zstd ;;
+                    lz4) base=lz4 ;; lz) base=lzip ;; lzo) base=lzop ;; br) base=brotli ;;
+                esac
+                if ! tb_has "$base"; then
+                    case $fam in
+                        gz) tb_has pigz && base=pigz ;; bz2) tb_has pbzip2 && base=pbzip2 ;;
+                        lz) tb_has plzip && base=plzip ;;
+                    esac
+                fi
+                tb_has "$base" || { skipped+=("$fmt, $base is not installed"); continue; }
+                pick_compressor "$fam" 6
+                tb_show_text "$(qargs "${COMP[@]}") < sample.tar > out"
+                t0=$(tb_now_ms)
+                "${COMP[@]}" < "$sample" > "$out"
+                rc=$?
+                t1=$(tb_now_ms)
+                size=$(tb_bytes "$out") ;;
+        esac
+        if (( rc != 0 || size == 0 )); then
+            skipped+=("$fmt, the tool failed with code $rc")
+            continue
+        fi
+        rows+=("$size $fmt $(( t1 - t0 ))")
+    done
+    (( ${#rows[@]} )) || tb_die "$E_TOOL" "no compressor is installed, squash needs at least zstd"
+    tb_color_stdout
+    printf '%-10s %7s %7s %7s\n' format size ratio time
+    printf '%s\n' "${rows[@]}" | sort -n | while read -r size fmt ms; do
+        printf '%-10s %7s %7s %7s\n' "$fmt" "$(tb_human "$size")" \
+            "$(awk -v a="$sbytes" -v b="$size" 'BEGIN { printf "%.1fx", a / b }')" "$(tb_elapsed "$ms")"
+    done
+    local s
+    for s in ${skipped[@]+"${skipped[@]}"}; do tb_info "skipped: $s"; done
+    if (( sbytes >= 8388608 && total > sbytes )); then
+        tb_info "the full $(tb_human "$total") takes about $(awk -v a="$total" -v b="$sbytes" 'BEGIN { printf "%.1f", a / b }')x these times"
+    fi
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+    (( ${#SRCS[@]} )) || tb_usage_error "name at least one file or folder to pack"
+    [[ -n $LEVEL && $LEVEL != max && ! $LEVEL =~ ^[1-9]$ ]] && tb_usage_error "-l takes a level from 1 to 9, or use --max"
+    (( TB_RM && TB_KEEP )) && tb_usage_error "--rm and -k contradict each other, pick one"
+    (( TB_RM && ${#EXCLUDES[@]} )) && tb_usage_error "--rm with -x would delete files that are not in the archive"
+    [[ $THREADS =~ ^[1-9][0-9]*$ ]] || tb_usage_error "-T takes a number of threads, such as 4"
+    if [[ -n $SPLIT ]]; then
+        SPLIT_BYTES=$(tb_parse_size "$SPLIT") && (( SPLIT_BYTES > 0 )) || tb_usage_error "-s takes a size such as 25M, 700M or 4G"
+    fi
+    read_sources
+    if (( COMPARE )); then
+        compare_formats
+        return
+    fi
+    resolve_format
+    if (( WANT_PW )) && [[ $FMT != zip && $FMT != 7z ]]; then
+        tb_usage_error "-p works with zip and 7z only. For a $FMT, run lock on the archive afterwards"
+    fi
+    if [[ $FAM == tar && -n $LEVEL ]]; then
+        tb_warn "tar does not compress, -l and --max change nothing"
+        LEVEL=""
+    fi
+    if (( SINGLE && ${#EXCLUDES[@]} )) && [[ $FMT != tar* && $FMT != zip && $FMT != 7z ]]; then
+        tb_warn "-x has nothing to leave out of a single file"
+        EXCLUDES=()
+    fi
+    count_sources
+    resolve_output
+    tb_say "$(src_label): $(tb_plural "$SRC_FILES" file), $(tb_human "$SRC_BYTES")"
+    tb_say "format: $FMT, $FMT_FROM"
+
+    case $FAM in
+        zip) if (( WANT_PW )); then tb_need 7z; else tb_need zip; fi ;;
+        7z)  tb_need 7z ;;
+        tar) ;;
+        *)   pick_compressor "$FAM" "$LEVEL"
+             check_memory || pick_compressor "$FAM" "$LEVEL"
+             tb_say "level: $LVL_NOTE"
+             tb_say "threads: $THR_NOTE" ;;
+    esac
+    [[ $FMT == tar* ]] && tb_need tar
+    (( SPLIT_BYTES )) && [[ $FMT != zip && $FMT != 7z ]] && tb_need split
+    check_disk
+
+    (( WANT_PW )) && read_password
+    tb_tmpdir WORK "$DEST_DIR" || tb_die "$E_FAIL" "cannot write in $(show_path "$DEST_DIR")"
+
+    USE_PV=0
+    if tb_progress && tb_has pv; then USE_PV=1; fi
+    local index="" t0 t1
+    [[ ${#EXCLUDES[@]} -gt 0 && $FMT == tar* ]] && index=$WORK/.index
+    t0=$(tb_now_ms)
+    case $FMT in
+        zip) pack_zip || exit "$E_FAIL" ;;
+        7z)  pack_7z || exit "$E_FAIL" ;;
+        *)   build_tar "$index"; pack_stream || exit "$E_FAIL" ;;
+    esac
+    t1=$(tb_now_ms)
+    collect_parts || tb_die "$E_FAIL" "the tool reported success but wrote no archive"
+
+    # The test runs when asked, and always before the source can go.
+    TEST_SKIPPED=0
+    local will_offer=0 tested=0
+    (( ${#EXCLUDES[@]} )) && TB_KEEP=1
+    if (( ! TB_KEEP )) && { (( TB_RM )) || tb_is_tty; }; then will_offer=1; fi
+    if (( TEST || will_offer )) || [[ ${#EXCLUDES[@]} -gt 0 && -z $index ]]; then
+        tb_say "test: reading the archive back"
+        test_archive || { tb_err "the test failed. The archive was not kept and the source stays"; exit "$E_FAIL"; }
+        (( TEST_SKIPPED )) || tested=1
+    fi
+
+    # Move the parts into place, never over an existing file.
+    local p final
+    local -a finals=()
+    for p in "${PARTS[@]}"; do
+        final=${DEST_DIR%/}/${p##*/}
+        [[ $DEST_DIR == / ]] && final=/${p##*/}
+        if [[ -e $final ]]; then
+            tb_die "$E_SAFE" "$(show_path "$final") appeared while squash worked, nothing was replaced"
+        fi
+        mv -- "$p" "$final" || tb_die "$E_FAIL" "could not move the archive into $(show_path "$DEST_DIR")"
+        finals+=("$final")
+    done
+
+    # The summary line.
+    local out_bytes files shown
+    out_bytes=$(tb_bytes "${finals[@]}")
+    files=$SRC_FILES
+    if (( ${#EXCLUDES[@]} )); then
+        if [[ -n $index ]]; then
+            files=$(awk '!/\/$/ { f++ } END { print f + 0 }' "$index")
+        elif (( tested )); then
+            files=$TEST_FILES
+        fi
+    fi
+    shown=$(show_path "${finals[0]}")
+    if (( ${#finals[@]} > 1 )); then
+        local last=${finals[-1]##*/} first=${finals[0]##*/} common
+        common=${OUT_BASE%.zip}
+        shown+=" to .${last#"$common".}"
+        [[ $first == "$last" ]] && shown=$(show_path "${finals[0]}")
+    fi
+    tb_color_stdout
+    printf '%s -> %s (%s to %s, %s, %s)\n' "$(src_label)" "$shown" "$(tb_human "$SRC_BYTES")" \
+        "$(tb_human "$out_bytes")" "$(tb_plural "$files" file)" "$(tb_elapsed $(( t1 - t0 )))"
+    if (( TEST )); then
+        if (( tested )); then
+            printf 'test passed: %s, %s\n' "$(show_path "${finals[0]}")" "$TEST_NOTE"
+        else
+            printf 'test skipped: %s\n' "$(show_path "${finals[0]}")"
+        fi
+    fi
+
+    if (( ${#EXCLUDES[@]} )); then
+        (( TB_KEEP_ASKED )) || tb_info "$(src_label) stays, -x left files out of the archive."
+        return 0
+    fi
+    (( tested )) || return 0
+    local n=${#SRCS[@]} q done_msg
+    if (( n == 1 )); then
+        if (( SINGLE )) || [[ ! -d ${SRC_ABS[0]} ]]; then
+            q="Delete the source, $(src_label) ($(tb_human "$SRC_BYTES" " "))? It goes to the trash."
+        else
+            q="Delete the source, $(src_label) ($(tb_plural "$SRC_FILES" file), $(tb_human "$SRC_BYTES" " "))? It goes to the trash."
+        fi
+        done_msg="$(src_label) is in the trash."
+    else
+        q="Delete the $n sources, $(src_label) ($(tb_plural "$SRC_FILES" file), $(tb_human "$SRC_BYTES" " "))? They go to the trash."
+        done_msg="The $n sources are in the trash."
+    fi
+    tb_offer_delete "$q" "$done_msg" "${SRC_ABS[@]}" || true
+    return 0
+}
+
+FORMAT="" LEVEL="" THREADS="" SPLIT="" SPLIT_BYTES=0 OUT="" TEST=0 COMPARE=0 WANT_PW=0
+PASSWORD="" TB_RM=0 TB_KEEP=0 TB_KEEP_ASKED=0
+EXCLUDES=() SRCS=()
+tb_expand "flTsxo" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -f|--format)   tb_optarg "$@"; FORMAT=$2; shift ;;
+        -l|--level)    tb_optarg "$@"; [[ $LEVEL == max ]] && tb_usage_error "-l and --max contradict each other, pick one"; LEVEL=$2; shift ;;
+        --max)         [[ -n $LEVEL && $LEVEL != max ]] && tb_usage_error "-l and --max contradict each other, pick one"; LEVEL=max ;;
+        -T|--threads)  tb_optarg "$@"; THREADS=$2; shift ;;
+        -s|--split)    tb_optarg "$@"; SPLIT=$2; shift ;;
+        -p|--password) WANT_PW=1 ;;
+        -x|--exclude)  tb_optarg "$@"; EXCLUDES+=("$2"); shift ;;
+        -o|--out)      tb_optarg "$@"; OUT=$2; shift ;;
+        -t|--test)     TEST=1 ;;
+        --rm)          TB_RM=1 ;;
+        -k|--keep)     TB_KEEP=1; TB_KEEP_ASKED=1 ;;
+        --compare)     COMPARE=1 ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)             SRCS+=("$1") ;;
+    esac
+    shift
+done
+if [[ -z $THREADS ]]; then
+    THREADS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+fi
+main
