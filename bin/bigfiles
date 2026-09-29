@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# bigfiles: list the biggest files or folders under a path.
+set -uo pipefail
+TB_CMD=bigfiles
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: bigfiles [options] [path ...] [-- find tests]
+
+List the biggest files or folders under a path.
+
+Options:
+  -n, --count N       show N entries, 20 by default
+  -d, --dirs          list the folders one level down by total size
+  -m, --min SIZE      only entries of SIZE or more, such as 500M
+  -x, --exclude PAT   leave out names that match, can repeat
+  -a, --all-fs        cross into other filesystems too
+  -q, --quiet         only the list
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to find as extra tests, such as -mtime -30.
+  They work for files, not with -d.
+
+Examples:
+  bigfiles ~
+  bigfiles -n 5 -d /var
+  bigfiles -m 1G /
+  bigfiles ~/Downloads -- -mtime +90
+
+Needs: find, stat, du and sort. ncdu is optional, for browsing.
+See man bigfiles.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused.
+EOF
+}
+
+# The prune part of a find command: /proc, /sys and every -x pattern.
+prune_args() {
+    local pat
+    PRUNE=( \( -path /proc -o -path /sys )
+    for pat in ${excludes[@]+"${excludes[@]}"}; do
+        if [[ $pat == */* ]]; then PRUNE+=(-o -path "$pat"); else PRUNE+=(-o -name "$pat"); fi
+    done
+    PRUNE+=( \) -prune -o )
+}
+
+# find actions that could change files have no place in a listing.
+check_pass() {
+    local a
+    for a in ${TB_PASS[@]+"${TB_PASS[@]}"}; do
+        case $a in
+            -delete|-exec|-execdir|-ok|-okdir|-fprint|-fprint0|-fprintf|-fls)
+                tb_die "$E_SAFE" "refused, $a after -- would act on files, and bigfiles only lists them" ;;
+        esac
+    done
+}
+
+# Print "size mtime path" for the biggest files, biggest first.
+list_files() {
+    local args=(-P "${paths[@]}")
+    (( all_fs )) || args+=(-xdev)
+    prune_args
+    args+=("${PRUNE[@]}" -type f)
+    (( min > 1 )) && args+=(-size +$(( min - 1 ))c)
+    args+=(${TB_PASS[@]+"${TB_PASS[@]}"} -exec stat -c '%s %Y %n' -- {} +)
+    tb_show find "${args[@]}"
+    find "${args[@]}" 2>>"$errf" | sort -k1,1nr | head -n "$count"
+}
+
+# Print "size mtime path" for the folders one level under each path.
+list_dirs() {
+    local p args dev line d mt kids=() kdev
+    declare -A mtime=()
+    for p in "${paths[@]}"; do
+        [[ -d $p ]] || { tb_warn "$p is not a folder, skipping it"; continue; }
+        dev=$(stat -c %d -- "$p" 2>/dev/null)
+        prune_args
+        args=(-P "$p" -mindepth 1 -maxdepth 1 "${PRUNE[@]}" -type d -exec stat -c '%d %Y %n' -- {} +)
+        tb_show find "${args[@]}"
+        while read -r kdev mt d; do
+            # A mount point below the path is another filesystem.
+            if (( ! all_fs )) && [[ $kdev != "$dev" ]]; then
+                tb_say "skipping $d, another filesystem"
+                continue
+            fi
+            kids+=("$d")
+            mtime[$d]=$mt
+        done < <(find "${args[@]}" 2>>"$errf")
+    done
+    (( ${#kids[@]} )) || return 0
+    local du_args=(-s -k)
+    (( all_fs )) || du_args+=(-x)
+    tb_show du "${du_args[@]}" -- "${kids[@]}"
+    while IFS=$'\t' read -r line d; do
+        (( line * 1024 >= min )) || continue
+        printf '%s %s %s\n' "$(( line * 1024 ))" "${mtime[$d]:-0}" "$d"
+    done < <(du "${du_args[@]}" -- "${kids[@]}" 2>>"$errf") | sort -k1,1nr | head -n "$count"
+}
+
+main() {
+    local now size mt path shown=0 total=0 what p
+    (( ${#paths[@]} )) || paths=(.)
+    for p in "${paths[@]}"; do
+        [[ -e $p ]] || tb_die 1 "$p: no such file or folder"
+    done
+    check_pass
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    errf=$work/errors
+    : > "$errf"
+    now=$(date +%s)
+    if (( dirs )); then
+        (( ${#TB_PASS[@]} )) && tb_usage_error "options after -- work for files, not with -d"
+        tb_need find stat du sort
+        what=folder
+    else
+        tb_need find stat sort
+        what=file
+    fi
+    while read -r size mt path; do
+        printf '%7s  %5s  %s\n' "$(tb_human "$size")" "$(tb_age $(( now - mt )))" "$path"
+        ((shown++))
+        total=$(( total + size ))
+    done < <(if (( dirs )); then list_dirs; else list_files; fi)
+    if [[ -s $errf ]]; then
+        tb_info "bigfiles: could not read $(tb_plural "$(wc -l <"$errf")" path), run it with sudo to include them"
+    fi
+    if (( shown == 0 )); then
+        if (( min > 1 )); then
+            echo "No ${what}s of $(tb_human "$min") or more."
+        else
+            echo "No ${what}s."
+        fi
+        return 0
+    fi
+    echo "$(tb_plural "$shown" "$what"), $(tb_human "$total") together"
+    if tb_has ncdu && tb_is_tty && (( ! TB_QUIET )); then
+        local x=" -x"
+        (( all_fs )) && x=""
+        tb_info "To browse the tree, run: ncdu$x ${paths[0]}"
+    fi
+}
+
+paths=()
+excludes=()
+count=20
+min=1
+dirs=0
+all_fs=0
+tb_expand "nmx" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--count)   tb_optarg "$@"; count=$2; shift
+                      [[ $count =~ ^[0-9]+$ ]] && (( count >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                      ;;
+        -d|--dirs)    dirs=1 ;;
+        -m|--min)     tb_optarg "$@"; min=$(tb_parse_size "$2") || tb_usage_error "--min needs a size such as 100K or 1G, not $2"
+                      (( min < 1 )) && min=1
+                      shift ;;
+        -x|--exclude) tb_optarg "$@"; excludes+=("$2"); shift ;;
+        -a|--all-fs)  all_fs=1 ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            paths+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

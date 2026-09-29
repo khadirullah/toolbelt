@@ -64,12 +64,14 @@ chmod          coreutils            coreutils            coreutils            co
 cmp            diffutils            diffutils            diffutils            diffutils            diffutils
 cp             coreutils            coreutils            coreutils            coreutils            coreutils
 diff           diffutils            diffutils            diffutils            diffutils            diffutils
+du             coreutils            coreutils            coreutils            coreutils            coreutils
 fdupes         fdupes               fdupes               fdupes               fdupes               fdupes
 find           findutils            findutils            findutils            findutils            findutils
 head           coreutils            coreutils            coreutils            coreutils            coreutils
 jdupes         jdupes               jdupes               jdupes               jdupes               jdupes
 md5sum         coreutils            coreutils            coreutils            coreutils            coreutils
 mv             coreutils            coreutils            coreutils            coreutils            coreutils
+ncdu           ncdu                 ncdu                 ncdu                 ncdu                 ncdu
 rdfind         rdfind               rdfind               rdfind               rdfind               rdfind
 sed            sed                  sed                  sed                  sed                  sed
 sha1sum        coreutils            coreutils            coreutils            coreutils            coreutils

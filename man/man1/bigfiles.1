@@ -1,0 +1,213 @@
+.TH "BIGFILES" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+bigfiles \- list the biggest files or folders under a path
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+bigfiles [options] [path ...] [-- find tests]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+When a disk fills up, the first question is what is taking the space. \fBbigfiles\fR answers it. It lists the 20 biggest files under a path, biggest first, with the size, the age and the path. With no path it looks in the current folder.
+.PP
+.RS 4
+.nf
+   90KB    40d  ./VMs/debian-13.qcow2
+   60KB   120d  ./Downloads/iso/debian-13.1.0-amd64-DVD-1.iso
+   60KB     3d  ./Downloads/ubuntu-24.04.3-desktop-amd64.iso
+3 files, 210KB together
+.fi
+.RE
+.PP
+The age is the time since the file last changed, in seconds, minutes, hours, days or years (\fBs\fR, \fBm\fR, \fBh\fR, \fBd\fR, \fBy\fR). A 40 GB VM image last changed a year ago is a better thing to clean up than one you used this morning.
+.PP
+With \fB\-d\fR, it lists the folders one level down instead, by the total size of everything in them. Run it on \fB/var\fR, find the biggest folder, then run it again on that folder.
+.PP
+\fBbigfiles\fR only reads. It never deletes, moves or changes a file.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-count N\fR
+Show N entries. The default is 20.
+.TP
+\fB\-d\fR, \fB\-\-dirs\fR
+List the folders one level down by total size, instead of files.
+.TP
+\fB\-m\fR, \fB\-\-min SIZE\fR
+Show only entries of SIZE or more, such as \fB500M\fR or \fB1.5G\fR. Units are powers of 1024.
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave out names that match. A folder that matches is skipped whole. Can repeat.
+.TP
+\fB\-a\fR, \fB\-\-all\-fs\fR
+Cross into other filesystems too, such as a USB drive mounted under the path.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the list.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step, and each \fBfind\fR and \fBdu\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+A pattern without a \fB/\fR matches a name, the way \fBfind \-name\fR does, so \fB\-x .git\fR skips every \fB.git\fR folder. A pattern with a \fB/\fR matches the path, the way \fBfind \-path\fR does. Quote patterns with \fB*\fR so the shell does not expand them.
+.SH HOW IT MEASURES
+.PP
+For files, the size is the size of the content, from \fBstat\fR. That is the number \fBls \-l\fR shows.
+.PP
+For folders, \fB\-d\fR asks \fBdu \-s\fR for the space the folder takes on disk. The two can differ. A sparse VM image of 40 GB may take only 8 GB on disk, and a folder of many tiny files takes more than their sizes add up to, because each file uses at least one 4 KB block. Both numbers are right. They answer different questions.
+.PP
+For a folder, the age is the time since a name in it was added, removed or renamed. It does not change when a file inside is edited.
+.SH ONE FILESYSTEM AT A TIME
+.PP
+By default \fBbigfiles\fR stays on the filesystem the path is on. \fBbigfiles /\fR looks at your root filesystem and skips \fB/home\fR when that is a separate partition, along with USB drives, network shares and \fB/boot/efi\fR. Run it again on \fB/home\fR to see that one. \fB\-a\fR crosses into all of them.
+.PP
+\fB/proc\fR and \fB/sys\fR are always skipped, even with \fB\-a\fR. They hold no real files, and the sizes they report are meaningless, such as the 128 TB that \fB/proc/kcore\fR claims.
+.SH SAFETY CHECKS
+.IP \(bu 2
+\fBbigfiles\fR never changes anything.
+.IP \(bu 2
+It never follows symlinks, so a link to another disk cannot count that disk twice.
+.IP \(bu 2
+Options after \fB\-\-\fR go to \fBfind\fR as extra tests. The ones that act on files, \fB\-delete\fR, \fB\-exec\fR, \fB\-execdir\fR, \fB\-ok\fR, \fB\-okdir\fR, \fB\-fprint\fR, \fB\-fprint0\fR, \fB\-fprintf\fR and \fB\-fls\fR, are refused with exit 4.
+.IP \(bu 2
+Folders you cannot read are skipped. At the end, \fBbigfiles\fR says how many it could not read, so a short list is never a silent one.
+.SH DISTRO NOTES
+.PP
+On Debian and Ubuntu, \fB/var/cache/apt/archives\fR often holds a few GB of old packages. \fBsudo apt clean\fR empties it. On Fedora, \fBsudo dnf clean all\fR does the same for \fB/var/cache/dnf\fR, and on Arch, \fBpaccache \-r\fR trims \fB/var/cache/pacman/pkg\fR.
+.PP
+On every systemd distro, the journal in \fB/var/log/journal\fR can grow to several GB. \fBjournalctl \-\-disk\-usage\fR shows its size, and \fBsudo journalctl \-\-vacuum\-size=200M\fR trims it.
+.PP
+On a machine with Docker, most of the space sits in \fB/var/lib/docker\fR, which \fBbigfiles\fR shows as one large folder. \fBdocker system df\fR explains it better, and \fBdocker system prune\fR frees it.
+.SH PASS\-THROUGH
+.PP
+For files, options after \fB\-\-\fR go to \fBfind\fR as extra tests. This finds big files that have not changed in 90 days:
+.PP
+.RS 4
+.nf
+$ bigfiles ~/Downloads -- -mtime +90
+.fi
+.RE
+.PP
+Other useful tests are \fB\-name '*.iso'\fR, \fB\-user www\-data\fR and \fB\-newer file\fR. They do not work with \fB\-d\fR.
+.SH NEEDS
+.PP
+\fBfind\fR, \fBstat\fR and \fBsort\fR, plus \fBdu\fR for \fB\-d\fR. Every distro ships them in findutils and coreutils, and BusyBox has all four.
+.PP
+\fBncdu\fR is optional. When it is installed, \fBbigfiles\fR ends with a line that suggests it:
+.PP
+.RS 4
+.nf
+To browse the tree, run: ncdu -x .
+.fi
+.RE
+.PP
+\fBncdu\fR lets you walk the tree with the arrow keys and delete from inside it. The package is \fBncdu\fR on Debian, Ubuntu, Fedora, Arch and Alpine. On RHEL, Rocky and Alma it is in EPEL.
+.SH EXAMPLES
+.SS The biggest files here
+.PP
+.RS 4
+.nf
+$ bigfiles -n 3
+   90KB    40d  ./VMs/debian-13.qcow2
+   60KB   120d  ./Downloads/iso/debian-13.1.0-amd64-DVD-1.iso
+   60KB     3d  ./Downloads/ubuntu-24.04.3-desktop-amd64.iso
+3 files, 210KB together
+.fi
+.RE
+.SS Which folder is biggest
+.PP
+.RS 4
+.nf
+$ bigfiles -d
+  120KB     6m  ./Downloads
+   92KB     6m  ./VMs
+   32KB     6m  ./Videos
+   12KB     6m  ./.cache
+4 folders, 256KB together
+.fi
+.RE
+.SS Leave some names out
+.PP
+.RS 4
+.nf
+$ bigfiles -x '*.iso'
+   90KB    40d  ./VMs/debian-13.qcow2
+   30KB     5h  ./Videos/talk-raw.mp4
+   12KB     6m  ./.cache/pip/wheel.whl
+     2B     6m  ./notes.txt
+4 files, 132KB together
+.fi
+.RE
+.SS Only old files
+.PP
+.RS 4
+.nf
+$ bigfiles -- -mtime +30
+   90KB    40d  ./VMs/debian-13.qcow2
+   60KB   120d  ./Downloads/iso/debian-13.1.0-amd64-DVD-1.iso
+2 files, 150KB together
+.fi
+.RE
+.SS See the command it runs
+.PP
+.RS 4
+.nf
+$ bigfiles -v -n 2 Downloads
++ find -P Downloads -xdev '(' -path /proc -o -path /sys ')' -prune -o -type f -exec stat -c '%s %Y %n' -- '{}' +
+   60KB   120d  Downloads/iso/debian-13.1.0-amd64-DVD-1.iso
+   60KB     3d  Downloads/ubuntu-24.04.3-desktop-amd64.iso
+2 files, 120KB together
+.fi
+.RE
+.SS Folders it could not read
+.PP
+.RS 4
+.nf
+$ bigfiles -n 2
+   90KB    40d  ./VMs/debian-13.qcow2
+   60KB   120d  ./Downloads/iso/debian-13.1.0-amd64-DVD-1.iso
+bigfiles: could not read 1 path, run it with sudo to include them
+2 files, 150KB together
+.fi
+.RE
+.SS Nothing that big
+.PP
+.RS 4
+.nf
+$ bigfiles -m 1G ~/projects
+No files of 1GB or more.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBbigfiles: could not read 3 paths, run it with sudo to include them\fR : Some folders belong to root or another user. For system folders such as \fB/var\fR, run \fBsudo bigfiles \-d /var\fR.
+.PP
+\fBbigfiles: refused, \-delete after \-\- would act on files, and bigfiles only lists them\fR : \fBbigfiles\fR only lists. Delete what you choose with \fBrm\fR, or move it to the trash with \fBgio trash\fR.
+.PP
+\fBbigfiles: options after \-\- work for files, not with \-d\fR : \fBdu\fR measures whole folders, so \fBfind\fR tests have nothing to filter. Drop \fB\-d\fR, or drop the options after \fB\-\-\fR.
+.PP
+\fBdf\fR says the disk is full, but \fBbigfiles /\fR finds little : The space may be on another filesystem, so run it on \fB/home\fR or \fB/var\fR too. It may also be held by a deleted file that a program still has open, such as a log file. \fBsudo lsof +L1\fR lists those. Restarting the program frees the space.
+.PP
+It is slow on \fB/\fR : The first run reads every folder on the disk. Start with \fBbigfiles \-d /\fR, then look inside the biggest folder.
+.SH EXIT STATUS
+.TP
+0
+It worked, including when nothing was big enough to list.
+.TP
+1
+It failed, for example a path does not exist.
+.TP
+2
+Bad usage, such as \fB\-n 0\fR or a size it cannot read.
+.TP
+3
+\fBfind\fR, \fBstat\fR, \fBdu\fR or \fBsort\fR is missing.
+.TP
+4
+Refused. An action such as \fB\-delete\fR after \fB\-\-\fR.
+.SH SEE ALSO
+.PP
+\fBdupes\fR, \fBdu(1)\fR, \fBdf(1)\fR, \fBncdu(1)\fR
