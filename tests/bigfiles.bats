@@ -61,7 +61,10 @@ setup() {
     [ "$status" -eq 0 ]
     [[ ${lines[0]} == *"  ./vms" ]]
     [[ ${lines[2]} == *"  ./my docs" ]]
-    [ "${lines[3]}" = "3 folders, 68KB together" ]
+    # du counts each folder's own blocks too, and those differ by filesystem.
+    local kb
+    kb=$(du -sk vms dl 'my docs' | awk '{ s += $1 } END { print s }')
+    [ "${lines[3]}" = "3 folders, ${kb}KB together" ]
 }
 
 @test "-x leaves names out" {

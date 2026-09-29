@@ -106,6 +106,9 @@ esac'
 }
 
 @test "--clean --yes cleans every item with its own tool" {
+    # du counts the folder's own blocks too, and those differ by filesystem.
+    local kb
+    kb=$(du -sk "$TB_ROOTFS/lib/modules/6.1.0-10" "$TB_ROOTFS/boot/vmlinuz-6.1.0-10" | awk '{ s += $1 } END { print s }')
     run cleanup --clean --yes
     [ "$status" -eq 0 ]
     grep -qx "journalctl --vacuum-size=200M" "$CALLS"
@@ -119,7 +122,7 @@ esac'
     [ -z "$(ls -A "$HOME/.cache/thumbnails")" ]
     [ -d "$HOME/.cache/thumbnails" ]
     [ "${lines[0]}" = "journal     freed 1.3GB" ]
-    [ "${lines[4]}" = "kernels     freed 8KB" ]
+    [ "${lines[4]}" = "kernels     freed ${kb}KB" ]
     [ -d "$TB_ROOTFS/lib/modules/6.1.0-12" ]
     [ -d "$TB_ROOTFS/lib/modules/6.1.0-13" ]
     [[ ${lines[-1]} == "cleanup: freed "*". / now has "*" free." ]]
