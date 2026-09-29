@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# kclean: delete evicted, completed and crashing pods.
+set -uo pipefail
+TB_CMD=kclean
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: kclean [-n NAMESPACE | -A] [--only KIND] [--system] [-y]
+              [-- kubectl delete options]
+
+Delete evicted, completed and crashing pods.
+
+Options:
+  -n, --namespace NS  one namespace, the context's own by default
+  -A, --all-namespaces
+                      every namespace except kube-system
+  --only KIND         evicted, completed or crashloop, repeat for more
+  --system            include kube-system
+  -y, --yes           delete without asking
+  -q, --quiet         only the result line
+  -v, --verbose       every pod name, and each kubectl command
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to kubectl delete pod, such as --grace-period 0
+  or --dry-run=client.
+
+Examples:
+  kclean
+  kclean -n shop --only completed
+  kclean -A --only evicted
+  kclean -n shop -- --dry-run=client
+
+Needs: kubectl and jq. See man kclean.
+Exit: 0 nothing to clean or deleted, 1 failed, 2 bad usage,
+      3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# One line per pod to clean: kind, namespace, name, restarts, owner.
+read -r -d '' PODS_JQ <<'JQ'
+def owner:
+    (.metadata.labels["pod-template-hash"] // "") as $hash |
+    ((.metadata.ownerReferences // []) | (map(select(.controller == true)) + .) | first) as $o |
+    if $o == null then ""
+    elif $o.kind == "ReplicaSet" and $hash != "" and ($o.name | endswith("-" + $hash)) then
+        "deploy/" + ($o.name | .[:length - ($hash | length) - 1])
+    elif $o.kind == "ReplicaSet" then "rs/" + $o.name
+    elif $o.kind == "StatefulSet" then "sts/" + $o.name
+    elif $o.kind == "DaemonSet" then "ds/" + $o.name
+    elif $o.kind == "Job" then "job/" + $o.name
+    else ($o.kind | ascii_downcase) + "/" + $o.name end;
+.items[] | select(.metadata.deletionTimestamp == null) |
+(if .status.phase == "Failed" and .status.reason == "Evicted" then "evicted"
+ elif .status.phase == "Succeeded" then "completed"
+ elif [(.status.containerStatuses // [])[], (.status.initContainerStatuses // [])[]
+       | .state.waiting.reason] | any(. == "CrashLoopBackOff") then "crashloop"
+ else empty end) as $k |
+[$k, .metadata.namespace, .metadata.name,
+ ([.status.containerStatuses[]? | .restartCount // 0] | add // 0), owner]
+| map(tostring) | join("\t")
+JQ
+
+# Names on lines that wrap at 72 columns, the first after the label.
+print_names() {
+    local label=$1 line=$1 n
+    shift
+    for n in "$@"; do
+        if (( ${#line} > ${#label} && ${#line} + 1 + ${#n} > 72 )); then
+            echo "$line"
+            line=$(printf '%*s' "${#label}" "")
+        fi
+        [[ $line == *[![:space:]] ]] && line+=" "
+        line+=$n
+    done
+    echo "$line"
+}
+
+show_list() {
+    local kind count names=() k ns name restarts owner label who
+    for kind in evicted completed crashloop; do
+        count=$(awk -F '\t' -v k="$kind" '$1 == k' "$TMP/rows" | grep -c .)
+        (( count )) || continue
+        label=$(printf '%-10s %-3s' "$kind" "$count")
+        if [[ $kind == crashloop ]]; then
+            local first=1
+            while IFS=$'\t' read -r k ns name restarts owner; do
+                [[ $k == crashloop ]] || continue
+                who=$name
+                (( all )) && who=$ns/$name
+                if [[ -n $owner ]]; then owner="owned by $owner"; else owner="no owner, it will not come back"; fi
+                if (( first )); then
+                    echo "$label$who, restarts $restarts, $owner"
+                    first=0
+                else
+                    printf '%*s%s\n' "${#label}" "" "$who, restarts $restarts, $owner"
+                fi
+            done < "$TMP/rows"
+            continue
+        fi
+        names=()
+        while IFS=$'\t' read -r k ns name _; do
+            [[ $k == "$kind" ]] || continue
+            if (( all )); then names+=("$ns/$name"); else names+=("$name"); fi
+        done < "$TMP/rows"
+        if (( ${#names[@]} > 3 && ! TB_VERBOSE )); then
+            print_names "$label" "${names[0]}" "${names[1]}" "and $(( ${#names[@]} - 2 )) more"
+        else
+            print_names "$label" "${names[@]}"
+        fi
+    done
+}
+
+main() {
+    local where get total nsn dry=0 a
+    tb_need kubectl jq
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    [[ -n $ns ]] || ns=$KNS
+    if (( ! all )) && [[ $ns == kube-system ]] && (( ! system )); then
+        tb_die "$E_SAFE" "kube-system holds the cluster's own pods. Add --system to clean it"
+    fi
+    if (( all )); then
+        get=(get pods -A -o json)
+        where="all namespaces"
+        (( system )) || where+=", kube-system skipped"
+    else
+        get=(get pods -n "$ns" -o json)
+        where="namespace $ns"
+    fi
+    # The pass-through options belong to kubectl delete, so the list call
+    # gets only --context and --kubeconfig.
+    local saved=("${TB_PASS[@]}")
+    TB_PASS=(${KCFG[@]+"${KCFG[@]}"})
+    kube_to "$TMP/pods" "${get[@]}" || kube_fail
+    TB_PASS=(${saved[@]+"${saved[@]}"})
+    jq -r "$PODS_JQ" "$TMP/pods" > "$TMP/all" || tb_die 1 "kubectl gave output jq cannot read"
+    awk -F '\t' -v only="$only" -v sys="$system" -v all="$all" '
+        (only == "" || index(" " only " ", " " $1 " ")) && (sys || !all || $2 != "kube-system")' \
+        "$TMP/all" > "$TMP/rows"
+    total=$(grep -c . "$TMP/rows")
+    (( TB_QUIET )) || echo "context ${KCTX:-none}, $where"
+    if (( total == 0 )); then
+        if (( all )); then echo "nothing to clean"; else echo "nothing to clean in $ns"; fi
+        return 0
+    fi
+    (( TB_QUIET )) || show_list
+    nsn=$(cut -f2 "$TMP/rows" | sort -u | grep -c .)
+    local in="in $ns"
+    (( all )) && in="in $(tb_plural "$nsn" namespace)"
+    for a in ${TB_PASS[@]+"${TB_PASS[@]}"}; do
+        [[ $a == --dry-run* && $a != --dry-run=none ]] && dry=1
+    done
+    (( dry )) || tb_confirm "Delete $(tb_plural "$total" pod) $in? They cannot be restored."
+
+    local n failed=0 names=()
+    while IFS= read -r n; do
+        names=()
+        mapfile -t names < <(awk -F '\t' -v n="$n" '$2 == n { print $3 }' "$TMP/rows")
+        if kube_to "$TMP/out" delete pod -n "$n" --ignore-not-found "${names[@]}"; then
+            (( TB_VERBOSE )) && cat "$TMP/out" >&2
+        else
+            tb_err "kubectl delete failed in $n: $(grep -m1 . "$TMP/kerr")"
+            failed=1
+        fi
+    done < <(cut -f2 "$TMP/rows" | sort -u)
+    if (( failed )); then
+        return 1
+    fi
+    if (( dry )); then
+        echo "dry run, $(tb_plural "$total" pod) would be deleted"
+    else
+        echo "deleted $(tb_plural "$total" pod)"
+    fi
+}
+
+ns=""
+all=0
+system=0
+only=""
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--namespace)      tb_optarg "$@"; ns=$2; shift ;;
+        -A|--all-namespaces) all=1 ;;
+        --system)            system=1 ;;
+        --only)              tb_optarg "$@"
+                             case $2 in
+                                 evicted|completed|crashloop) only+=" $2" ;;
+                                 *) tb_usage_error "--only takes evicted, completed or crashloop, not $2" ;;
+                             esac
+                             shift ;;
+        --)                  shift; TB_PASS=("$@"); break ;;
+        -*)                  tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)                   tb_usage_error "kclean takes no pod names, it finds the pods itself" ;;
+    esac
+    shift
+done
+if (( all )) && [[ -n $ns ]]; then
+    tb_usage_error "use -n or -A, not both"
+fi
+only=${only# }
+
+main
+exit $?

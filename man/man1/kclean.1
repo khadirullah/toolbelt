@@ -1,0 +1,252 @@
+.TH "KCLEAN" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+kclean \- delete evicted, completed and crashing pods
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+kclean [-n NAMESPACE | -A] [--only KIND] [--system] [-y] [-- kubectl delete options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Pods pile up in a namespace. The kubelet evicts pods when a node runs short of memory or disk, and an evicted pod stays in the list with the status \fBEvicted\fR until someone deletes it. A CronJob leaves a finished pod behind for every run it keeps. A pod in CrashLoopBackOff keeps restarting and fills \fBkubectl get pods\fR with noise. None of them does anything useful, and all of them hide the pods you want to look at.
+.PP
+\fBkclean\fR finds those three kinds of pods, lists them grouped by kind, and asks once before it deletes them. The list names each pod, and for a crashing pod also its restart count and its owner. The owner tells you what happens after the delete. A pod owned by a Deployment, StatefulSet or DaemonSet comes back as a fresh copy, so deleting a crashing one is a restart. A pod with no owner is gone for good.
+.PP
+Pods cannot go to a trash. The question names the count and the namespace, and says so. Without a terminal to ask, \fBkclean\fR refuses unless you pass \fB\-y\fR. With \fB\-\- \-\-dry\-run=client\fR, kubectl reports what it would delete and nothing is deleted.
+.PP
+\fBkclean\fR never touches pods that are Running and healthy, Pending, or already being deleted.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-namespace NS\fR
+Clean this namespace. The context's own namespace by default.
+.TP
+\fB\-A\fR, \fB\-\-all\-namespaces\fR
+Clean every namespace except kube\-system.
+.TP
+\fB\-\-only KIND\fR
+Only \fBevicted\fR, \fBcompleted\fR or \fBcrashloop\fR pods. Repeat it for two kinds.
+.TP
+\fB\-\-system\fR
+Include kube\-system. Needed with \fB\-A\fR to reach it, and with \fB\-n kube\-system\fR.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Delete without asking.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+List every pod name, print each kubectl command before it runs, and show kubectl's own output.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-A\fR and \fB\-n\fR together are a usage error. \fBkclean\fR takes no pod names. It finds the pods itself, and \fBkubectl delete pod NAME\fR is the tool for one pod you already know.
+.SH WHAT COUNTS
+.TP
+\fBevicted\fR
+What \fBkclean\fR looks for: Status \fBFailed\fR with reason \fBEvicted\fR.. What deleting it does: Removes the record. The owner made a new pod when this one was evicted.
+.TP
+\fBcompleted\fR
+What \fBkclean\fR looks for: Status \fBSucceeded\fR, such as a finished Job run.. What deleting it does: Removes the pod and its logs. The Job object stays.
+.TP
+\fBcrashloop\fR
+What \fBkclean\fR looks for: Any container or init container waiting with reason \fBCrashLoopBackOff\fR.. What deleting it does: Restarts it when an owner makes a new one. Stops it for good when it has no owner.
+.PP
+Pods with a deletion time are already on their way out and never count.
+.SH THE LIST
+.PP
+Each kind gets one line with its label and count, followed by the pod names. Names wrap at 72 columns, and a kind with more than three pods shows the first two and \fBand N more\fR. \fB\-v\fR shows every name.
+.PP
+Crashing pods get one line each, since the owner matters there. The owner comes from the pod's ownerReferences. A ReplicaSet made by a Deployment shows as the Deployment, such as \fBdeploy/api\fR, found by taking the \fBpod\-template\-hash\fR off the ReplicaSet name.
+.PP
+With \fB\-A\fR, names get a \fBnamespace/\fR prefix and the question counts the namespaces.
+.SH SAFETY
+.IP \(bu 2
+It always asks first, with the count and the namespace, and says the pods cannot be restored.
+.IP \(bu 2
+No terminal and no \fB\-y\fR means exit 4 and nothing deleted. A cron job or script must pass \fB\-y\fR on purpose.
+.IP \(bu 2
+kube\-system holds the cluster's own pods, such as CoreDNS and the API server on kubeadm clusters. \fB\-A\fR skips it, and \fB\-n kube\-system\fR refuses with exit 4, unless you pass \fB\-\-system\fR.
+.IP \(bu 2
+Deletes use \fB\-\-ignore\-not\-found\fR, so a pod that went away between the list and the delete is not an error.
+.IP \(bu 2
+\fB\-\- \-\-dry\-run=client\fR or \fB\-\- \-\-dry\-run=server\fR skips the question and deletes nothing.
+.SH ON DIFFERENT CLUSTERS
+.PP
+kind and minikube : Evicted pods are common, since the node is your laptop and shares its memory with everything else. Clean them after a heavy test run.
+.PP
+kubeadm clusters : The API server, etcd, the scheduler and the controller manager run as static pods in kube\-system. The kubelet owns them, so deleting one only makes the kubelet start it again. That is one more reason \fBkclean\fR skips kube\-system.
+.PP
+Managed clusters such as EKS, GKE and AKS : The provider runs its own agents in kube\-system and sometimes in namespaces of its own. \fB\-A\fR still visits those other namespaces, so read the list before you answer.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBkubectl delete pod\fR. The list call gets only \fB\-\-context\fR and \fB\-\-kubeconfig\fR from them.
+.PP
+.RS 4
+.nf
+$ kclean --only completed -- --grace-period 0
+$ kclean -n shop -- --dry-run=client
+$ kclean -A -- --context kind-kind
+.fi
+.RE
+.PP
+\fB\-\-grace\-period 0\fR matters for crashing pods, which may otherwise wait the full 30 seconds to stop.
+.SH NEEDS
+.PP
+\fBkubectl\fR and \fBjq\fR. The account behind your context needs \fBlist\fR and \fBdelete\fR on pods in the namespaces it cleans.
+.SH EXAMPLES
+.SS Clean the current namespace
+.PP
+.RS 4
+.nf
+$ kclean
+context kind-kind, namespace shop
+evicted    2  cart-7d9f8c6b54-8kq1r cart-7d9f8c6b54-v2m7t
+completed  4  report-28791440-x7k2p report-28791500-m4n8q and 2 more
+crashloop  2  api-5b8c9d7f6-mk4tn, restarts 14, owned by deploy/api
+              debug-shell, restarts 6, no owner, it will not come back
+Delete 8 pods in shop? They cannot be restored. [y/N] y
+deleted 8 pods
+.fi
+.RE
+.PP
+The api pod comes back as a fresh copy. The debug\-shell pod had no owner, so it is gone.
+.SS Every namespace, evicted pods only
+.PP
+.RS 4
+.nf
+$ kclean -A --only evicted
+context kind-kind, all namespaces, kube-system skipped
+evicted    3  shop/cart-7d9f8c6b54-8kq1r shop/cart-7d9f8c6b54-v2m7t
+              monitoring/grafana-5f7c-abcde
+Delete 3 pods in 2 namespaces? They cannot be restored. [y/N] n
+Nothing changed.
+$ echo $?
+5
+.fi
+.RE
+.SS Dry run first
+.PP
+.RS 4
+.nf
+$ kclean -v -n shop -- --dry-run=client
++ kubectl get pods -n shop -o json
+context kind-kind, namespace shop
+evicted    2  cart-7d9f8c6b54-8kq1r cart-7d9f8c6b54-v2m7t
+completed  4  report-28791440-x7k2p report-28791500-m4n8q migrate-9fz2c
+              report-28791560-q9w3e
+crashloop  2  api-5b8c9d7f6-mk4tn, restarts 14, owned by deploy/api
+              debug-shell, restarts 6, no owner, it will not come back
++ kubectl delete pod -n shop --ignore-not-found report-28791440-x7k2p report-28791500-m4n8q migrate-9fz2c report-28791560-q9w3e cart-7d9f8c6b54-8kq1r cart-7d9f8c6b54-v2m7t api-5b8c9d7f6-mk4tn debug-shell --dry-run=client
+pod "report-28791440-x7k2p" deleted (dry run)
+\&...
+dry run, 8 pods would be deleted
+.fi
+.RE
+.PP
+\fB\-v\fR lists every completed pod, where the plain list stopped at two.
+.SS From a script or cron job
+.PP
+.RS 4
+.nf
+$ kclean -n shop -q -y --only completed
+deleted 4 pods
+.fi
+.RE
+.PP
+Without \fB\-y\fR and without a terminal, the list prints and nothing is deleted.
+.PP
+.RS 4
+.nf
+$ kclean < /dev/null
+context kind-kind, namespace shop
+\&...
+kclean: not asking without a terminal, pass --yes to go ahead
+$ echo $?
+4
+.fi
+.RE
+.SS Nothing to do
+.PP
+.RS 4
+.nf
+$ kclean -n monitoring --only completed
+context kind-kind, namespace monitoring
+nothing to clean in monitoring
+$ echo $?
+0
+.fi
+.RE
+.SS kube\-system
+.PP
+.RS 4
+.nf
+$ kclean -n kube-system
+kclean: kube-system holds the cluster's own pods. Add --system to clean it
+$ echo $?
+4
+$ kclean -A --system -y --only evicted
+context kind-kind, all namespaces
+evicted    4  shop/cart-7d9f8c6b54-8kq1r shop/cart-7d9f8c6b54-v2m7t
+              and 2 more
+deleted 4 pods
+.fi
+.RE
+.SS Restart crashing pods at once
+.PP
+.RS 4
+.nf
+$ kclean -n shop --only crashloop -y -- --grace-period 0
+context kind-kind, namespace shop
+crashloop  2  api-5b8c9d7f6-mk4tn, restarts 14, owned by deploy/api
+              debug-shell, restarts 6, no owner, it will not come back
+deleted 2 pods
+.fi
+.RE
+.PP
+The Deployment makes a new api pod with a restart count of 0, which resets the back\-off. Use it after you fixed what made the pod crash, such as a missing Secret.
+.SS A kind it does not know
+.PP
+.RS 4
+.nf
+$ kclean --only oops
+kclean: --only takes evicted, completed or crashloop, not oops
+Try 'kclean --help' for the options.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+Evicted pods come back after a while : The node is still short of memory or disk, so the kubelet keeps evicting. \fBknodes\fR shows which node is under pressure, and \fBkres\fR shows how full its requests are.
+.PP
+Completed pods come back after every run : That is the CronJob keeping its history. Set \fBsuccessfulJobsHistoryLimit\fR and \fBfailedJobsHistoryLimit\fR on the CronJob, or \fBttlSecondsAfterFinished\fR on the Job, and the cluster cleans them itself.
+.PP
+A crashing pod comes straight back as CrashLoopBackOff : Deleting it restarts it, which does not fix the cause. \fBkwhy\fR shows the exit code and the last log lines of the crashed container.
+.PP
+\fBkclean: kubectl delete failed in NS: ...\fR : The account may list pods but not delete them. The pods in other namespaces are still deleted, and \fBkclean\fR exits 1.
+.PP
+\fBkclean: the cluster refused: pods is forbidden ...\fR : The account may not list pods in that namespace. Pick a namespace with \fB\-n\fR, or a context with more rights.
+.SH EXIT STATUS
+.TP
+0
+Nothing to clean, the pods were deleted, or a dry run listed them.
+.TP
+1
+kubectl failed, to list or to delete.
+.TP
+2
+Bad usage, such as \fB\-A\fR with \fB\-n\fR, a pod name, or an unknown \fB\-\-only\fR kind.
+.TP
+3
+kubectl or jq is missing.
+.TP
+4
+Refused. No terminal to ask and no \fB\-y\fR, or kube\-system without \fB\-\-system\fR.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBkwhy\fR, \fBknodes\fR, \fBkres\fR, \fBkevents\fR, \fBkubectl\-delete(1)\fR
