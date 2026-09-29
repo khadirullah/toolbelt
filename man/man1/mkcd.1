@@ -1,0 +1,148 @@
+.TH "MKCD" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+mkcd \- make a folder with its parents, and move into it
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+mkcd [--] folder
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBmkcd\fR does in one step what you would otherwise type as \fBmkdir \-p folder && cd folder\fR. It makes the folder, together with every missing folder above it, and moves your shell into it.
+.PP
+.RS 4
+.nf
+$ mkcd ~/lab/kind/manifests
+$ pwd
+/home/me/lab/kind/manifests
+.fi
+.RE
+.PP
+When the folder already exists, \fBmkcd\fR just moves into it. It never empties, replaces or changes a folder that is already there.
+.SS Why it is a shell function
+.PP
+Every program runs in its own process, and a process can only change its own current folder. A script called \fBmkcd\fR could make the folder and move into it, but your shell would stay where it was the moment the script ended. So \fBmkcd\fR is a shell function. It runs inside your shell and moves the shell itself.
+.PP
+That is also why \fBmkcd\fR has no file in \fBbin/\fR. It lives in \fBshell/functions.sh\fR, with \fBup\fR, and your shell loads that file when it starts.
+.SS Turning it on
+.PP
+Run this once:
+.PP
+.RS 4
+.nf
+$ toolbelt shell enable functions
+.fi
+.RE
+.PP
+That adds the \fBfunctions\fR setting to \fB~/.config/toolbelt/shell\fR and makes sure \fB~/.bashrc\fR or \fB~/.zshrc\fR loads toolbelt's \fBshell/init.sh\fR. Open a new terminal, or run \fBexec $SHELL\fR, and \fBmkcd\fR is there:
+.PP
+.RS 4
+.nf
+$ type mkcd
+mkcd is a function
+.fi
+.RE
+.PP
+\fBtoolbelt shell disable functions\fR turns it off again.
+.SS How it treats the name
+.IP \(bu 2
+A name with no \fB/\fR at the start is inside the current folder. \fBmkcd\fR puts \fB./\fR in front of it before it runs \fBcd\fR, so a \fBCDPATH\fR you have set never sends you to a folder of the same name somewhere else.
+.IP \(bu 2
+\fB~\fR, \fB$HOME\fR and globs are expanded by your shell before \fBmkcd\fR sees them, as with any command.
+.IP \(bu 2
+A name that starts with a dash goes after \fB\-\-\fR: \fBmkcd \-\- \-drafts\fR.
+.IP \(bu 2
+When a file, not a folder, has the name already, \fBmkcd\fR stops with an error and changes nothing.
+.IP \(bu 2
+When \fBmkdir\fR fails, such as for a folder you have no rights to write in, \fBmkcd\fR stops and you stay where you were.
+.PP
+\fBcd\fR keeps the folder you left in \fBOLDPWD\fR, so \fBcd \-\fR takes you back.
+.SH OPTIONS
+.TP
+\fB\-\-\fR
+The next word is the folder, even when it starts with a dash.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+None. \fBmkcd\fR runs \fBmkdir \-p\fR and \fBcd\fR.
+.SH NEEDS
+.PP
+bash or zsh, and \fBmkdir\fR from coreutils. \fBshell/functions.sh\fR uses only syntax both shells share, so the same file works in either.
+.SH EXAMPLES
+.SS A new project folder
+.PP
+.RS 4
+.nf
+$ mkcd ~/lab/kind/manifests
+$ pwd
+/home/me/lab/kind/manifests
+.fi
+.RE
+.SS A folder that exists already
+.PP
+.RS 4
+.nf
+$ mkcd /tmp
+$ pwd
+/tmp
+.fi
+.RE
+.SS A name that starts with a dash
+.PP
+.RS 4
+.nf
+$ mkcd -- -drafts
+$ pwd
+/home/me/-drafts
+.fi
+.RE
+.SS A file is in the way
+.PP
+.RS 4
+.nf
+$ touch notes
+$ mkcd notes
+mkcd: notes exists and is not a folder
+.fi
+.RE
+.SS No rights to write
+.PP
+.RS 4
+.nf
+$ mkcd /opt/tools
+mkdir: cannot create directory '/opt/tools': Permission denied
+mkcd: cannot make /opt/tools
+.fi
+.RE
+.SS Check that it is loaded
+.PP
+.RS 4
+.nf
+$ type mkcd
+mkcd is a function
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBmkcd: command not found\fR : The functions are off, or this shell started before you turned them on. Run \fBtoolbelt shell enable functions\fR, then open a new terminal.
+.PP
+\fBmkcd: give one folder name\fR : \fBmkcd\fR takes exactly one folder. Quote a name with spaces: \fBmkcd "my project"\fR.
+.PP
+\fBsudo mkcd\fR does not work : \fBsudo\fR runs programs, and \fBmkcd\fR is a function in your shell. Make the folder with \fBsudo mkdir \-p\fR, then \fBcd\fR.
+.SH EXIT STATUS
+.TP
+0
+The folder exists and the shell is in it.
+.TP
+1
+The folder could not be made or entered.
+.TP
+2
+Bad usage, such as no folder or two folders.
+.SH SEE ALSO
+.PP
+\fBup\fR, \fBtoolbelt\fR, \fBmkdir(1)\fR

@@ -1,0 +1,165 @@
+.TH "UP" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+up \- go up n folders, or to the nearest parent with a name
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+up [n | name]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBup\fR moves your shell up the folder tree. It saves you typing \fBcd ../../..\fR and counting the dots.
+.IP \(bu 2
+\fBup\fR goes up one folder, the same as \fBcd ..\fR.
+.IP \(bu 2
+\fBup 3\fR goes up three folders.
+.IP \(bu 2
+\fBup lab\fR goes up to the nearest folder above you named \fBlab\fR.
+.PP
+.RS 4
+.nf
+$ pwd
+/home/me/lab/kind/manifests/base
+$ up 2
+$ pwd
+/home/me/lab/kind
+.fi
+.RE
+.PP
+\fBup\fR never goes above \fB/\fR. \fBup 20\fR from \fB/home/me\fR lands in \fB/\fR.
+.SS Up to a name
+.PP
+With a name, \fBup\fR walks up from the current folder and stops at the first folder whose own name matches exactly. It only looks at the folders above you, never the one you are in and never the ones beside you.
+.PP
+.RS 4
+.nf
+$ pwd
+/home/me/lab/kind/manifests/base
+$ up lab
+$ pwd
+/home/me/lab
+.fi
+.RE
+.PP
+When two folders above you have the same name, \fBup\fR stops at the nearer one. When none has it, \fBup\fR prints an error and you stay where you were.
+.PP
+The match is exact and case\-sensitive. \fBup Lab\fR does not find \fBlab\fR.
+.SS Numbers and names
+.PP
+A word of digits only is a number of levels. Any other word is a name. To go to a parent folder whose name is all digits, such as \fB2026\fR, use \fBcd\fR with its path. Leading zeros do not matter, so \fBup 03\fR is \fBup 3\fR.
+.SS Why it is a shell function
+.PP
+Every program runs in its own process, and a process can only change its own current folder. A script could work out the folder, but your shell would stay where it was. So \fBup\fR is a shell function that runs inside your shell. It lives in \fBshell/functions.sh\fR, with \fBmkcd\fR.
+.PP
+Turn both on once with:
+.PP
+.RS 4
+.nf
+$ toolbelt shell enable functions
+.fi
+.RE
+.PP
+Then open a new terminal, or run \fBexec $SHELL\fR.
+.SS Symlinks
+.PP
+\fBup\fR follows the path you see in \fBpwd\fR, the same way \fBcd ..\fR does. When you entered a folder through a symlink, \fBup\fR goes back up through the symlink's side, not through the real folder's parents.
+.PP
+\fBcd\fR keeps the folder you left in \fBOLDPWD\fR, so \fBcd \-\fR takes you back to where you were before \fBup\fR.
+.SH OPTIONS
+.TP
+\fBn\fR
+Go up n folders. 1 when you give nothing.
+.TP
+\fBname\fR
+Go up to the nearest parent folder with this name.
+.TP
+\fB\-\-\fR
+The next word is a name, even when it starts with a dash.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+None. \fBup\fR runs \fBcd\fR.
+.SH NEEDS
+.PP
+bash or zsh. \fBup\fR uses only shell builtins.
+.SH EXAMPLES
+.SS One level
+.PP
+.RS 4
+.nf
+$ up
+$ pwd
+/home/me/lab/kind/manifests
+.fi
+.RE
+.SS Several levels
+.PP
+.RS 4
+.nf
+$ up 2
+$ pwd
+/home/me/lab
+.fi
+.RE
+.SS Up to a folder by name
+.PP
+.RS 4
+.nf
+$ up lab
+$ pwd
+/home/me/lab
+.fi
+.RE
+.SS And back
+.PP
+.RS 4
+.nf
+$ up lab
+$ cd -
+/home/me/lab/kind/manifests/base
+.fi
+.RE
+.SS No such parent
+.PP
+.RS 4
+.nf
+$ up nosuch
+up: no parent folder named nosuch
+$ echo $?
+1
+.fi
+.RE
+.SS Check that it is loaded
+.PP
+.RS 4
+.nf
+$ type up
+up is a function
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBup: command not found\fR : The functions are off, or this shell started before you turned them on. Run \fBtoolbelt shell enable functions\fR, then open a new terminal.
+.PP
+\fBup: no parent folder named lab\fR : No folder above you has that exact name. Check the spelling and the case with \fBpwd\fR.
+.PP
+\fBup: give a number of 1 or more\fR : \fBup 0\fR would stay where you are, so it counts as a mistake.
+.PP
+\fBup\fR is already a command or alias on this machine : Another tool or your own \fB~/.bashrc\fR defines \fBup\fR too, and the one loaded last wins. \fBtype up\fR shows which one you have. Load toolbelt later in \fB~/.bashrc\fR, or remove the other.
+.SH EXIT STATUS
+.TP
+0
+The shell moved.
+.TP
+1
+No parent folder has that name, or \fBcd\fR failed.
+.TP
+2
+Bad usage, such as \fBup 0\fR or two words.
+.SH SEE ALSO
+.PP
+\fBmkcd\fR, \fBtoolbelt\fR, \fBcd(1)\fR
