@@ -95,6 +95,7 @@ lsar           unar                 unar                 unarchiver           un
 uncompress     ncompress            ncompress            ncompress            ncompress            -
 unmkinitramfs  initramfs-tools-bin|initramfs-tools-core -                    -                    -                    -
 unrar          unrar                -                    unrar                unrar                unrar
+ffprobe        ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7             ffmpeg
 shred          coreutils            coreutils            coreutils            coreutils            coreutils
 df             coreutils            coreutils            coreutils            coreutils            coreutils
 base64         coreutils            coreutils            coreutils            coreutils            coreutils

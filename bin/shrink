@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# shrink: make an image, video or PDF fit a size.
+set -uo pipefail
+TB_CMD=shrink
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: shrink [options] file size
+       shrink -s size [options] file ...
+
+Make an image, video or PDF fit a size.
+
+Options:
+  -s, --size SIZE     the target, such as 500K or 25M
+  -w, --width PX      largest width for images and video
+  -o, --out NAME      name the smaller copy yourself
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+The copy goes beside the file as name-small.ext. The original is never
+changed.
+
+Pass-through:
+  Options after -- go to magick or convert for images, to both ffmpeg
+  passes for video, and to gs for PDF.
+
+Examples:
+  shrink photo.jpg 500K
+  shrink clip.mp4 25M
+  shrink scan.pdf 2M
+  shrink -s 1M -w 1920 *.jpg
+  shrink talk.mp4 25M -- -preset slow
+
+Needs: ImageMagick for images, ffmpeg for video, Ghostscript for PDF.
+See man shrink.
+Exit: 0 ok, 1 failed or target not reached, 2 bad usage, 3 missing tool,
+      4 refused.
+EOF
+}
+
+# image, video, pdf, or nothing, from the name and then from file(1).
+kind_of() {
+    local ext=${1##*.} mime
+    case ${ext,,} in
+        jpg|jpeg|png|webp|gif|bmp|tif|tiff|heic|heif|avif|jxl) echo image; return ;;
+        mp4|m4v|mkv|mov|webm|avi|flv|wmv|mpg|mpeg|ts|3gp) echo video; return ;;
+        pdf) echo pdf; return ;;
+    esac
+    tb_has file || return 0
+    mime=$(file -b --mime-type -- "$1" 2>/dev/null)
+    case $mime in
+        image/*) echo image ;;
+        video/*) echo video ;;
+        application/pdf) echo pdf ;;
+    esac
+}
+
+# The name for the copy: photo.jpg gives photo-small.jpg, or photo-small-1.jpg
+# when that exists. A second argument replaces the extension.
+small_name() {
+    local f=$1 ext=${2:-} dir base
+    dir=$(dirname -- "$f")
+    base=$(basename -- "$f")
+    if [[ $base == ?*.* ]]; then
+        [[ -n $ext ]] || ext=${base##*.}
+        base=${base%.*}
+    fi
+    local name=$base-small
+    [[ -n $ext ]] && name+=.$ext
+    [[ $dir == . && $f != ./* ]] && dir=""
+    tb_free_name "${dir:+$dir/}$name" file
+}
+
+# Seconds as 3:10 or 1:02:03.
+clock() {
+    local s=${1%.*}
+    if (( s >= 3600 )); then printf '%d:%02d:%02d' $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+    else printf '%d:%02d' $((s / 60)) $((s % 60)); fi
+}
+
+# Try one image setting into $work/try.EXT and print its size.
+image_try() {
+    local in=$1 out=$2 scale=$3 q=$4 cmd
+    cmd=("$IM" "$in" -auto-orient -strip)
+    (( width )) && cmd+=(-resize "${width}x>")
+    (( scale < 100 )) && cmd+=(-resize "${scale}%")
+    [[ -n $q ]] && cmd+=(-quality "$q")
+    cmd+=(${TB_PASS[@]+"${TB_PASS[@]}"} "$out")
+    tb_show "${cmd[@]}"
+    "${cmd[@]}" >/dev/null 2>>"$work/errors" || return 1
+    tb_bytes "$out"
+}
+
+shrink_image() {
+    local f=$1 out=$2 ext try low size scale q lossy=0 best=0 how lo
+    local scales=(100 85 70 55 40 30 20 10) quals=(85 75 65 55 45)
+    tb_need_any IM magick convert
+    # The output's ending picks the format, so -o photo.webp converts.
+    ext=${f##*.}
+    [[ $(basename -- "$out") == ?*.* ]] && ext=${out##*.}
+    ext=${ext,,}
+    case $ext in jpg|jpeg|webp|avif|heic|heif|jxl) lossy=1 ;; esac
+    try=$work/try.$ext
+    low=$work/low.$ext
+    lo=""
+    (( lossy )) && lo=${quals[-1]}
+    for scale in "${scales[@]}"; do
+        tb_line "shrink: $f at ${scale}%"
+        # The lowest quality first. When even that is too big, only a
+        # smaller scale can help.
+        size=$(image_try "$f" "$low" "$scale" "$lo") || { tb_line_end; tb_err "$IM could not read $f"; return 1; }
+        (( best == 0 || size < best )) && best=$size
+        if (( size > target )); then
+            tb_say "${lo:+quality $lo at }${scale}% gives $(tb_human "$size"), too big"
+            continue
+        fi
+        how=""
+        [[ -n $lo ]] && how="quality $lo"
+        mv -- "$low" "$try"
+        if (( lossy )); then
+            # It fits, so find the best quality that still fits.
+            for q in "${quals[@]}"; do
+                [[ $q == "$lo" ]] && break
+                size=$(image_try "$f" "$low" "$scale" "$q") || continue
+                if (( size <= target )); then
+                    mv -- "$low" "$try"
+                    how="quality $q"
+                    break
+                fi
+                tb_say "quality $q at ${scale}% gives $(tb_human "$size"), too big"
+            done
+        fi
+        (( scale < 100 )) && how+="${how:+, }${scale}% wide"
+        [[ -n $how ]] || how="metadata stripped"
+        tb_line_end
+        mv -- "$try" "$out" || { tb_err "could not write $out"; return 1; }
+        RESULT=$how
+        return 0
+    done
+    tb_line_end
+    tb_err "wrote nothing. The smallest ImageMagick gets for $f is $(tb_human "$best"), at 10% wide"
+    return 1
+}
+
+# ffmpeg codec flags for the output extension, in VCODEC and ACODEC.
+video_codecs() {
+    case $1 in
+        webm) VCODEC=(-c:v libvpx-vp9 -row-mt 1); ACODEC=(-c:a libopus -b:a 96k) ;;
+        *)    VCODEC=(-c:v libx264 -preset medium); ACODEC=(-c:a aac -b:a 96k) ;;
+    esac
+}
+
+# Two ffmpeg passes at a bitrate in kbit/s, into a file. Prints its size.
+video_encode() {
+    local in=$1 out=$2 kbps=$3 ext=$4 vf=() pass1 pass2 extra=()
+    (( width )) && vf=(-vf "scale='min($width,iw)':-2")
+    video_codecs "$ext"
+    [[ $ext == mp4 || $ext == m4v || $ext == mov ]] && extra=(-movflags +faststart)
+    pass1=(ffmpeg -nostdin -y -hide_banner -loglevel error -i "$in" "${vf[@]}" "${VCODEC[@]}" -b:v "${kbps}k"
+        -pass 1 -passlogfile "$work/pass" ${TB_PASS[@]+"${TB_PASS[@]}"} -an -f null /dev/null)
+    pass2=(ffmpeg -nostdin -y -hide_banner -loglevel error -i "$in" "${vf[@]}" "${VCODEC[@]}" -b:v "${kbps}k"
+        -pass 2 -passlogfile "$work/pass" ${TB_PASS[@]+"${TB_PASS[@]}"})
+    if (( has_audio )); then pass2+=("${ACODEC[@]}"); else pass2+=(-an); fi
+    pass2+=("${extra[@]}" "$out")
+    tb_line "shrink: $in, pass 1 of 2 at ${kbps}k"
+    tb_show "${pass1[@]}"
+    "${pass1[@]}" || { tb_line_end; return 1; }
+    tb_line "shrink: $in, pass 2 of 2 at ${kbps}k"
+    tb_show "${pass2[@]}"
+    "${pass2[@]}" || { tb_line_end; return 1; }
+    tb_line_end
+    tb_bytes "$out"
+}
+
+shrink_video() {
+    local f=$1 out=$2 ext dur secs audio_k=0 kbps size try
+    tb_need ffmpeg ffprobe
+    ext=mp4
+    [[ $(basename -- "$out") == ?*.* ]] && ext=${out##*.}
+    ext=${ext,,}
+    dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$f" 2>/dev/null)
+    [[ $dur =~ ^[0-9]+(\.[0-9]+)?$ ]] || { tb_err "ffprobe could not read the length of $f"; return 1; }
+    secs=$(awk -v d="$dur" 'BEGIN { s = int(d + 0.5); if (s < 1) s = 1; print s }')
+    has_audio=0
+    [[ -n $(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$f" 2>/dev/null) ]] && has_audio=1
+    (( has_audio )) && audio_k=96
+    # 3% of the target is left for the container.
+    kbps=$(awk -v t="$target" -v s="$dur" -v a="$audio_k" 'BEGIN { printf "%d", t * 8 * 0.97 / s / 1000 - a }')
+    tb_say "$f: video, $(clock "$secs"), $(tb_human "$(tb_bytes "$f")")"
+    tb_say "bitrate: $(tb_human "$target") over ${secs}s, less ${audio_k}k for sound, is ${kbps}k"
+    if (( kbps < 50 )); then
+        tb_err "$(tb_human "$target") is too small for $(clock "$secs") of video, it leaves under 50k a second for the picture"
+        return 1
+    fi
+    try=$work/try.$ext
+    size=$(video_encode "$f" "$try" "$kbps" "$ext") || { tb_err "ffmpeg could not encode $f, run it with -v to see the commands"; return 1; }
+    if (( size > target )); then
+        # Encoders overshoot a little on some clips. One more try, scaled down.
+        local again
+        again=$(awk -v k="$kbps" -v t="$target" -v s="$size" 'BEGIN { printf "%d", k * t / s * 0.95 }')
+        tb_info "shrink: $f came out at $(tb_human "$size"), trying again at ${again}k"
+        kbps=$again
+        size=$(video_encode "$f" "$try" "$kbps" "$ext") || { tb_err "ffmpeg could not encode $f"; return 1; }
+    fi
+    if (( size > target )); then
+        tb_err "wrote nothing. The smallest ffmpeg got for $f is $(tb_human "$size"), over $(tb_human "$target")"
+        return 1
+    fi
+    mv -- "$try" "$out" || { tb_err "could not write $out"; return 1; }
+    RESULT="${kbps}k, 2 passes"
+}
+
+shrink_pdf() {
+    local f=$1 out=$2 preset size best=0 best_preset="" try cmd
+    tb_need gs
+    try=$work/try.pdf
+    for preset in printer ebook screen; do
+        cmd=(gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dCompatibilityLevel=1.4
+            "-dPDFSETTINGS=/$preset" ${TB_PASS[@]+"${TB_PASS[@]}"} "-sOutputFile=$try" "$f")
+        tb_line "shrink: $f with /$preset"
+        tb_show "${cmd[@]}"
+        if ! "${cmd[@]}" >/dev/null 2>>"$work/errors"; then
+            tb_line_end
+            tb_err "Ghostscript could not read $f"
+            sed -n '1,3p' "$work/errors" >&2
+            return 1
+        fi
+        size=$(tb_bytes "$try")
+        tb_line_end
+        if (( best == 0 || size < best )); then best=$size; best_preset=$preset; fi
+        if (( size <= target )); then
+            mv -- "$try" "$out" || { tb_err "could not write $out"; return 1; }
+            RESULT=/$preset
+            return 0
+        fi
+        if [[ $preset != screen ]]; then
+            tb_info "shrink: $f: /$preset gives $(tb_human "$size"), trying the next"
+        else
+            tb_info "shrink: $f: /$preset gives $(tb_human "$size"), over $(tb_human "$target")"
+        fi
+    done
+    tb_err "wrote nothing. The smallest Ghostscript gets for $f is $(tb_human "$best"), with /$best_preset"
+    return 1
+}
+
+shrink_one() {
+    local f=$1 kind out before after start rc
+    [[ -f $f ]] || { tb_err "$f: no such file"; return 1; }
+    # A name that starts with - would read as an option to every tool.
+    [[ $f == -* ]] && f=./$f
+    kind=$(kind_of "$f")
+    [[ -n $kind ]] || { tb_err "$f is not an image, a video or a PDF"; return 1; }
+    before=$(tb_bytes "$f")
+    if (( before <= target )); then
+        echo "$f is already $(tb_human "$before"), which fits $(tb_human "$target"). Nothing written."
+        return 0
+    fi
+    if [[ -n $out_name ]]; then
+        out=$out_name
+        if [[ -e $out || -L $out ]]; then
+            tb_err "$out exists. Pick another name for -o"
+            return "$E_SAFE"
+        fi
+    elif [[ $kind == video ]]; then
+        local ext=${f##*.}
+        case ${ext,,} in
+            mp4|m4v|mkv|mov|webm) out=$(small_name "$f") ;;
+            *) out=$(small_name "$f" mp4) ;;
+        esac
+    else
+        out=$(small_name "$f")
+    fi
+    # Work beside the output, so a big video never fills a RAM-backed /tmp
+    # and the finished copy moves into place with a rename.
+    tb_tmpdir work "$(dirname -- "$out")" 2>/dev/null || tb_tmpdir work \
+        || { tb_err "could not make a temp folder"; return 1; }
+    : > "$work/errors"
+    start=$(tb_now_ms)
+    RESULT=""
+    case $kind in
+        image) shrink_image "$f" "$out" ;;
+        video) shrink_video "$f" "$out" ;;
+        pdf)   shrink_pdf "$f" "$out" ;;
+    esac
+    rc=$?
+    (( rc == 0 )) || return "$rc"
+    after=$(tb_bytes "$out")
+    echo "$f -> $out ($(tb_human "$before") -> $(tb_human "$after"), $RESULT, $(tb_elapsed $(( $(tb_now_ms) - start ))))"
+}
+
+main() {
+    local f rc=0 r
+    if [[ -z $size_arg ]] && (( ${#files[@]} >= 2 )); then
+        local last=${files[-1]}
+        if [[ ! -e $last ]] && tb_parse_size "$last" >/dev/null; then
+            size_arg=$last
+            unset 'files[-1]'
+        fi
+    fi
+    [[ -n $size_arg ]] || tb_usage_error "give a target size, such as: shrink photo.jpg 500K"
+    target=$(tb_parse_size "$size_arg") || tb_usage_error "$size_arg is not a size. Use 500K, 25M or 1.5G"
+    (( target >= 1024 )) || tb_usage_error "$size_arg is too small, the target is 1K or more"
+    (( ${#files[@]} )) || tb_usage_error "name a file to shrink"
+    [[ -n $out_name && ${#files[@]} -gt 1 ]] && tb_usage_error "-o names one copy, so give one file"
+    for f in "${files[@]}"; do
+        shrink_one "$f"
+        r=$?
+        (( r > rc )) && rc=$r
+    done
+    return "$rc"
+}
+
+files=()
+size_arg=""
+out_name=""
+width=0
+target=0
+has_audio=0
+tb_expand "swo" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -s|--size)  tb_optarg "$@"; size_arg=$2; shift ;;
+        -w|--width) tb_optarg "$@"; width=$2; shift
+                    [[ $width =~ ^[0-9]+$ ]] && (( width >= 16 )) || tb_usage_error "--width needs a number of pixels, 16 or more"
+                    ;;
+        -o|--out)   tb_optarg "$@"; out_name=$2; shift ;;
+        --)         shift; TB_PASS=("$@"); break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          files+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

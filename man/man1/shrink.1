@@ -1,0 +1,214 @@
+.TH "SHRINK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+shrink \- make an image, video or PDF fit a size
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+shrink [options] file size
+shrink -s size [options] file ...
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+A form takes uploads up to 2 MB. A chat app takes videos up to 25 MB. \fBshrink\fR writes a smaller copy of the file that fits the size you give, and keeps as much quality as it can on the way.
+.PP
+.RS 4
+.nf
+photo.jpg -> photo-small.jpg (4.8MB -> 1.9MB, quality 85, 0.9s)
+.fi
+.RE
+.PP
+The copy goes beside the file as \fBname\-small.ext\fR, or \fBname\-small\-1.ext\fR when that name is taken. The original is never changed. When the file already fits, \fBshrink\fR says so and writes nothing.
+.PP
+Sizes read like \fB500K\fR, \fB25M\fR or \fB1.5G\fR, in steps of 1024. The target must be 1K or more.
+.PP
+Each kind of file has its own way down:
+.TP
+Image
+Tool: ImageMagick. How it gets smaller: Lower quality first, then a smaller width.
+.TP
+Video
+Tool: ffmpeg. How it gets smaller: A bitrate worked out from the length, in two passes.
+.TP
+PDF
+Tool: Ghostscript. How it gets smaller: Three presets, from the best looking to the smallest.
+.PP
+\fBshrink\fR knows the kind from the ending. For a file without a known ending, it asks \fBfile\fR what it holds.
+.SH OPTIONS
+.TP
+\fB\-s\fR, \fB\-\-size SIZE\fR
+The target, such as \fB500K\fR or \fB25M\fR. Use it to shrink many files to the same size.
+.TP
+\fB\-w\fR, \fB\-\-width PX\fR
+The largest width, for images and video. Narrower files keep their width.
+.TP
+\fB\-o\fR, \fB\-\-out NAME\fR
+Name the smaller copy yourself. Only with one file.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every setting it tries, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH IMAGES
+.PP
+\fBshrink\fR strips the metadata from every image and turns it the right way up first. The metadata holds the camera, the date and often the GPS position, and it can weigh 50 KB or more.
+.PP
+For JPEG, WebP, AVIF, HEIC and JPEG XL it then tries the qualities 85, 75, 65, 55 and 45 at full width, and keeps the highest one that fits. When even 45 is too big, it tries 85%, 70%, 55%, 40%, 30%, 20% and 10% of the width, with the same quality search at each one. PNG, GIF, TIFF and BMP have no quality setting, so only the width changes.
+.PP
+The result line says what it took, such as \fBquality 65, 55% wide\fR. The ending of the \fB\-o\fR name picks the format, so \fB\-o photo.webp\fR converts a JPEG to WebP on the way. \fB\-w 1920\fR caps the width before the search starts, which suits photos from a phone that are 4000 pixels wide.
+.SH VIDEO
+.PP
+\fBshrink\fR reads the length of the clip and works out the bitrate that fills the target. It keeps 3% back for the container and 96 kbit/s for the sound. Then ffmpeg encodes the clip twice. The first pass measures the clip and the second one spends the bits where the picture needs them. That makes the size land close to the target.
+.PP
+When the copy still comes out too big, \fBshrink\fR tries once more at a lower bitrate. When that fails too, it writes nothing.
+.TP
+\fB.mp4\fR, \fB.m4v\fR, \fB.mov\fR, \fB.mkv\fR
+Video: H.264, \fB\-preset medium\fR. Sound: AAC 96k
+.TP
+\fB.webm\fR
+Video: VP9. Sound: Opus 96k
+.TP
+anything else, such as \fB.avi\fR
+Video: H.264, and the copy ends in \fB.mp4\fR. Sound: AAC 96k
+.PP
+A clip with no sound stays silent. \fB\-w 1280\fR scales the video down as well, which looks better than a low bitrate at full size. Below 50 kbit/s for the picture the result is not worth watching, so \fBshrink\fR stops and says the target is too small for the length.
+.SH PDF
+.PP
+Ghostscript rewrites the PDF with one of its presets. \fBshrink\fR tries them in order and stops at the first that fits.
+.TP
+\fB/printer\fR
+Images inside: 300 dpi. Good for: Printing. Often no smaller for text.
+.TP
+\fB/ebook\fR
+Images inside: 150 dpi. Good for: Reading on screen.
+.TP
+\fB/screen\fR
+Images inside: 72 dpi. Good for: The smallest. Scans turn soft.
+.PP
+A PDF of plain text is mostly fonts, and no preset makes it much smaller. A scanned PDF is mostly images, and shrinks a lot.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBmagick\fR for images, to both ffmpeg passes for video and to \fBgs\fR for PDF:
+.PP
+.RS 4
+.nf
+$ shrink talk.mp4 25M -- -preset slow
+$ shrink photo.jpg 500K -- -sampling-factor 4:2:0
+$ shrink scan.pdf 2M -- -dColorImageResolution=100
+.fi
+.RE
+.PP
+\fB\-preset slow\fR takes longer and gives a better picture at the same size.
+.SH NEEDS
+.PP
+ImageMagick for images, ffmpeg for video and Ghostscript for PDF. You only need the one for the files you shrink. \fBshrink\fR uses \fBmagick\fR from ImageMagick 7, or \fBconvert\fR from ImageMagick 6.
+.TP
+Debian, Ubuntu
+Images: \fBimagemagick\fR. Video: \fBffmpeg\fR. PDF: \fBghostscript\fR
+.TP
+Fedora
+Images: \fBImageMagick\fR. Video: \fBffmpeg\-free\fR. PDF: \fBghostscript\fR
+.TP
+Arch
+Images: \fBimagemagick\fR. Video: \fBffmpeg\fR. PDF: \fBghostscript\fR
+.TP
+openSUSE
+Images: \fBImageMagick\fR. Video: \fBffmpeg\-7\fR. PDF: \fBghostscript\fR
+.TP
+Alpine
+Images: \fBimagemagick\fR. Video: \fBffmpeg\fR. PDF: \fBghostscript\fR
+.SH EXAMPLES
+.SS A photo for a form
+.PP
+.RS 4
+.nf
+$ shrink photo.jpg 500K
+photo.jpg -> photo-small.jpg (4.8MB -> 488KB, quality 75, 55% wide, 3.2s)
+.fi
+.RE
+.SS Every photo in a folder, no wider than 1920
+.PP
+.RS 4
+.nf
+$ shrink -s 1M -w 1920 *.jpg
+IMG_4410.jpg -> IMG_4410-small.jpg (5.1MB -> 702KB, quality 85, 0.8s)
+IMG_4411.jpg -> IMG_4411-small.jpg (4.6MB -> 655KB, quality 85, 0.8s)
+beach.jpg is already 610KB, which fits 1MB. Nothing written.
+.fi
+.RE
+.SS A screen recording for chat
+.PP
+.RS 4
+.nf
+$ shrink -v demo.mp4 25M
+shrink: demo.mp4: video, 3:10, 148MB
+shrink: bitrate: 25MB over 190s, less 96k for sound, is 974k
++ ffmpeg -nostdin -y -hide_banner -loglevel error -i demo.mp4 -c:v libx264 -preset medium -b:v 974k -pass 1 -passlogfile ./.shrink-Xq2c9L/pass -an -f null /dev/null
++ ffmpeg -nostdin -y -hide_banner -loglevel error -i demo.mp4 -c:v libx264 -preset medium -b:v 974k -pass 2 -passlogfile ./.shrink-Xq2c9L/pass -c:a aac -b:a 96k -movflags +faststart demo-small.mp4
+demo.mp4 -> demo-small.mp4 (148MB -> 24MB, 974k, 2 passes, 1m52s)
+.fi
+.RE
+.SS A scanned PDF
+.PP
+.RS 4
+.nf
+$ shrink scan.pdf 4K
+shrink: scan.pdf: /printer gives 10KB, trying the next
+scan.pdf -> scan-small.pdf (5.9KB -> 3.1KB, /ebook, 0.1s)
+.fi
+.RE
+.SS A target out of reach
+.PP
+.RS 4
+.nf
+$ shrink -v scan.pdf 1K
++ gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/printer -sOutputFile=./.shrink-cz0B8F/try.pdf scan.pdf
+shrink: scan.pdf: /printer gives 10KB, trying the next
++ gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -sOutputFile=./.shrink-cz0B8F/try.pdf scan.pdf
+shrink: scan.pdf: /ebook gives 3.1KB, trying the next
++ gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/screen -sOutputFile=./.shrink-cz0B8F/try.pdf scan.pdf
+shrink: scan.pdf: /screen gives 3.1KB, over 1KB
+shrink: wrote nothing. The smallest Ghostscript gets for scan.pdf is 3.1KB, with /ebook
+.fi
+.RE
+.SS Already small enough
+.PP
+.RS 4
+.nf
+$ shrink scan.pdf 1M
+scan.pdf is already 5.9KB, which fits 1MB. Nothing written.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBshrink: wrote nothing. The smallest ImageMagick gets for X is S, at 10% wide\fR : The target is too small for that image even at a tenth of its width. Try a larger target, or another format such as WebP with \fB\-o photo.webp\fR.
+.PP
+\fBshrink: 1MB is too small for 9:42 of video, it leaves under 50k a second for the picture\fR : Cut the clip first, or ask for more room. As a guide, 1 minute of 720p video looks fine at about 10 MB.
+.PP
+\fBshrink: X is not an image, a video or a PDF\fR : The ending is unknown and \fBfile\fR did not recognise the content either.
+.PP
+The copy of a PNG screenshot is blurry : PNG has no quality setting, so \fBshrink\fR had to make it narrower. Try \fB\-o shot.webp\fR or \fB\-o shot.jpg\fR. Both come out much smaller at full width.
+.SH EXIT STATUS
+.TP
+0
+Every file fits, either as a new copy or as it was.
+.TP
+1
+It failed, or a file could not reach the target. Nothing was written for that file.
+.TP
+2
+Bad usage, such as no target size.
+.TP
+3
+The tool for that kind of file is missing.
+.TP
+4
+Refused. The \fB\-o\fR name is taken.
+.SH SEE ALSO
+.PP
+\fBtogif\fR, \fBmagick(1)\fR, \fBffmpeg(1)\fR, \fBgs(1)\fR
