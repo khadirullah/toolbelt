@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# temps: CPU, drive and board temperatures, and fan speed.
+set -uo pipefail
+TB_CMD=temps
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: temps [options] [-- sensors options]
+
+CPU, drive and board temperatures, and fan speed.
+
+Options:
+  -a, --all           every raw sensor, with its hwmon name and path
+  -w, --watch [SEC]   refresh every SEC seconds, 2 by default, with min
+                      and max columns, Ctrl+C stops it
+  -q, --quiet         one line, the hottest CPU reading
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- run sensors from lm-sensors with them, such as -f.
+
+Examples:
+  temps
+  temps -w
+  temps -a
+  temps -- -f
+
+Needs: nothing, it reads /sys/class/hwmon. sensors for options after --.
+See man temps.
+Exit: 0 ok, 1 no sensor found, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# Tests point this at a fake tree with sys/class/hwmon in it.
+ROOT=${TB_ROOTFS:-}
+
+# Readings this close to the high mark, in degrees, say hot.
+HOT_MARGIN=5
+
+# The part a hwmon or thermal zone name belongs to.
+group_of() {
+    case $1 in
+        coretemp|k10temp|zenpower|cpu_thermal|cpu-thermal|cpu*thermal|soc_thermal|x86_pkg_temp|cpu) echo cpu ;;
+        nvme) echo nvme ;;
+        drivetemp) echo drive ;;
+        amdgpu|radeon|nouveau|i915|xe|gpu*) echo gpu ;;
+        iwlwifi*|ath*|mt7*|brcm*|rtw*) echo wifi ;;
+        acpitz|pch_*|nct*|it87*|asus*|dell_smm|thinkpad|sch5*|w83*|f71*|acpi*) echo board ;;
+        *) echo other ;;
+    esac
+}
+
+# The first line of a small sysfs file, or nothing.
+val() {
+    local v=""
+    [[ -r $1 ]] && read -r v 2>/dev/null <"$1"
+    printf '%s' "$v"
+}
+
+# Millidegrees as whole degrees, rounded.
+deg() { echo $(( ($1 + 500) / 1000 )); }
+
+# The drive name behind an nvme or drivetemp hwmon, such as nvme0n1 or sda.
+device_name() {
+    local h=$1 d
+    for d in "$h"/device/nvme*n[0-9]* "$h"/device/block/*; do
+        [[ -e $d ]] && { basename "$d"; return; }
+    done
+    d=$(readlink -f "$h/device" 2>/dev/null) && [[ $(basename "$d") == nvme[0-9]* ]] && { basename "$d"; return; }
+    return 1
+}
+
+# Every reading, one per line: group, row name, value, high mark, unit,
+# hwmon path, hwmon name, label. Temperatures are whole degrees.
+read_sensors() {
+    local h name grp f base label v high crit n=0 dev rowname
+    for h in "$ROOT"/sys/class/hwmon/hwmon*; do
+        [[ -d $h ]] || continue
+        name=$(val "$h/name")
+        [[ -n $name ]] || continue
+        grp=$(group_of "$name")
+        for f in "$h"/temp*_input "$h"/fan*_input; do
+            [[ -r $f ]] || continue
+            v=$(val "$f")
+            [[ $v =~ ^-?[0-9]+$ ]] || continue
+            base=${f%_input}
+            label=$(val "${base}_label")
+            if [[ $f == */fan* ]]; then
+                printf 'fan\037%s\037%s\037\037rpm\037%s\037%s\037%s\n' "${label:-${base##*/}}" "$v" "${h##*/}/${f##*/}" "$name" "$label"
+                n=$(( n + 1 ))
+                continue
+            fi
+            high=$(val "${base}_max")
+            crit=$(val "${base}_crit")
+            [[ -z $high && -n $crit ]] && high=$crit
+            [[ -n $high ]] && high=$(deg "$high")
+            # A high mark of 0 or over 200 is a driver placeholder.
+            [[ -n $high ]] && (( high <= 0 || high > 200 )) && high=""
+            rowname=${label:-$name}
+            case $grp:$label in
+                cpu:Package\ id\ 0|cpu:Tctl) rowname=package ;;
+                cpu:Package\ id\ *) rowname="package ${label#Package id }" ;;
+                cpu:Core\ *) rowname=cores ;;
+                nvme:Composite|nvme:|drive:*)
+                    dev=$(device_name "$h") && rowname=$dev ;;
+            esac
+            printf '%s\037%s\037%s\037%s\037C\037%s\037%s\037%s\n' "$grp" "$rowname" "$(deg "$v")" "$high" \
+                "${h##*/}/${f##*/}" "$name" "$label"
+            n=$(( n + 1 ))
+        done
+    done
+    (( n )) && return 0
+    # No hwmon temperatures. Thermal zones are the fallback, common on ARM boards.
+    local z type i t
+    for z in "$ROOT"/sys/class/thermal/thermal_zone*; do
+        [[ -d $z ]] || continue
+        type=$(val "$z/type")
+        v=$(val "$z/temp")
+        [[ $v =~ ^-?[0-9]+$ ]] || continue
+        high=""
+        for t in "$z"/trip_point_*_type; do
+            [[ -r $t ]] || continue
+            if [[ $(val "$t") == critical ]]; then
+                i=${t%_type}
+                high=$(val "${i}_temp")
+                [[ -n $high ]] && high=$(deg "$high")
+            fi
+        done
+        printf '%s\037%s\037%s\037%s\037C\037%s\037%s\037\n' "$(group_of "$type")" "$type" "$(deg "$v")" "$high" "${z##*/}" "$type"
+    done
+}
+
+# Group sensor lines into table rows: several cores become one row with
+# many values, and sensors that only repeat a drive reading are dropped.
+rows() {
+    awk -F '\037' -v all="$1" '
+    {
+        # Extra NVMe sensors, such as "Sensor 1", only show with -a.
+        if ($1 == "nvme" && $8 != "" && $8 != "Composite" && !all) next
+        k = $1 SUBSEP $2
+        if (!(k in val)) { order[++n] = k; g[k] = $1; nm[k] = $2; val[k] = $3; hi[k] = $4; u[k] = $5 }
+        else { val[k] = val[k] " " $3; if ($4 > hi[k]) hi[k] = $4 }
+    }
+    END { for (i = 1; i <= n; i++) { k = order[i]; printf "%s\037%s\037%s\037%s\037%s\n", g[k], nm[k], val[k], hi[k], u[k] } }'
+}
+
+# The biggest of a list of numbers.
+max_of() {
+    local m=$1 x
+    for x in "$@"; do (( x > m )) && m=$x; done
+    echo "$m"
+}
+
+# A reading with its unit: "71 C" or "3,810 rpm".
+fmt() {
+    if [[ $2 == rpm ]]; then echo "$(tb_commas "$1") rpm"; else echo "$1 C"; fi
+}
+
+show_table() {
+    local grp name vals high unit v out top
+    while IFS=$'\037' read -r grp name vals high unit; do
+        out=""
+        for v in $vals; do
+            out+="$(printf '%-6s' "$(fmt "$v" "$unit")")"
+        done
+        out=${out%"${out##*[! ]}"}
+        [[ $unit == rpm ]] && out=$(fmt "$vals" rpm)
+        printf '%-8s %-12s %s' "$grp" "$name" "$out"
+        if [[ -n $high ]]; then
+            printf '  high %s C' "$high"
+            top=$(max_of $vals)
+            (( top >= high - HOT_MARGIN )) && printf '  %shot%s' "$C_RED" "$C_OFF"
+        fi
+        echo
+    done
+}
+
+show_all() {
+    local grp name v high unit path hname label line
+    printf '%s%-22s %-12s %-16s %9s  %s%s\n' "$C_BOLD" SENSOR DRIVER LABEL VALUE HIGH "$C_OFF"
+    while IFS=$'\037' read -r grp name v high unit path hname label; do
+        printf -v line '%-22s %-12s %-16s %9s  %s' "$path" "$hname" "${label:--}" "$(fmt "$v" "$unit")" "${high:+$high C}"
+        printf '%s\n' "${line%"${line##*[! ]}"}"
+    done
+}
+
+# The hottest CPU reading, or the hottest reading of all when there is no CPU sensor.
+show_quiet() {
+    awk -F '\037' '$5 == "C" {
+        if ($1 == "cpu" && (!cpu || $3 > cmax)) { cpu = 1; cmax = $3 }
+        if (amax == "" || $3 > amax) { amax = $3; ag = $1 }
+    }
+    END {
+        if (cpu) print "cpu " cmax " C"
+        else if (amax != "") print ag " " amax " C"
+    }'
+}
+
+# ---------------------------------------------------------------- watch
+
+declare -A W_MIN=() W_MAX=() W_HOT=() W_HIGH=() W_UNIT=()
+W_ORDER=()
+W_READS=0
+
+watch_summary() {
+    local k hot=0
+    (( W_READS )) || return 0
+    for k in ${W_ORDER[@]+"${W_ORDER[@]}"}; do
+        (( ${W_HOT[$k]:-0} )) || continue
+        echo "$k went within $HOT_MARGIN C of its high mark in ${W_HOT[$k]} of $W_READS readings, the most was ${W_MAX[$k]} C."
+        hot=1
+    done
+    if (( ! hot )); then
+        local best="" bk=""
+        for k in ${W_ORDER[@]+"${W_ORDER[@]}"}; do
+            [[ ${W_UNIT[$k]} == C ]] || continue
+            if [[ -z $best ]] || (( W_MAX[$k] > best )); then best=${W_MAX[$k]}; bk=$k; fi
+        done
+        [[ -n $bk ]] && echo "Nothing got hot. The most was $best C, $bk."
+    fi
+}
+
+watch_loop() {
+    local grp name vals high unit v k line
+    trap 'echo; watch_summary; exit 0' INT
+    trap 'watch_summary; exit 143' TERM
+    # A terminal redraws the table in place, which would wipe a hint printed once.
+    [[ -t 1 ]] || tb_info "Ctrl+C stops it."
+    while true; do
+        local table=""
+        table+=$(printf '%s%-16s %9s %9s %9s%s' "$C_BOLD" "" NOW MIN MAX "$C_OFF")$'\n'
+        while IFS=$'\037' read -r grp name vals high unit; do
+            v=$(max_of $vals)
+            if [[ $grp == fan ]]; then k="fan $name"; else k="$grp $name"; fi
+            [[ $grp == cpu && $name == cores ]] && k="cpu cores"
+            if [[ -z ${W_UNIT[$k]:-} ]]; then
+                W_ORDER+=("$k")
+                W_UNIT[$k]=$unit
+                W_MIN[$k]=$v
+                W_MAX[$k]=$v
+            fi
+            (( v < W_MIN[$k] )) && W_MIN[$k]=$v
+            (( v > W_MAX[$k] )) && W_MAX[$k]=$v
+            W_HIGH[$k]=$high
+            line=$(printf '%-16s %9s %9s %9s' "$k" "$(fmt "$v" "$unit")" "$(fmt "${W_MIN[$k]}" "$unit")" "$(fmt "${W_MAX[$k]}" "$unit")")
+            if [[ -n $high ]] && (( v >= high - HOT_MARGIN )); then
+                W_HOT[$k]=$(( ${W_HOT[$k]:-0} + 1 ))
+                line+="   ${C_RED}hot${C_OFF}"
+            fi
+            table+=$line$'\n'
+        done < <(read_sensors | rows 0)
+        W_READS=$(( W_READS + 1 ))
+        [[ -t 1 ]] && printf '\e[H\e[2J'
+        printf '%s' "$table"
+        if [[ -t 1 ]]; then tb_info "Ctrl+C stops it."; else echo; fi
+        sleep "$interval" || return 1
+    done
+}
+
+main() {
+    local data
+    if (( ${#TB_PASS[@]} )); then
+        tb_need sensors
+        tb_run sensors "${TB_PASS[@]}"
+        return
+    fi
+    tb_say "reading $ROOT/sys/class/hwmon"
+    data=$(read_sensors)
+    if [[ -z $data ]]; then
+        tb_die 1 "no sensors found. Virtual machines usually have none."
+    fi
+    if (( watch )); then
+        watch_loop
+    elif (( all )); then
+        show_all <<<"$data"
+    elif (( TB_QUIET )); then
+        show_quiet <<<"$data"
+    else
+        rows 0 <<<"$data" | show_table
+    fi
+}
+
+all=0
+watch=0
+interval=2
+tb_expand "w" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -a|--all)   all=1 ;;
+        -w|--watch) watch=1
+                    # The number of seconds is optional.
+                    if [[ ${2:-} =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                        interval=$2
+                        shift
+                    fi
+                    [[ $interval =~ ^0*(\.0*)?$ ]] && tb_usage_error "-w needs more than 0 seconds"
+                    ;;
+        --)         shift; TB_PASS=("$@"); break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          tb_usage_error "temps takes no names, see --help" ;;
+    esac
+    shift
+done
+tb_color_stdout
+
+main
+exit $?

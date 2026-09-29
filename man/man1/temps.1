@@ -1,0 +1,218 @@
+.TH "TEMPS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+temps \- cPU, drive and board temperatures, and fan speed
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+temps [options] [-- sensors options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBtemps\fR shows how hot the parts of the machine are, one row per part. The CPU, each NVMe or SATA drive, the graphics card, the Wi\-Fi card and the mainboard each get a row, with the reading and the high mark the driver reports for it. Fans show their speed.
+.PP
+It reads the kernel's hardware monitor files in \fB/sys/class/hwmon\fR directly, so it needs no extra package, no root and no setup. The \fBsensors\fR command from lm\-sensors reads the same files. \fBtemps\fR groups them by part and leaves out the noise, such as the dozen identical readings a CPU with many cores reports.
+.PP
+\fBtemps\fR only reads. It never changes a fan speed, a power limit or any other setting.
+.SS How it names each row
+.PP
+The first column says what the part is. The second column names the sensor.
+.TP
+\fBcpu\fR
+Drivers: coretemp, k10temp, zenpower, cpu_thermal. What it measures: The processor. \fBpackage\fR is the whole chip, \fBcores\fR lists each core.
+.TP
+\fBnvme\fR
+Drivers: nvme. What it measures: An NVMe SSD, named after its device, such as \fBnvme0n1\fR.
+.TP
+\fBdrive\fR
+Drivers: drivetemp. What it measures: A SATA drive, named after its device, such as \fBsda\fR. The drivetemp module must be loaded.
+.TP
+\fBgpu\fR
+Drivers: amdgpu, radeon, nouveau, i915, xe. What it measures: The graphics chip.
+.TP
+\fBwifi\fR
+Drivers: iwlwifi, ath, mt7, rtw. What it measures: The Wi\-Fi card.
+.TP
+\fBboard\fR
+Drivers: acpitz, nct, it87, thinkpad, dell_smm, asus. What it measures: Mainboard and firmware sensors.
+.TP
+\fBfan\fR
+Drivers: any driver with a fan input. What it measures: Fan speed in revolutions per minute.
+.TP
+\fBother\fR
+Drivers: anything else. What it measures: Sensors \fBtemps\fR does not know, shown with their driver name.
+.PP
+On Intel CPUs, \fBPackage id 0\fR becomes \fBpackage\fR. On AMD CPUs, \fBTctl\fR becomes \fBpackage\fR. All \fBCore N\fR readings go on one \fBcores\fR row, so an 8\-core CPU takes one line, not 8.
+.PP
+An NVMe drive often reports two or three sensors. \fBtemps\fR shows the main one, called Composite, and keeps the rest for \fB\-a\fR.
+.SS The high mark and hot
+.PP
+Next to a reading, \fBhigh 100 C\fR is the temperature the driver says the part should stay under. \fBtemps\fR takes the driver's max value, or its critical value when there is no max. A driver that reports 0 or more than 200 as its limit has not set one, so \fBtemps\fR shows none.
+.PP
+A reading within 5 C of its high mark gets the word \fBhot\fR. A CPU that reaches its high mark slows itself down to cool off, which is why a hot laptop feels slow. A drive at its high mark slows down too, and wears faster.
+.SS No hwmon sensors
+.PP
+Some machines, such as many ARM boards, have no hwmon sensors but do have thermal zones in \fB/sys/class/thermal\fR. \fBtemps\fR falls back to those, and uses each zone's critical trip point as the high mark.
+.PP
+Virtual machines usually have neither, because the host keeps the hardware to itself. \fBtemps\fR then says \fBno sensors found\fR and exits 1.
+.SS Watching
+.PP
+\fB\-w\fR refreshes the table every 2 seconds, or every SEC seconds. It adds MIN and MAX columns, so you can start a game, a build or a video call and see how hot things got. In a terminal the table redraws in place, with the reminder \fBCtrl+C stops it.\fR under it. When the output goes to a file, each refresh is appended, with a blank line between them, and the reminder goes to stderr once at the start.
+.PP
+Ctrl+C stops it and prints one line for each part that got hot, with how often and how hot. When nothing got hot, it names the hottest reading instead.
+.SH OPTIONS
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Show every raw sensor, with its hwmon file, driver, label, value and high mark.
+.TP
+\fB\-w\fR, \fB\-\-watch [SEC]\fR
+Refresh every SEC seconds, 2 by default, with MIN and MAX columns. SEC can have a decimal point, such as \fB0.5\fR. Ctrl+C stops it.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+One line, the hottest CPU reading, such as \fBcpu 71 C\fR. Without a CPU sensor, the hottest reading of all.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR skip the table and run \fBsensors\fR from lm\-sensors with those options. Use it for what only lm\-sensors does, such as Fahrenheit or its own config file.
+.PP
+.RS 4
+.nf
+temps -- -f
+temps -- -u
+temps -- -j
+.fi
+.RE
+.PP
+This needs the lm\-sensors package. The table itself does not.
+.SH PER\-DISTRO NOTES
+.IP \(bu 2
+\fBAll distros.\fR The table works everywhere the kernel has hwmon drivers, which is every desktop distro.
+.IP \(bu 2
+\fBSATA drive temperatures.\fR These need the \fBdrivetemp\fR kernel module, which most distros build but do not load. Run \fBsudo modprobe drivetemp\fR to try it, and add \fBdrivetemp\fR to a file in \fB/etc/modules\-load.d/\fR to load it at every boot.
+.IP \(bu 2
+\fBMainboard sensors.\fR Chips such as nct6775 and it87 need their module loaded. \fBsudo sensors\-detect\fR from lm\-sensors finds and loads them.
+.IP \(bu 2
+\fBlm\-sensors packages.\fR \fBlm\-sensors\fR on Debian, Ubuntu and Alpine, \fBlm_sensors\fR on Fedora and Arch, \fBsensors\fR on openSUSE.
+.IP \(bu 2
+\fBRaspberry Pi.\fR The CPU reports through a thermal zone called \fBcpu\-thermal\fR.
+.SH NEEDS
+.IP \(bu 2
+Nothing for the table. It reads \fB/sys/class/hwmon\fR and \fB/sys/class/thermal\fR.
+.IP \(bu 2
+\fBsensors\fR, from lm\-sensors, for options after \fB\-\-\fR.
+.SH EXAMPLES
+.SS A laptop
+.PP
+.RS 4
+.nf
+$ temps
+board    acpitz       45 C  high 120 C
+nvme     nvme0n1      39 C  high 82 C
+cpu      package      71 C  high 100 C
+cpu      cores        69 C  68 C  high 100 C
+fan      fan1         3,810 rpm
+.fi
+.RE
+.PP
+The CPU is at 71 C with a limit of 100 C. The fan runs, and nothing is hot.
+.SS A CPU near its limit
+.PP
+.RS 4
+.nf
+$ temps
+board    acpitz       45 C  high 120 C
+nvme     nvme0n1      39 C  high 82 C
+cpu      package      97 C  high 100 C  hot
+cpu      cores        69 C  68 C  high 100 C
+fan      fan1         3,810 rpm
+.fi
+.RE
+.PP
+At 97 C the CPU slows itself down. Check that the vents are clear and the fan is not full of dust.
+.SS One number for a status bar
+.PP
+.RS 4
+.nf
+$ temps -q
+cpu 71 C
+.fi
+.RE
+.SS Every raw sensor
+.PP
+.RS 4
+.nf
+$ temps -a
+SENSOR                 DRIVER       LABEL                VALUE  HIGH
+hwmon0/temp1_input     acpitz       -                     45 C  120 C
+hwmon1/temp1_input     nvme         Composite             39 C  82 C
+hwmon1/temp2_input     nvme         Sensor 1              39 C
+hwmon2/temp1_input     coretemp     Package id 0          71 C  100 C
+hwmon2/temp2_input     coretemp     Core 0                69 C  100 C
+hwmon2/temp3_input     coretemp     Core 1                68 C  100 C
+hwmon3/fan1_input      thinkpad     -                3,810 rpm
+.fi
+.RE
+.PP
+The SENSOR column is the file under \fB/sys/class/hwmon\fR. Read it yourself with \fBcat /sys/class/hwmon/hwmon2/temp1_input\fR, which gives millidegrees, 71000 for 71 C.
+.SS Watch during a heavy job
+.PP
+.RS 4
+.nf
+$ temps -w 1
+                       NOW       MIN       MAX
+board acpitz          45 C      45 C      45 C
+nvme nvme0n1          39 C      39 C      39 C
+cpu package           74 C      71 C      96 C
+cpu cores             88 C      69 C      88 C
+fan fan1         3,810 rpm 3,810 rpm 3,810 rpm
+Ctrl+C stops it.
+^C
+cpu package went within 5 C of its high mark in 1 of 4 readings, the most was 96 C.
+.fi
+.RE
+.PP
+The CPU touched 96 C once and came back down. One short peak is normal under load. Many readings near the limit mean the cooling cannot keep up.
+.SS A virtual machine
+.PP
+.RS 4
+.nf
+$ temps
+temps: no sensors found. Virtual machines usually have none.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB`temps: no sensors found.`\fR On a virtual machine or in a container this is expected. On real hardware, the driver for the sensor chip is not loaded. Run \fBsudo sensors\-detect\fR from lm\-sensors and let it load the modules it finds.
+.PP
+\fBNo row for a SATA drive.\fR Load the drivetemp module, as in the per\-distro notes above. NVMe drives need nothing extra.
+.PP
+\fBA reading of 0 C or 127 C that never changes.\fR The sensor is not wired up on this board. It shows in \fB\-a\fR under its driver name. Ignore it, or blacklist the driver if it bothers you.
+.PP
+\fB`temps: needs sensors.`\fR Options after \fB\-\-\fR need lm\-sensors. The message shows the install command. The table works without it.
+.PP
+\fBThe fan shows 0 rpm.\fR Many laptops stop the fan when the CPU is cool. Watch with \fB\-w\fR under load and the number should rise.
+.SH EXIT STATUS
+.TP
+0
+It worked. With \fB\-w\fR, stopped with Ctrl+C.
+.TP
+1
+No sensor found.
+.TP
+2
+Bad usage, such as a name, or \fB\-w 0\fR.
+.TP
+3
+sensors is missing, for options after \fB\-\-\fR.
+.TP
+143
+\fB\-w\fR was stopped by a TERM signal, such as from \fBkill\fR or \fBtimeout\fR. The summary still prints.
+.SH SEE ALSO
+.PP
+\fBdisks\fR, \fBmem\fR, \fBsysinfo\fR, \fBsensors(1)\fR, \fBsensors\-detect(8)\fR
