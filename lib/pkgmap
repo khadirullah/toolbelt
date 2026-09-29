@@ -124,6 +124,7 @@ paccache       -                    -                    pacman-contrib       - 
 lsblk          util-linux           util-linux           util-linux           util-linux           lsblk
 findmnt        util-linux           util-linux           util-linux           util-linux           findmnt
 systemd-analyze systemd             systemd              systemd              systemd              -
+crontab        cron                 cronie               cronie               cronie               busybox
 gsettings      libglib2.0-bin       glib2                glib2                glib2-tools          glib
 mokutil        mokutil              mokutil              mokutil              mokutil              -
 getenforce     selinux-utils        libselinux-utils     -                    selinux-tools        -

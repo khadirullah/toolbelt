@@ -1,0 +1,355 @@
+.TH "SCHEDULES" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+schedules \- cron jobs and systemd timers in one table
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+schedules [--user | --system] [-a] [--last]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBschedules\fR lists everything that runs on its own on this machine, sorted by when it runs next. A Linux machine has two places for such jobs. Cron is the old one, a table of times and commands. systemd timers are the newer one, a \fB.timer\fR unit that starts a \fB.service\fR unit. Most distros use both, so a job you are looking for can hide in either. \fBschedules\fR puts them in one table, soonest first.
+.PP
+With \fB\-\-last\fR it shows the other side, when each job last ran, how long it took and whether it worked. A backup timer that has failed every night for a month shows up here.
+.PP
+\fBschedules\fR only reads. It never edits a crontab, never starts, stops or enables a timer, and never needs root.
+.SS The table
+.TP
+\fBNEXT\fR
+When the job runs next, in local time. \fB16:40 today\fR for today, \fB00:00 Wed\fR within the next 6 days, \fB09:00 Oct 12\fR after that. \fBat boot\fR for a cron \fB@reboot\fR line.
+.TP
+\fBLEFT\fR
+How long until then, such as \fB38m\fR, \fB5h 28m\fR or \fB4d 9h\fR.
+.TP
+\fBJOB\fR
+The timer name without \fB.timer\fR, or the cron command.
+.TP
+\fBFROM\fR
+\fBtimer\fR for a system timer, \fBtimer, user\fR for one of yours, or \fBcron\fR and the file the line came from.
+.PP
+The last line counts the jobs. When a timer's service failed the last time it ran, the count says so and points at \fBschedules \-\-last\fR.
+.SS Where the jobs come from
+.IP \(bu 2
+\fBSystem timers.\fR \fBsystemctl list\-timers\fR, which lists the active timers of the whole machine.
+.IP \(bu 2
+\fBYour timers.\fR \fBsystemctl \-\-user list\-timers\fR, the timers of your own user session.
+.IP \(bu 2
+\fB`/etc/crontab`.\fR The main system cron table. Each line has a user field after the five time fields, which \fBschedules\fR skips.
+.IP \(bu 2
+\fB`/etc/cron.d/`.\fR Cron tables that packages drop in, in the same format as \fB/etc/crontab\fR. FROM names the file, such as \fBcron, e2scrub_all\fR.
+.IP \(bu 2
+\fBYour crontab.\fR \fBcrontab \-l\fR, the table you edit with \fBcrontab \-e\fR. FROM names you, such as \fBcron, test\fR.
+.PP
+\fBschedules\fR does not read the crontabs of other users, or \fB/etc/anacrontab\fR. See the troubleshooting section.
+.SS Job names
+.PP
+A timer shows its own name, such as \fBlogrotate\fR for \fBlogrotate.timer\fR. A cron line shows its command, cut to 40 characters with \fB...\fR when it is longer. Your home folder shows as \fB~\fR, so \fB/home/test/bin/sync\-notes.sh\fR reads \fB~/bin/sync\-notes.sh\fR.
+.PP
+A cron line that runs a whole folder with \fBrun\-parts\fR, such as \fB17 * * * * root cd / && run\-parts \-\-report /etc/cron.hourly\fR, shows as \fB/etc/cron.hourly/*\fR. The scripts in that folder are the real jobs, and \fBls /etc/cron.hourly\fR lists them.
+.SS How the next cron run is worked out
+.PP
+cron itself does not say when a line runs next, so \fBschedules\fR works it out from the five time fields, the same way cron reads them.
+.TP
+minute
+0 to 59
+.TP
+hour
+0 to 23
+.TP
+day of month
+1 to 31
+.TP
+month
+1 to 12, or \fBjan\fR to \fBdec\fR
+.TP
+day of week
+0 to 7, where 0 and 7 are both Sunday, or \fBsun\fR to \fBsat\fR
+.PP
+Each field can be \fB*\fR, a number, a list such as \fB1,15\fR, a range such as \fBmon\-fri\fR, and a step such as \fB*/15\fR or \fB0\-30/10\fR. The short forms work too. \fB@hourly\fR, \fB@daily\fR, \fB@midnight\fR, \fB@weekly\fR, \fB@monthly\fR, \fB@yearly\fR and \fB@annually\fR become their five\-field lines, and \fB@reboot\fR shows as \fBat boot\fR.
+.PP
+The day fields follow one old cron rule that surprises people. When both the day of month and the day of week are set, the line runs when either one matches, not when both do. \fB0 9 1 * mon\fR runs at 9:00 on the 1st of each month and also on every Monday. When one of the two starts with \fB*\fR, only the other one counts.
+.PP
+\fBschedules\fR looks up to 5 years ahead and knows leap years, so \fB30 2 29 2 *\fR shows the next February 29. A line that can never run, such as one for February 31, shows \fB\-\fR in NEXT and LEFT and sorts last.
+.PP
+Times are local time, the same clock cron uses. A \fBCRON_TZ\fR line in a crontab is not read.
+.SS Files cron skips in /etc/cron.d
+.PP
+cron ignores any file in \fB/etc/cron.d\fR whose name has a dot or ends with \fB~\fR. Package managers leave files such as \fBanacron.dpkg\-old\fR, \fBsysstat.rpmsave\fR and \fBbackup~\fR behind, and cron never runs them. \fBschedules\fR skips the same files, so the table shows what cron runs, not every file in the folder.
+.PP
+A file in \fB/etc/cron.d\fR that only root can read is left out, with a line on stderr that names it.
+.SS Is cron running
+.PP
+A cron line does nothing when no cron daemon runs. When the table has system cron jobs, \fBschedules\fR asks systemd whether \fBcron.service\fR, \fBcrond.service\fR or \fBcronie.service\fR is active. When none is, it warns first.
+.PP
+.RS 4
+.nf
+schedules: no cron daemon is running, so the cron jobs here do not run
+.fi
+.RE
+.PP
+The jobs still show, so you can see what would run once the daemon is back.
+.SS Last runs
+.PP
+\fB\-\-last\fR swaps NEXT and LEFT for LAST RUN, TOOK and RESULT.
+.PP
+For a timer, systemd keeps the facts. LAST RUN is when the timer last fired. TOOK is how long the service ran. RESULT is one of these.
+.TP
+\fBok\fR
+The service ran and exited 0.
+.TP
+\fBfailed, exit 1\fR
+The service exited with that code.
+.TP
+\fBfailed, timeout\fR
+The service failed for another reason, which systemd names, such as \fBtimeout\fR, \fBsignal\fR or \fBcore\-dump\fR.
+.TP
+\fBrunning\fR
+The service is running now.
+.TP
+\fBearlier boot\fR
+The timer fired in an earlier boot. systemd counts run times from the start of each boot, so it has no result or time for it.
+.TP
+\fBnever ran\fR
+The timer has never fired.
+.PP
+For cron, there is much less to know. cron keeps no exit code and no run time, only a journal line each time it starts a command. \fBschedules\fR reads the cron lines of the last 31 days from the journal. A job it finds says \fBran\fR, with the time, and one it does not find says \fBno record\fR. After the table, a line on stderr says so.
+.PP
+.RS 4
+.nf
+cron keeps no exit code, so cron jobs only say that they ran. System cron lines in the journal need the systemd-journal group.
+.fi
+.RE
+.PP
+As a normal user outside the \fBsystemd\-journal\fR group, the journal shows only your own cron lines, so every system cron job says \fBno record\fR. Run it with \fBsudo\fR or join the group to see them.
+.SH OPTIONS
+.TP
+\fB\-\-user\fR
+Only your timers and your crontab.
+.TP
+\fB\-\-system\fR
+Only the system timers, \fB/etc/crontab\fR and \fB/etc/cron.d\fR.
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Include timers that are loaded but not active. These have no next run, so they sort last. It changes nothing for cron.
+.TP
+\fB\-\-last\fR
+Show when each job last ran, how long it took and the result, instead of the next run.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the table, without the count line or the cron note.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and each command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-\-user\fR and \fB\-\-system\fR do not go together. Without either, \fBschedules\fR shows both.
+.SH PER\-DISTRO NOTES
+.IP \(bu 2
+\fBDebian and Ubuntu.\fR The \fBcron\fR package runs as \fBcron.service\fR. \fB/etc/crontab\fR runs the \fBcron.hourly\fR, \fBcron.daily\fR, \fBcron.weekly\fR and \fBcron.monthly\fR folders through \fBrun\-parts\fR, so they show as \fB/etc/cron.daily/*\fR and so on. The daily, weekly and monthly lines first run \fBtest \-x /usr/sbin/anacron\fR, and step aside when anacron is installed, because then anacron runs those folders. Most daily work, such as \fBapt\-daily\fR and \fBlogrotate\fR, has moved to timers.
+.IP \(bu 2
+\fBFedora, RHEL and CentOS Stream.\fR The \fBcronie\fR package runs as \fBcrond.service\fR. \fB/etc/crontab\fR is empty, and \fB/etc/cron.d/0hourly\fR runs \fB/etc/cron.hourly\fR, which shows as \fB/etc/cron.hourly/*\fR. The daily, weekly and monthly folders run from \fB/etc/anacrontab\fR, which \fBschedules\fR does not read.
+.IP \(bu 2
+\fBArch.\fR No cron comes with the base system, so there are only timers. Install \fBcronie\fR and enable \fBcronie.service\fR if you want cron.
+.IP \(bu 2
+\fBopenSUSE.\fR \fBcronie\fR runs as \fBcron.service\fR. Many packages ship timers instead of cron files.
+.IP \(bu 2
+\fBAlpine.\fR There is no systemd, so \fBschedules\fR says \fBno systemctl here, so only cron jobs\fR and lists your crontab. Run it as root to see root's crontab, which runs the \fB/etc/periodic\fR folders. It cannot check whether crond runs, so it gives no warning about it.
+.IP \(bu 2
+\fBOlder systemd.\fR The timer list is read as JSON. The systemd in RHEL 8 and other older releases cannot print it that way, so the timers may be missing from the table there. \fBsystemctl list\-timers\fR still lists them.
+.SH NEEDS
+.IP \(bu 2
+\fBsystemctl\fR, part of systemd, for timers. Without it, \fBschedules\fR lists the cron jobs only.
+.IP \(bu 2
+\fBcrontab\fR, from cron or cronie, for your own crontab. Optional.
+.IP \(bu 2
+\fBjournalctl\fR, part of systemd, for the cron lines in \fB\-\-last\fR. Optional.
+.SH EXAMPLES
+.SS A Debian virtual machine
+.PP
+.RS 4
+.nf
+$ schedules
+NEXT           LEFT      JOB                                       FROM
+18:17 today    22m       /etc/cron.hourly/*                        cron, crontab
+18:26 today    31m       fwupd-refresh                             timer
+18:30 today    35m       if [ -x /etc/init.d/anacron ] && ! [ ...  cron, anacron
+18:31 today    37m       anacron                                   timer
+20:16 today    2h 22m    apt-daily                                 timer
+00:00 Wed      6h 5m     dpkg-db-backup                            timer
+00:31 Wed      6h 37m    systemd-tmpfiles-clean                    timer
+00:48 Wed      6h 54m    logrotate                                 timer
+03:10 Wed      9h 15m    test -e /run/systemd/system || SERVIC...  cron, e2scrub_all
+03:11 Wed      9h 17m    man-db                                    timer
+06:03 Wed      12h 8m    apt-daily-upgrade                         timer
+06:25 Wed      12h 30m   /etc/cron.daily/*                         cron, crontab
+06:52 Thu      1d 12h    /etc/cron.monthly/*                       cron, crontab
+03:10 Sun      4d 9h     e2scrub_all                               timer
+03:30 Sun      4d 9h     test -e /run/systemd/system || SERVIC...  cron, e2scrub_all
+06:47 Sun      4d 12h    /etc/cron.weekly/*                        cron, crontab
+00:36 Mon      5d 6h     fstrim                                    timer
+17 jobs.
+.fi
+.RE
+.PP
+Two of the cron lines only run when systemd is not PID 1. They start with \fBtest \-e /run/systemd/system ||\fR, so on this machine they exit at once and the \fBe2scrub_all\fR timer does the work. anacron is installed, so the daily, weekly and monthly cron lines step aside too, and the \fBanacron\fR timer runs those folders. The monthly line would run on October 1, a Thursday.
+.SS What ran, on the same machine
+.PP
+.RS 4
+.nf
+$ schedules --last
+JOB                                       LAST RUN       TOOK     RESULT
+/etc/cron.hourly/*                        -              -        no record
+fwupd-refresh                             17:13 today    0s       ok
+if [ -x /etc/init.d/anacron ] && ! [ ...  -              -        no record
+anacron                                   17:31 today    0s       ok
+apt-daily                                 09:10 today    0s       ok
+dpkg-db-backup                            00:17 today    0s       ok
+systemd-tmpfiles-clean                    00:31 today    0s       ok
+logrotate                                 00:42 today    0s       ok
+test -e /run/systemd/system || SERVIC...  -              -        no record
+man-db                                    07:53 today    0s       ok
+apt-daily-upgrade                         06:00 today    0s       ok
+/etc/cron.daily/*                         -              -        no record
+/etc/cron.monthly/*                       -              -        no record
+e2scrub_all                               03:11 Sep 27   -        earlier boot
+test -e /run/systemd/system || SERVIC...  -              -        no record
+/etc/cron.weekly/*                        -              -        no record
+fstrim                                    01:36 Sep 28   -        earlier boot
+17 jobs.
+cron keeps no exit code, so cron jobs only say that they ran. System cron lines in the journal need the systemd-journal group.
+.fi
+.RE
+.PP
+Every timer that ran in this boot worked. \fBe2scrub_all\fR and \fBfstrim\fR last ran before the last reboot, so there is no result for them. The user is not in the \fBsystemd\-journal\fR group, so the system cron jobs say \fBno record\fR.
+.SS A laptop with a failing backup
+.PP
+.RS 4
+.nf
+$ schedules
+NEXT           LEFT      JOB                        FROM
+12:30 today    5m        ~/bin/sync-notes.sh        cron, test
+12:34 today    10m       backup-notes               timer, user
+13:03 today    38m       logrotate                  timer
+13:17 today    52m       /etc/cron.hourly/*         cron, crontab
+13:24 Wed      1d 1h     fstrim                     timer
+23:44 Fri      3d 11h    plocate-updatedb           timer
+02:30 Feb 29   517d 14h  /usr/local/bin/leap-day    cron, leap
+at boot        -         /usr/local/bin/warm-cache  cron, crontab
+8 jobs, 1 failed last time. See: schedules --last
+.fi
+.RE
+.PP
+The leap day job waits for February 29, 2028. The \fB@reboot\fR line sorts after every job with a time.
+.PP
+.RS 4
+.nf
+$ schedules --last
+JOB                        LAST RUN       TOOK     RESULT
+~/bin/sync-notes.sh        11:59 today    -        ran
+backup-notes               11:34 today    3m 12s   failed, exit 1
+logrotate                  12:03 today    4s       ok
+/etc/cron.hourly/*         -              -        no record
+fstrim                     22:31 Sep 28   -        earlier boot
+plocate-updatedb           -              -        never ran
+/usr/local/bin/leap-day    -              -        no record
+/usr/local/bin/warm-cache  -              -        no record
+8 jobs, 1 failed last time.
+cron keeps no exit code, so cron jobs only say that they ran. System cron lines in the journal need the systemd-journal group.
+.fi
+.RE
+.PP
+\fBbackup\-notes\fR ran for 3 minutes and exited 1. It is a user unit, so \fBjournalctl \-\-user \-u backup\-notes\fR shows its output.
+.SS Only your own jobs
+.PP
+.RS 4
+.nf
+$ schedules --user
+NEXT           LEFT      JOB                  FROM
+12:30 today    5m        ~/bin/sync-notes.sh  cron, test
+12:34 today    10m       backup-notes         timer, user
+2 jobs, 1 failed last time. See: schedules --last
+.fi
+.RE
+.PP
+On the Debian machine above, which has no user timers and no crontab, the same command prints one line.
+.PP
+.RS 4
+.nf
+$ schedules --user
+No timers or cron jobs.
+.fi
+.RE
+.SS A stopped cron daemon
+.PP
+.RS 4
+.nf
+$ schedules --system
+schedules: no cron daemon is running, so the cron jobs here do not run
+NEXT           LEFT      JOB                        FROM
+13:03 today    38m       logrotate                  timer
+13:17 today    52m       /etc/cron.hourly/*         cron, crontab
+13:24 Wed      1d 0h     fstrim                     timer
+23:44 Fri      3d 11h    plocate-updatedb           timer
+02:30 Feb 29   517d 14h  /usr/local/bin/leap-day    cron, leap
+at boot        -         /usr/local/bin/warm-cache  cron, crontab
+6 jobs.
+.fi
+.RE
+.PP
+The timers still run. The three cron lines do not, until \fBsvc start cron\fR or \fBsvc start crond\fR.
+.SS The table only, for a script
+.PP
+.RS 4
+.nf
+$ schedules -q --user
+NEXT           LEFT      JOB                  FROM
+12:30 today    5m        ~/bin/sync-notes.sh  cron, test
+12:34 today    9m        backup-notes         timer, user
+.fi
+.RE
+.SS Every command it runs
+.PP
+.RS 4
+.nf
+$ schedules -v --user
++ systemctl --user list-timers --output=json --no-pager
++ systemctl --user show -p Id,Result,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,ActiveState backup-notes.service
++ crontab -l
+NEXT           LEFT      JOB                  FROM
+12:30 today    5m        ~/bin/sync-notes.sh  cron, test
+12:34 today    9m        backup-notes         timer, user
+2 jobs, 1 failed last time. See: schedules --last
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBA job I know about is missing.\fR Check where it lives. Jobs in \fB/etc/anacrontab\fR, in another user's crontab under \fB/var/spool/cron\fR, or in a script's own loop are not listed. \fBsudo crontab \-l \-u NAME\fR shows another user's crontab. A timer that is loaded but not active shows only with \fB\-a\fR.
+.PP
+\fBA file in /etc/cron.d is missing.\fR Its name has a dot or ends with \fB~\fR, so cron skips it too. Rename it, for example from \fBbackup.sh\fR to \fBbackup\fR. Or only root can read it, and \fBschedules\fR said so on stderr.
+.PP
+\fBEvery cron job says `no record` in `\-\-last`.\fR You cannot read the system journal. Run \fBsudo usermod \-aG systemd\-journal $USER\fR and log in again, or run \fBsudo schedules \-\-last\fR. On a machine where cron logs to a file and not to the journal, such as with rsyslog and no journal, there is nothing to read.
+.PP
+\fBA cron job says `ran`, but did it work?\fR cron cannot tell. Make the job log its own result, or turn it into a systemd timer, which keeps the exit code.
+.PP
+\fBA timer says `earlier boot`.\fR It last ran before the machine restarted. The result shows again after the next run.
+.PP
+\fBA timer says `failed`.\fR \fBjournalctl \-u NAME\fR shows the output of the last run, and \fBsvc NAME\fR shows its state. For a user timer, use \fBjournalctl \-\-user \-u NAME\fR.
+.PP
+\fBThe NEXT time for a cron line looks wrong.\fR Check the day fields. A line with both a day of month and a day of week runs when either matches. A \fBCRON_TZ\fR line moves cron to another time zone, which \fBschedules\fR does not follow.
+.SH EXIT STATUS
+.TP
+0
+It worked, even when a job failed last time or nothing is scheduled.
+.TP
+1
+It could not make a temp folder.
+.TP
+2
+Bad usage, such as a name, or \fB\-\-user\fR with \fB\-\-system\fR.
+.SH SEE ALSO
+.PP
+\fBsvc\fR, \fBlogs\fR, \fBcrontab(1)\fR, \fBcrontab(5)\fR, \fBsystemd.timer(5)\fR, \fBsystemctl(1)\fR
