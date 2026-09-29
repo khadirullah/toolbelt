@@ -336,8 +336,9 @@ serve() {
     fifo=$work/log
     mkfifo "$fifo" || tb_die 1 "could not make a pipe in $work"
     if [[ $server == python3 ]]; then
-        tb_show python3 -m http.server --bind 0.0.0.0 --directory "$root" "$port"
-        python3 -u -m http.server --bind 0.0.0.0 --directory "$root" "$port" > "$fifo" 2>&1 &
+        # cd, not --directory, which python 3.6 on openSUSE Leap 15 lacks.
+        tb_show_text "cd $root && python3 -m http.server --bind 0.0.0.0 $port"
+        (cd "$root" && exec python3 -u -m http.server --bind 0.0.0.0 "$port") > "$fifo" 2>&1 &
     else
         tb_show busybox httpd -f -v -p "0.0.0.0:$port" -h "$root"
         busybox httpd -f -v -p "0.0.0.0:$port" -h "$root" > "$fifo" 2>&1 &

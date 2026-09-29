@@ -171,6 +171,23 @@ esac'
     [ "$SHARE_RC" -eq 0 ]
 }
 
+@test "works with a python3 that has no --directory" {
+    # python 3.6, as on openSUSE Leap 15, has no http.server --directory.
+    local real
+    real=$(type -P python3)
+    tb_stub python3 "case \" \$* \" in
+    *' --directory '*) echo 'server.py: error: unrecognized arguments: --directory' >&2; exit 2 ;;
+esac
+exec '$real' \"\$@\""
+    mkdir d
+    printf 'report\n' > d/report.pdf
+    start_share -t 2s d
+    run curl -s "http://127.0.0.1:$PORT/report.pdf"
+    [ "$output" = "report" ]
+    wait_share
+    [ "$SHARE_RC" -eq 0 ]
+}
+
 @test "a port in use exits 1" {
     mkdir d
     start_share -t 3s d
