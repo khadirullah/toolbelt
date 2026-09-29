@@ -95,7 +95,9 @@ lsar           unar                 unar                 unarchiver           un
 uncompress     ncompress            ncompress            ncompress            ncompress            -
 unmkinitramfs  initramfs-tools-bin|initramfs-tools-core -                    -                    -                    -
 unrar          unrar                -                    unrar                unrar                unrar
+shred          coreutils            coreutils            coreutils            coreutils            coreutils
 df             coreutils            coreutils            coreutils            coreutils            coreutils
+mktemp         coreutils            coreutils            coreutils            coreutils            coreutils
 awk            mawk                 gawk                 gawk                 gawk                 gawk
 journalctl     systemd              systemd              systemd              systemd              -
 sudo           sudo                 sudo                 sudo                 sudo                 sudo

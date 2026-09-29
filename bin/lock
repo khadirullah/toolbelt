@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# lock: encrypt a file or folder with age, or gpg.
+set -uo pipefail
+TB_CMD=lock
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: lock [options] path ... [-- age or gpg options]
+
+Encrypt a file or folder with age, or gpg.
+
+Options:
+  -r, --recipient KEY an age or SSH public key, can repeat
+  -R, --key-file FILE a file of public keys, can repeat
+  -o, --out NAME      name the encrypted file yourself
+  -a, --armor         write text instead of binary, for mail or chat
+      --gpg           use gpg even when age is installed
+      --shred         shred the plain copy after a checked round trip
+  -y, --yes           shred without asking
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+With no -r or -R, lock asks for a passphrase twice. It never takes one
+as an argument.
+
+Pass-through:
+  Options after -- go to age, or to gpg with --gpg or when age is missing.
+
+Examples:
+  lock secrets.env
+  lock -r ~/.ssh/id_ed25519.pub photos/
+  lock --gpg taxes.pdf
+  lock --shred notes.txt
+
+Needs: age, or gpg as the fallback. tar for folders, shred for --shred.
+See man lock.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# Pick age or gpg and store it in TOOL.
+pick_tool() {
+    if (( use_gpg )); then
+        tb_need gpg
+        TOOL=gpg
+    elif tb_has age; then
+        TOOL=age
+    elif tb_has gpg; then
+        tb_say "age not found, using gpg"
+        TOOL=gpg
+    else
+        local line
+        line=$(tb_install_line age) || line="the package that provides age"
+        tb_die "$E_TOOL" "needs age or gpg. Install age with: $line"
+    fi
+    if [[ $TOOL == gpg ]]; then
+        local k
+        for k in ${recipients[@]+"${recipients[@]}"}; do
+            if [[ $k == age1* || $k == ssh-* ]]; then
+                tb_die "$E_TOOL" "$k is an age or SSH key, and only age can use it. $(tb_missing_msg age)"
+            fi
+        done
+        for k in ${keyfiles[@]+"${keyfiles[@]}"}; do
+            if grep -qE '^(age1|ssh-)' -- "$k" 2>/dev/null; then
+                tb_die "$E_TOOL" "$k holds age or SSH keys, and only age can use them. $(tb_missing_msg age)"
+            fi
+        done
+    fi
+}
+
+# A passphrase typed after -- would sit in the shell history and in ps.
+check_pass() {
+    local a
+    for a in ${TB_PASS[@]+"${TB_PASS[@]}"}; do
+        case $a in
+            --passphrase|--passphrase=*)
+                tb_die "$E_SAFE" "refused, a passphrase on the command line shows up in ps and the shell history. lock asks for it instead" ;;
+        esac
+    done
+}
+
+# gpg flags every run shares.
+gpg_base() {
+    GPG=(gpg)
+    (( TB_VERBOSE )) || GPG+=(--quiet)
+    # gpg-agent would otherwise remember the passphrase, and unlock would
+    # open the file without asking.
+    gpg --dump-options 2>/dev/null | grep -qx -- --no-symkey-cache && GPG+=(--no-symkey-cache)
+}
+
+# Fill ENC with the command that encrypts stdin, or the file given, to stdout.
+enc_cmd() {
+    local k
+    if [[ $TOOL == age ]]; then
+        ENC=(age -e)
+        (( armor )) && ENC+=(-a)
+        if (( ${#recipients[@]} + ${#keyfiles[@]} == 0 )); then
+            ENC+=(-p)
+        fi
+        for k in ${recipients[@]+"${recipients[@]}"}; do ENC+=(-r "$k"); done
+        for k in ${keyfiles[@]+"${keyfiles[@]}"}; do ENC+=(-R "$k"); done
+    else
+        gpg_base
+        ENC=("${GPG[@]}")
+        if (( ${#recipients[@]} + ${#keyfiles[@]} == 0 )); then
+            ENC+=(--symmetric --cipher-algo AES256)
+        else
+            ENC+=(--encrypt)
+            for k in ${recipients[@]+"${recipients[@]}"}; do ENC+=(--recipient "$k"); done
+            for k in ${keyfiles[@]+"${keyfiles[@]}"}; do ENC+=(--recipient-file "$k"); done
+        fi
+        (( armor )) && ENC+=(--armor)
+        ENC+=(-o -)
+    fi
+    ENC+=(${TB_PASS[@]+"${TB_PASS[@]}"})
+}
+
+# Fill DEC with the command that decrypts a file to stdout, for the check
+# before --shred. Returns 1 when there is no key to check with.
+dec_cmd() {
+    local out=$1 k found=()
+    if [[ $TOOL == age ]]; then
+        DEC=(age -d)
+        if (( ${#recipients[@]} + ${#keyfiles[@]} )); then
+            for k in "${XDG_CONFIG_HOME:-$HOME/.config}/age/keys.txt" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa"; do
+                [[ -f $k ]] && found+=(-i "$k")
+            done
+            (( ${#found[@]} )) || return 1
+            DEC+=("${found[@]}")
+        fi
+        DEC+=(-- "$out")
+    else
+        gpg_base
+        DEC=("${GPG[@]}" --decrypt -o - ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$out")
+    fi
+}
+
+# Decrypt the new file and compare it with the plain one, then shred the
+# plain one after asking.
+shred_after_check() {
+    local p=$1 out=$2 parent name ok=0
+    tb_need shred
+    if ! dec_cmd "$out"; then
+        tb_err "refused --shred, there is no private key here to check that $out opens. $p stays"
+        return "$E_SAFE"
+    fi
+    (( ${#recipients[@]} + ${#keyfiles[@]} )) || tb_info "Type the passphrase once more, to check that $out opens."
+    if [[ -d $p ]]; then
+        parent=$(dirname -- "$p")
+        name=$(basename -- "$p")
+        tb_show_text "$(cmd_text "${DEC[@]}") | tar -d -f - -C $parent"
+        "${DEC[@]}" | tar -d -f - -C "$parent" >/dev/null && ok=1
+    else
+        tb_show_text "$(cmd_text "${DEC[@]}") | cmp - $p"
+        "${DEC[@]}" | cmp -s - "$p" && ok=1
+    fi
+    if (( ! ok )); then
+        tb_err "$out did not open to the same content, so $p stays. Check $out before you delete anything"
+        return 1
+    fi
+    tb_info "$out opens and matches $p."
+    tb_confirm "Shred $p? It cannot be undone."
+    if [[ -d $p ]]; then
+        tb_show_text "find $p -type f -exec shred -u {} + && rm -r $p"
+        find "$p" -type f -exec shred -u -- {} + && rm -rf -- "$p" \
+            || { tb_err "could not shred every file in $p"; return 1; }
+    else
+        tb_run shred -u -- "$p" || { tb_err "could not shred $p"; return 1; }
+    fi
+    tb_info "$p is shredded."
+}
+
+# A command as tb_show would print it, without the "+ ", for a pipeline.
+cmd_text() {
+    local out="" a
+    for a in "$@"; do
+        if [[ $a =~ ^[][A-Za-z0-9_./:=,@%+^-]+$ ]]; then out+=" $a"; else out+=" '${a//\'/\'\\\'\'}'"; fi
+    done
+    echo "${out# }"
+}
+
+lock_one() {
+    local p=${1%/} out ext tmp start rc parent name size extra=""
+    [[ -z $p ]] && p=/
+    [[ -e $p ]] || { tb_err "$p: no such file or folder"; return 1; }
+    [[ -d $p || -f $p ]] || { tb_err "$p is not a file or a folder"; return 1; }
+    ext=.$TOOL
+    if [[ -n $out_name ]]; then
+        out=$out_name
+    elif [[ -d $p ]]; then
+        out=$p.tar$ext
+    else
+        out=$p$ext
+    fi
+    if [[ -e $out || -L $out ]]; then
+        tb_err "$out exists. Use -o for another name"
+        return "$E_SAFE"
+    fi
+    tmp=$(mktemp "$(dirname -- "$out")/.lock-XXXXXX") || { tb_err "could not write in $(dirname -- "$out")"; return 1; }
+    tb_cleanup_add "$tmp"
+    enc_cmd
+    start=$(tb_now_ms)
+    if [[ -d $p ]]; then
+        tb_need tar
+        parent=$(dirname -- "$p")
+        name=$(basename -- "$p")
+        tb_show_text "tar -cf - -C $parent $name | $(cmd_text "${ENC[@]}") > $out"
+        tar -cf - -C "$parent" -- "$name" | "${ENC[@]}" > "$tmp"
+        local ps=("${PIPESTATUS[@]}")
+        rc=$(( ps[0] | ps[1] ))
+        extra=", $(tb_plural "$(find "$p" -type f | wc -l)" file)"
+    else
+        tb_show_text "$(cmd_text "${ENC[@]}" -- "$p") > $out"
+        "${ENC[@]}" -- "$p" > "$tmp"
+        rc=$?
+    fi
+    if (( rc != 0 )) || [[ ! -s $tmp ]]; then
+        rm -f -- "$tmp"
+        tb_err "could not encrypt $p, nothing was written"
+        return 1
+    fi
+    if [[ -e $out ]]; then
+        rm -f -- "$tmp"
+        tb_err "$out appeared while lock ran. Use -o for another name"
+        return "$E_SAFE"
+    fi
+    mv -- "$tmp" "$out" || { tb_err "could not write $out"; return 1; }
+    size=$(tb_human "$(tb_bytes "$out")")
+    if [[ -d $p ]]; then
+        echo "$p/ -> $out ($size$extra, $(tb_elapsed $(( $(tb_now_ms) - start ))))"
+    else
+        echo "$p -> $out ($size, $(tb_elapsed $(( $(tb_now_ms) - start ))))"
+    fi
+    if (( ${#recipients[@]} + ${#keyfiles[@]} )); then
+        local keys=(${recipients[@]+"${recipients[@]}"} ${keyfiles[@]+"${keyfiles[@]}"}) list
+        list=$(printf '%s, ' "${keys[@]}")
+        tb_info "Only the private key for ${list%, } can open it."
+    fi
+    if (( shred )); then
+        shred_after_check "$p" "$out"
+        return $?
+    fi
+    if [[ -d $p ]]; then
+        tb_info "The plain folder is still there. Once unlock works on the copy, remove it with:"
+        tb_info "  find $p -type f -exec shred -u {} + && rm -r $p"
+    else
+        tb_info "The plain file is still there. Once unlock works on the copy, remove it with: shred -u $p"
+    fi
+    return 0
+}
+
+main() {
+    local p rc=0 r
+    (( ${#paths[@]} )) || tb_usage_error "name a file or folder to lock"
+    [[ -n $out_name && ${#paths[@]} -gt 1 ]] && tb_usage_error "-o names one output, so give one path"
+    check_pass
+    pick_tool
+    # pinentry needs to know the terminal when gpg asks for the passphrase.
+    if [[ $TOOL == gpg && -z ${GPG_TTY:-} && -t 0 ]]; then
+        GPG_TTY=$(tty)
+        export GPG_TTY
+    fi
+    for p in "${paths[@]}"; do
+        lock_one "$p"
+        r=$?
+        (( r > rc )) && rc=$r
+    done
+    return "$rc"
+}
+
+paths=()
+recipients=()
+keyfiles=()
+out_name=""
+armor=0
+use_gpg=0
+shred=0
+tb_expand "rRo" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -r|--recipient) tb_optarg "$@"
+                        # A path to a .pub file is a key file, as age -R reads it.
+                        if [[ -f $2 ]]; then keyfiles+=("$2"); else recipients+=("$2"); fi
+                        shift ;;
+        -R|--key-file)  tb_optarg "$@"; keyfiles+=("$2"); shift
+                        [[ -f ${keyfiles[-1]} ]] || tb_usage_error "${keyfiles[-1]}: no such key file"
+                        ;;
+        -o|--out)       tb_optarg "$@"; out_name=$2; shift ;;
+        -a|--armor)     armor=1 ;;
+        --gpg)          use_gpg=1 ;;
+        --shred)        shred=1 ;;
+        --)             shift; TB_PASS=("$@"); break ;;
+        -*)             tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)              paths+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

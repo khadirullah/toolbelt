@@ -1,0 +1,228 @@
+.TH "LOCK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+lock \- encrypt a file or folder with age, or gpg
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+lock [options] path ... [-- age or gpg options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBlock\fR writes an encrypted copy of each file or folder next to it. A file \fBsecrets.env\fR becomes \fBsecrets.env.age\fR. A folder \fBphotos/\fR goes into a tar archive first and becomes \fBphotos.tar.age\fR. \fBunlock\fR turns them back.
+.PP
+.RS 4
+.nf
+secrets.env -> secrets.env.age (1.5KB, 2.4s)
+The plain file is still there. Once unlock works on the copy, remove it with: shred -u secrets.env
+.fi
+.RE
+.PP
+\fBlock\fR uses age (https://age\-encryption.org) when it is installed. age has no settings to get wrong and its files are small. When age is missing, \fBlock\fR says so and uses gpg with AES256, and the file ends in \fB.gpg\fR instead. \fB\-\-gpg\fR picks gpg on purpose, for someone who only has gpg.
+.PP
+There are two ways to lock:
+.IP \(bu 2
+With a passphrase, the default. \fBlock\fR asks for it twice, through age or gpg. It never takes a passphrase as an argument, since an argument shows up in \fBps\fR and in the shell history.
+.IP \(bu 2
+With public keys, using \fB\-r\fR or \fB\-R\fR. Only the matching private key opens the file, and nobody types anything. age takes age keys, which start with \fBage1\fR, and SSH keys, such as \fB~/.ssh/id_ed25519.pub\fR. gpg takes the key id or email of a key in your gpg keyring.
+.PP
+The plain file stays where it is. \fBlock\fR prints the command that removes it safely, or does it for you with \fB\-\-shred\fR after a check.
+.SH OPTIONS
+.TP
+\fB\-r\fR, \fB\-\-recipient KEY\fR
+Lock to a public key. An age key, an SSH key, or with gpg a key id or email. A path to a key file works too. Can repeat.
+.TP
+\fB\-R\fR, \fB\-\-key\-file FILE\fR
+Lock to every public key in a file, one per line. \fB~/.ssh/authorized_keys\fR works. Can repeat.
+.TP
+\fB\-o\fR, \fB\-\-out NAME\fR
+Name the encrypted file yourself. Only with one path.
+.TP
+\fB\-a\fR, \fB\-\-armor\fR
+Write text instead of binary, so the file survives mail and chat. It is a third bigger.
+.TP
+\fB\-\-gpg\fR
+Use gpg even when age is installed.
+.TP
+\fB\-\-shred\fR
+After the copy is written, decrypt it, compare it with the plain one, then shred the plain one.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Shred without asking.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+With more than one \fB\-r\fR or \fB\-R\fR, any one of the private keys opens the file. Add your own key when you lock a file for someone else, or you cannot open it either.
+.SH OUTPUT NAMES
+.TP
+\fBnotes.txt\fR
+You get, with age: \fBnotes.txt.age\fR. With gpg: \fBnotes.txt.gpg\fR
+.TP
+\fBphotos/\fR
+You get, with age: \fBphotos.tar.age\fR. With gpg: \fBphotos.tar.gpg\fR
+.TP
+\fBnotes.txt\fR with \fB\-o /mnt/usb/n.age\fR
+You get, with age: \fB/mnt/usb/n.age\fR. With gpg: \fB/mnt/usb/n.age\fR
+.PP
+\fBlock\fR never overwrites. When the name is taken it stops with exit 4 and leaves both files alone. It writes to a hidden temp file beside the output and renames it at the end, so a failed or stopped run leaves no half file under the real name.
+.SH SAFETY CHECKS
+.IP \(bu 2
+A passphrase after \fB\-\-\fR, such as \fB\-\- \-\-passphrase hunter2\fR, is refused with exit 4.
+.IP \(bu 2
+\fB\-\-shred\fR never shreds until the copy has opened and matched the plain file byte for byte. For a folder it checks every file with \fBtar \-d\fR. A copy locked to someone else's key cannot be checked here, so \fB\-\-shred\fR refuses and keeps the plain copy.
+.IP \(bu 2
+With \fB\-\-shred\fR, \fBlock\fR asks once more for the passphrase, since it has to open the copy to check it.
+.IP \(bu 2
+When gpg is the fallback and you name an age or SSH key, \fBlock\fR stops. gpg cannot use those keys.
+.PP
+\fBshred\fR overwrites a file before it deletes it. On SSDs, on copy\-on\-write filesystems such as btrfs, and on journalled ones such as ext4 in \fBdata=journal\fR mode, old blocks may survive anyway. Lock a secret before it lands on disk if you can, and use full disk encryption for the rest.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to age, or to gpg. Some useful ones with gpg:
+.PP
+.RS 4
+.nf
+$ lock --gpg taxes.pdf -- --cipher-algo CAMELLIA256
+$ lock --gpg -r alice@example.com report.pdf -- --trust-model always
+$ lock --gpg -r 0x1234ABCD notes.txt -- --hidden-recipient 0x1234ABCD
+.fi
+.RE
+.PP
+age has few options of its own. \fB\-r\fR, \fB\-R\fR and \fB\-a\fR already cover them.
+.SH NEEDS
+.PP
+\fBage\fR, or \fBgpg\fR as the fallback. \fBtar\fR for folders and \fBshred\fR for \fB\-\-shred\fR, both installed everywhere.
+.TP
+Debian, Ubuntu
+age: \fBsudo apt install age\fR. gpg: \fBsudo apt install gnupg\fR
+.TP
+Fedora
+age: \fBsudo dnf install age\fR. gpg: \fBsudo dnf install gnupg2\fR
+.TP
+Arch
+age: \fBsudo pacman \-S age\fR. gpg: \fBsudo pacman \-S gnupg\fR
+.TP
+openSUSE
+age: \fBsudo zypper install age\fR. gpg: \fBsudo zypper install gpg2\fR
+.TP
+Alpine
+age: \fBsudo apk add age\fR. gpg: \fBsudo apk add gnupg\fR
+.SH EXAMPLES
+.SS A file with a passphrase
+.PP
+.RS 4
+.nf
+$ lock secrets.env
+Enter passphrase (leave empty to autogenerate a secure one):
+Confirm passphrase:
+secrets.env -> secrets.env.age (1.5KB, 2.4s)
+The plain file is still there. Once unlock works on the copy, remove it with: shred -u secrets.env
+.fi
+.RE
+.SS A folder, for your own SSH key
+.PP
+.RS 4
+.nf
+$ lock -r ~/.ssh/id_ed25519.pub photos/
+photos/ -> photos.tar.age (9.3KB, 3 files, 0.1s)
+Only the private key for /home/me/.ssh/id_ed25519.pub can open it.
+The plain folder is still there. Once unlock works on the copy, remove it with:
+  find photos -type f -exec shred -u {} + && rm -r photos
+.fi
+.RE
+.SS With gpg, when age is missing
+.PP
+.RS 4
+.nf
+$ lock -v secrets.env
+lock: age not found, using gpg
++ gpg --no-symkey-cache --symmetric --cipher-algo AES256 -o - -- secrets.env > secrets.env.gpg
+secrets.env -> secrets.env.gpg (1.4KB, 0.8s)
+The plain file is still there. Once unlock works on the copy, remove it with: shred -u secrets.env
+.fi
+.RE
+.SS A folder with gpg
+.PP
+.RS 4
+.nf
+$ lock --gpg photos/
+photos/ -> photos.tar.gpg (9.1KB, 3 files, 0.1s)
+The plain folder is still there. Once unlock works on the copy, remove it with:
+  find photos -type f -exec shred -u {} + && rm -r photos
+.fi
+.RE
+.SS Lock and shred in one go
+.PP
+.RS 4
+.nf
+$ lock --shred notes.txt
+Enter passphrase (leave empty to autogenerate a secure one):
+Confirm passphrase:
+notes.txt -> notes.txt.age (412B, 3.1s)
+Type the passphrase once more, to check that notes.txt.age opens.
+Enter passphrase:
+notes.txt.age opens and matches notes.txt.
+Shred notes.txt? It cannot be undone. [y/N] y
+notes.txt is shredded.
+.fi
+.RE
+.SS Text to paste in a chat
+.PP
+.RS 4
+.nf
+$ lock -a -r age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p wifi.txt
+wifi.txt -> wifi.txt.age (403B, 0.0s)
+Only the private key for age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p can open it.
+$ head -1 wifi.txt.age
+-----BEGIN AGE ENCRYPTED FILE-----
+.fi
+.RE
+.SS The name is taken
+.PP
+.RS 4
+.nf
+$ lock secrets.env
+lock: secrets.env.age exists. Use -o for another name
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBlock: needs age or gpg. Install age with: sudo apt install age\fR : Neither tool is installed. Install one, age for preference.
+.PP
+\fBlock: age1... is an age or SSH key, and only age can use it\fR : gpg is the fallback and cannot use that key. Install age, or lock to a gpg key instead.
+.PP
+\fBgpg: problem with the agent: Inappropriate ioctl for device\fR : gpg cannot find the terminal to ask for the passphrase. Run \fBexport GPG_TTY=$(tty)\fR and try again. \fBlock\fR sets it when it runs in a terminal, but not inside some editors or multiplexers.
+.PP
+\fBgpg: alice@example.com: skipped: No public key\fR : The key is not in your keyring. Import it with \fBgpg \-\-import alice.asc\fR first.
+.PP
+\fBlock: refused \-\-shred, there is no private key here to check that X opens\fR : The file is locked to someone else's key. Check it on their side, then remove the plain copy yourself.
+.SH EXIT STATUS
+.TP
+0
+Every path was locked.
+.TP
+1
+A path is missing, or age or gpg failed. Nothing was written for it.
+.TP
+2
+Bad usage, such as \fB\-o\fR with two paths.
+.TP
+3
+Neither age nor gpg is installed, or the key needs age.
+.TP
+4
+Refused. The output name is taken, a passphrase came after \fB\-\-\fR, or \fB\-\-shred\fR could not check.
+.TP
+5
+You answered no to the shred question.
+.SH SEE ALSO
+.PP
+\fBunlock\fR, \fBage(1)\fR, \fBgpg(1)\fR, \fBshred(1)\fR
