@@ -38,7 +38,7 @@ notify-send    libnotify-bin        libnotify            libnotify            li
 openssl        openssl              openssl              openssl              openssl              openssl
 pbzip2         pbzip2               pbzip2               pbzip2               pbzip2               pbzip2
 pigz           pigz                 pigz                 pigz                 pigz                 pigz
-plzip          plzip                plzip                plzip                plzip                -
+plzip          plzip                -                    plzip                plzip                -
 podman         podman               podman               podman               podman               podman
 pv             pv                   pv                   pv                   pv                   pv
 python3        python3              python3              python               python3              python3
@@ -134,7 +134,7 @@ tput           ncurses-bin          ncurses              ncurses              nc
 getent         libc-bin             glibc-common         glibc                glibc                musl-utils
 kreadconfig5   libkf5config-bin     kf5-kconfig-core     kconfig5             -                    -
 apt-get        apt                  -                    -                    -                    -
-dnf            -                    dnf                  -                    -                    -
+dnf            -                    dnf5|dnf             -                    -                    -
 pacman         -                    -                    pacman               -                    -
 zypper         -                    -                    -                    zypper               -
 apk            -                    -                    -                    -                    apk-tools
