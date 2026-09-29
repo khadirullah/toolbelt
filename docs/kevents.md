@@ -17,7 +17,8 @@ or more.
 
 `kevents` sorts events by the time they last happened, newest at the bottom next to your prompt, and prints each
 in two lines. The first has the time, the type, the object and the reason. The second has the full message,
-indented. That reads well in a narrow terminal and keeps long scheduler messages whole.
+indented. That reads well in a narrow terminal and keeps long scheduler messages whole. A message that ends in
+`in pod NAME_NAMESPACE(UID)`, as the kubelet's BackOff does, loses that end, since the first line names the pod.
 
 An event that repeated shows its count, such as `BackOff x14`, at the time it last happened. Warnings are yellow
 in a terminal. By default `kevents` shows the last hour of one namespace, and ends with a count of events and

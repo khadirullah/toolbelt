@@ -42,7 +42,8 @@ EOF
 }
 
 # One event as fields split by \x1f: time, type, object, reason, count,
-# message. $all adds the namespace to the object.
+# message. $all adds the namespace to the object. Messages that end in
+# "in pod NAME_NAMESPACE(UID)" lose that, since the object says it.
 read -r -d '' FMT_JQ <<'JQ'
 def epoch: if . == null or . == "" then null else sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 end;
 def t: ([.lastTimestamp, .series.lastObservedTime, .eventTime, .metadata.creationTimestamp]
@@ -61,7 +62,8 @@ def fmt($today; $all):
         ((.involvedObject.kind // "object") | short) + "/" + (.involvedObject.name // "?")),
       (.reason // ""),
       ((.series.count // .count // 1) | tostring),
-      (.message // .note // "" | gsub("[\t\n\r\u001f]+"; " ") | gsub("^ +| +$"; ""))
+      (.message // .note // "" | gsub("[\t\n\r\u001f]+"; " ") | gsub("^ +| +$"; "")
+        | sub(" in pod [^ ]+\\([0-9a-f-]+\\)$"; ""))
     ] | join("\u001f");
 JQ
 

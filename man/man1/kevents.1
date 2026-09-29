@@ -1,4 +1,4 @@
-.TH "KEVENTS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "KEVENTS" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 kevents \- show recent events in time order, newest last
 .SH SYNOPSIS
@@ -12,7 +12,7 @@ kevents [-n NAMESPACE | -A] [-w] [--since TIME] [-f] [OBJECT] [-- kubectl option
 .PP
 Events are the cluster's own log. The scheduler writes one when it cannot place a pod, the kubelet when a pull fails or a container crashes, and a controller when it scales a ReplicaSet. \fBkubectl get events\fR shows them, but not in time order, with wide columns that cut long messages, and with events up to the cluster's limit of an hour or more.
 .PP
-\fBkevents\fR sorts events by the time they last happened, newest at the bottom next to your prompt, and prints each in two lines. The first has the time, the type, the object and the reason. The second has the full message, indented. That reads well in a narrow terminal and keeps long scheduler messages whole.
+\fBkevents\fR sorts events by the time they last happened, newest at the bottom next to your prompt, and prints each in two lines. The first has the time, the type, the object and the reason. The second has the full message, indented. That reads well in a narrow terminal and keeps long scheduler messages whole. A message that ends in \fBin pod NAME_NAMESPACE(UID)\fR, as the kubelet's BackOff does, loses that end, since the first line names the pod.
 .PP
 An event that repeated shows its count, such as \fBBackOff x14\fR, at the time it last happened. Warnings are yellow in a terminal. By default \fBkevents\fR shows the last hour of one namespace, and ends with a count of events and warnings.
 .PP

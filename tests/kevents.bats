@@ -27,6 +27,8 @@ setup() {
          involvedObject: {kind: "Pod", name: "old-1", namespace: "shop"},
          message: "Container image already present", lastTimestamp: at(172800)}]}' > "$FX/events.json"
     jq -n '{kind: "List", items: []}' > "$FX/none.json"
+    jq '.items[0].message += " in pod api-1_shop(711dd5bc-1f38-4d7d-9c9a-8a0613357209)"
+        | .items[1].message = "in pod we trust (not a uid)"' "$FX/events.json" > "$FX/uid.json"
     jq -n --argjson now "$now" '
         def at($ago): ($now - $ago) | strftime("%Y-%m-%dT%H:%M:%SZ");
         {kind: "List", items: [
@@ -146,6 +148,14 @@ SH
     if kill -0 "$pid" 2>/dev/null; then echo "kevents still running"; false; fi
     wait "$pid"
     if kill -0 "$(cat "$FX/watch.pid")" 2>/dev/null; then echo "kubectl still running"; false; fi
+}
+
+@test "the pod name and uid at the end of a message are cut" {
+    EVENTS=uid run kevents
+    [ "$status" -eq 0 ]
+    [[ $output == *$'\n'"          Back-off restarting failed container api"$'\n'* ]]
+    [[ $output != *"711dd5bc"* ]]
+    [[ $output == *"in pod we trust (not a uid)"* ]]
 }
 
 @test "an unreachable kind cluster gets a hint" {
