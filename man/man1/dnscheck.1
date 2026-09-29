@@ -1,0 +1,261 @@
+.TH "DNSCHECK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+dnscheck \- the DNS records email depends on
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+dnscheck [-s SELECTOR ...] DOMAIN [-- dig options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Mail from your domain lands in spam, or bounces, most often because of a DNS record. Gmail, Outlook and Yahoo now reject bulk mail from domains without SPF, DKIM and DMARC. \fBdnscheck\fR looks up the five records that decide whether mail to and from a domain works, and prints one line for each, with \fBpass\fR, \fBwarn\fR, \fBfail\fR or \fBskip\fR and the record it found.
+.TP
+\fBA\fR
+What it looks up: The A record of the domain, or AAAA when there is no A. What it is for: Where the website lives. Mail does not need it.
+.TP
+\fBMX\fR
+What it looks up: The MX records. What it is for: Which servers take mail for the domain.
+.TP
+\fBSPF\fR
+What it looks up: The TXT record that starts with \fBv=spf1\fR. What it is for: Which servers may send mail as the domain.
+.TP
+\fBDKIM\fR
+What it looks up: The TXT record at \fBSELECTOR._domainkey.DOMAIN\fR. What it is for: The public key that checks the signature on each message.
+.TP
+\fBDMARC\fR
+What it looks up: The TXT record at \fB_dmarc.DOMAIN\fR. What it is for: What a receiver does with mail that fails SPF and DKIM, and where to send reports.
+.PP
+\fBdnscheck\fR only reads DNS. It asks the resolver your system uses, unless you name another server after \fB\-\-\fR. It changes nothing and sends no mail.
+.SH OPTIONS
+.TP
+\fB\-s\fR, \fB\-\-selector NAME\fR
+The DKIM selector to look up. Repeat it for each one, as in \fB\-s google \-s s1\fR.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the \fBwarn\fR and \fBfail\fR lines. Nothing at all means every check passed.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step and each \fBdig\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+The domain may be written as a URL or a mail address. \fBhttps://Example.com/contact\fR and \fBpostmaster@example.com\fR both check \fBexample.com\fR.
+.SH HOW EACH CHECK DECIDES
+.SS A
+.PP
+\fBpass\fR with up to 3 addresses. \fBwarn\fR when the domain has neither A nor AAAA, which is fine for a domain that only handles mail.
+.SS MX
+.PP
+\fBpass\fR with the servers in order of preference, lowest number first. A single \fB0 .\fR record is a null MX, a statement that the domain takes no mail at all, and passes. No MX record at all is a \fBfail\fR. Senders then fall back to the A record, which almost never runs a mail server.
+.SS SPF
+.TP
+\fBfail\fR
+No SPF record. Any server can claim to send as the domain.
+.TP
+\fBfail\fR
+More than one TXT record starts with \fBv=spf1\fR. Receivers treat that as an error and SPF fails for every message.
+.TP
+\fBfail\fR
+More than 10 DNS lookups. See below.
+.TP
+\fBfail\fR
+An \fBinclude:\fR names a domain with no SPF record.
+.TP
+\fBfail\fR
+The record ends in \fB+all\fR or a bare \fBall\fR, which lets every server on the internet pass.
+.TP
+\fBwarn\fR
+It ends in \fB?all\fR, or has no \fBall\fR and no \fBredirect=\fR. Mail from other servers is neither passed nor failed.
+.TP
+\fBpass\fR
+Anything else. The line shows the record, cut to 60 characters, and the lookup count.
+.PP
+The count follows the rules of RFC 7208. Each \fBinclude\fR, \fBredirect\fR, \fBa\fR, \fBmx\fR, \fBptr\fR and \fBexists\fR term costs one lookup, and \fBdnscheck\fR follows every \fBinclude\fR and \fBredirect\fR and counts the terms in those records too. \fBip4\fR, \fBip6\fR and \fBall\fR cost nothing. Past 10 lookups, receivers stop and treat SPF as broken. Adding one more mail service to a record with 9 lookups is the usual way to cross the limit.
+.SS DKIM
+.PP
+The selector is a name your mail provider picks, and DNS has no way to list them. Google Workspace uses \fBgoogle\fR, Microsoft 365 uses \fBselector1\fR and \fBselector2\fR, Mailchimp uses \fBk1\fR, and SendGrid uses \fBs1\fR and \fBs2\fR. Your provider's admin page shows the one it uses. Without \fB\-s\fR, the DKIM line says \fBskip\fR, which does not count as a failure.
+.TP
+\fBfail\fR
+No record at \fBSELECTOR._domainkey.DOMAIN\fR.
+.TP
+\fBfail\fR
+The record has an empty \fBp=\fR, which means the key was revoked.
+.TP
+\fBfail\fR
+An RSA key under 1024 bits.
+.TP
+\fBwarn\fR
+An RSA key of 1024 bits. Many receivers now want 2048.
+.TP
+\fBpass\fR
+RSA 2048 or more, or an Ed25519 key.
+.PP
+The key size is worked out from the length of the base64 key, which is exact enough to tell 1024 from 2048 and
+.IP \(bu 2
+A record split into several quoted strings, as long keys are, is joined first. A CNAME that points the
+.PP
+selector at the provider, as SendGrid and Microsoft 365 use, is followed by the resolver.
+.SS DMARC
+.TP
+\fBfail\fR
+No record at \fB_dmarc.DOMAIN\fR, more than one, or no valid \fBp=\fR policy.
+.TP
+\fBwarn\fR
+\fBp=none\fR. Receivers still deliver mail that fails, so the record only collects reports.
+.TP
+\fBwarn\fR
+\fBp=quarantine\fR or \fBp=reject\fR with \fBpct=\fR under 100, so only part of the failing mail is caught.
+.TP
+\fBpass\fR
+\fBp=quarantine\fR or \fBp=reject\fR. The line shows where reports go, from \fBrua=\fR.
+.PP
+A subdomain with no DMARC record of its own is covered by the parent's record in practice, through its \fBsp=\fR tag. \fBdnscheck\fR checks only the exact domain you give, so check the parent too.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBdig\fR, or to \fBdrill\fR when \fBdig\fR is missing. The common use is asking a particular DNS server, to see what the rest of the world sees rather than a local cache.
+.PP
+.RS 4
+.nf
+$ dnscheck example.com -- @1.1.1.1
+$ dnscheck example.com -- @ns1.example-dns.com
+.fi
+.RE
+.PP
+Asking the domain's own name server shows a change the moment you save it. Public resolvers show it once the old record's TTL runs out.
+.SH NEEDS
+.PP
+\fBdig\fR, or \fBdrill\fR when \fBdig\fR is missing.
+.TP
+Debian, Ubuntu
+dig: \fBsudo apt install bind9\-dnsutils\fR. drill: \fBsudo apt install ldnsutils\fR
+.TP
+Fedora, RHEL
+dig: \fBsudo dnf install bind\-utils\fR. drill: \fBsudo dnf install ldns\-utils\fR
+.TP
+Arch
+dig: \fBsudo pacman \-S bind\fR. drill: \fBsudo pacman \-S ldns\fR
+.TP
+openSUSE
+dig: \fBsudo zypper install bind\-utils\fR. drill: \fBsudo zypper install ldns\fR
+.TP
+Alpine
+dig: \fBsudo apk add bind\-tools\fR. drill: \fBsudo apk add drill\fR
+.SH EXAMPLES
+.SS A domain on Google Workspace with everything right
+.PP
+.RS 4
+.nf
+$ dnscheck -s google example.com
+A      pass  93.184.215.14
+MX     pass  1 smtp.google.com
+SPF    pass  v=spf1 include:_spf.google.com ~all, 4 lookups
+DKIM   pass  google._domainkey, RSA 2048
+DMARC  pass  p=quarantine, reports to dmarc@example.com
+.fi
+.RE
+.PP
+Google's own SPF record includes three more, so one \fBinclude:\fR costs 4 of the 10 lookups.
+.SS A domain that sends no mail at all
+.PP
+.RS 4
+.nf
+$ dnscheck example.com
+A      pass  104.20.23.154, 172.66.147.243
+MX     pass  null MX, this domain takes no mail
+SPF    pass  v=spf1 -all, 0 lookups
+DKIM   skip  give a selector with -s, your mail provider names it
+DMARC  pass  p=reject, no reports asked for
+.fi
+.RE
+.PP
+This is the right setup for a domain that must never appear as a sender. It stops anyone from using it for phishing.
+.SS Why is our mail in spam?
+.PP
+.RS 4
+.nf
+$ dnscheck -s s1 shop.example.com
+A      pass  203.0.113.7
+MX     pass  10 mx1.example.com, 20 mx2.example.com
+SPF    fail  2 SPF records, a domain may have only one
+DKIM   fail  no record at s1._domainkey.shop.example.com
+DMARC  warn  p=none, failing mail is still delivered, no reports asked for
+$ echo $?
+1
+.fi
+.RE
+.PP
+Someone added SendGrid as a second SPF record instead of adding \fBinclude:sendgrid.net\fR to the first one. Merge them into \fBv=spf1 mx include:sendgrid.net \-all\fR, and add the DKIM record from SendGrid's setup page.
+.SS Every step, for a record with too many lookups
+.PP
+.RS 4
+.nf
+$ dnscheck -v news.example.com
+dnscheck: looking up the address of news.example.com
++ dig +noall +answer +time=3 +tries=2 A news.example.com
++ dig +noall +answer +time=3 +tries=2 AAAA news.example.com
+A      warn  no A or AAAA record, fine for a domain that only does mail
+dnscheck: looking up the mail servers of news.example.com
++ dig +noall +answer +time=3 +tries=2 MX news.example.com
+MX     pass  10 mx.example.com
+dnscheck: looking up the SPF record of news.example.com
++ dig +noall +answer +time=3 +tries=2 TXT news.example.com
++ dig +noall +answer +time=3 +tries=2 TXT a.example.net
++ dig +noall +answer +time=3 +tries=2 TXT ca.example.net
++ dig +noall +answer +time=3 +tries=2 TXT b.example.net
++ dig +noall +answer +time=3 +tries=2 TXT cb.example.net
+SPF    fail  14 DNS lookups, the limit is 10
+DKIM   skip  give a selector with -s, your mail provider names it
+dnscheck: looking up the DMARC policy at _dmarc.news.example.com
++ dig +noall +answer +time=3 +tries=2 TXT _dmarc.news.example.com
+DMARC  fail  no record at _dmarc.news.example.com
+.fi
+.RE
+.SS Only the problems
+.PP
+.RS 4
+.nf
+$ dnscheck -q news.example.com
+A      warn  no A or AAAA record, fine for a domain that only does mail
+SPF    fail  14 DNS lookups, the limit is 10
+DMARC  fail  no record at _dmarc.news.example.com
+.fi
+.RE
+.SS Several DKIM selectors
+.PP
+.RS 4
+.nf
+$ dnscheck -s selector1 -s selector2 example.com
+.fi
+.RE
+.PP
+Microsoft 365 publishes two selectors and switches between them when it rotates keys. Check both.
+.SH TROUBLESHOOTING
+.PP
+\fBdnscheck: no answer from the DNS server (...). Check the network, or ask another server with: dnscheck DOMAIN \-\- @1.1.1.1\fR : No DNS server answered within 3 seconds, twice. Check the network with \fBnetcheck\fR. On a network that blocks outside DNS, leave out the \fB@\fR server.
+.PP
+\fBdnscheck: DOMAIN does not exist in DNS, check the spelling\fR : The DNS server said the name does not exist (NXDOMAIN). A new domain can take a few hours to appear.
+.PP
+\fBDKIM fail no record at SELECTOR._domainkey.DOMAIN\fR, but the provider says DKIM is on : The selector is wrong, or the record went in with the domain written twice, as in \fBs1._domainkey.example.com.example.com\fR. Many DNS panels add the domain for you.
+.PP
+You fixed a record and \fBdnscheck\fR still shows the old one : Your resolver caches the old answer until its TTL runs out. Ask the domain's own name server after \fB\-\-\fR to see the new record now.
+.PP
+\fBSPF fail N DNS lookups, the limit is 10\fR : Remove services you no longer use, replace an \fBa\fR or \fBmx\fR term with the \fBip4:\fR addresses it stands for, or ask your provider for a flattened record.
+.SH EXIT STATUS
+.TP
+0
+Every check passed, was skipped, or only warned.
+.TP
+1
+At least one check failed, the domain does not exist, or no DNS server answered.
+.TP
+2
+Bad usage, such as no domain or a selector with spaces.
+.TP
+3
+Neither \fBdig\fR nor \fBdrill\fR is installed.
+.SH SEE ALSO
+.PP
+\fBcertcheck\fR, \fBnetcheck\fR, \fBmyip\fR, \fBdig(1)\fR, \fBdrill(1)\fR, RFC 7208 (SPF), RFC 6376 (DKIM), RFC 7489 (DMARC)

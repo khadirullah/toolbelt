@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# dnscheck: the DNS records email depends on.
+set -uo pipefail
+TB_CMD=dnscheck
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: dnscheck [-s SELECTOR ...] DOMAIN [-- dig options]
+
+The DNS records email depends on.
+
+Options:
+  -s, --selector NAME the DKIM selector to look up, repeat it for more
+  -q, --quiet         only the warn and fail lines
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+It checks A, MX, SPF, DKIM and DMARC, and prints pass, warn or fail
+for each, with the record it found.
+
+Pass-through:
+  Options after -- go to dig, or to drill when dig is missing.
+
+Examples:
+  dnscheck example.com
+  dnscheck -s google -s s1 example.com
+  dnscheck example.com -- @1.1.1.1
+
+Needs: dig from bind9-dnsutils, or drill from ldns. See man dnscheck.
+Exit: 0 ok or only warnings, 1 a record fails or DNS does not answer,
+      2 bad usage, 3 missing tool.
+EOF
+}
+
+# ---------------------------------------------------------------- lookups
+
+# The records of one type for a name, one rdata per line. TXT strings are
+# joined and unquoted. A CNAME on the way is followed by the resolver.
+rr() {
+    local type=$1 name=$2 out rc
+    if [[ $tool == dig ]]; then
+        tb_show dig +noall +answer +time=3 +tries=2 ${TB_PASS[@]+"${TB_PASS[@]}"} "$type" "$name"
+        out=$(dig +noall +answer +time=3 +tries=2 ${TB_PASS[@]+"${TB_PASS[@]}"} "$type" "$name" 2>&1)
+        rc=$?
+    else
+        tb_show drill ${TB_PASS[@]+"${TB_PASS[@]}"} "$name" "$type"
+        out=$(drill ${TB_PASS[@]+"${TB_PASS[@]}"} "$name" "$type" 2>&1)
+        rc=$?
+    fi
+    if (( rc != 0 )); then
+        echo "$out" > "$tmp/failed"
+        return 1
+    fi
+    awk -v t="$type" '
+        /^;/ || NF < 5 { next }
+        toupper($4) == t {
+            line = $0
+            sub(/^[^ \t]+[ \t]+[0-9]+[ \t]+[A-Za-z]+[ \t]+[A-Za-z0-9]+[ \t]+/, "", line)
+            if (t == "TXT") {
+                gsub(/"[ \t]+"/, "", line)
+                sub(/^"/, "", line); sub(/"$/, "", line)
+                gsub(/\\"/, "\"", line); gsub(/\\;/, ";", line)
+            }
+            print line
+        }' <<<"$out"
+}
+
+# Stop when the DNS server did not answer at all.
+check_failed() {
+    [[ -s $tmp/failed ]] || return 0
+    local why
+    why=$(grep -m 1 -iE 'timed out|no servers|refused|unreachable|error' "$tmp/failed")
+    tb_die 1 "no answer from the DNS server${why:+ (${why#;; })}. Check the network, or ask another server with: dnscheck $domain -- @1.1.1.1"
+}
+
+# True when the domain has no DNS entry at all (NXDOMAIN).
+no_such_domain() {
+    local out
+    if [[ $tool == dig ]]; then
+        out=$(dig +noall +comments +time=3 +tries=2 ${TB_PASS[@]+"${TB_PASS[@]}"} SOA "$domain" 2>/dev/null)
+    else
+        out=$(drill ${TB_PASS[@]+"${TB_PASS[@]}"} "$domain" SOA 2>/dev/null)
+    fi
+    [[ $out == *"status: NXDOMAIN"* || $out == *"rcode: NXDOMAIN"* ]]
+}
+
+# ---------------------------------------------------------------- output
+
+FAILS=0
+WARNS=0
+
+# One result line: "SPF    pass  v=spf1 -all, 0 lookups".
+result() {
+    local label=$1 state=$2 text=$3 c=""
+    case $state in
+        fail) ((FAILS++)); c=$C_RED ;;
+        warn) ((WARNS++)); c=$C_YEL ;;
+        pass) c=$C_GRN ;;
+        skip) c=$C_DIM ;;
+    esac
+    if (( TB_QUIET )) && [[ $state != fail && $state != warn ]]; then
+        return 0
+    fi
+    printf '%-7s%s%-6s%s%s\n' "$label" "$c" "$state" "$C_OFF" "$text"
+}
+
+# Up to N items joined with ", ", then "+M more".
+join_some() {
+    local max=$1 out="" n=0 x
+    shift
+    for x in "$@"; do
+        ((n++))
+        (( n <= max )) && out+="${out:+, }$x"
+    done
+    (( n > max )) && out+=", +$(( n - max )) more"
+    echo "$out"
+}
+
+# A long record cut to fit one line.
+cut_text() {
+    local s=$1 max=${2:-60}
+    if (( ${#s} > max )); then echo "${s:0:max-3}..."; else echo "$s"; fi
+}
+
+# ---------------------------------------------------------------- checks
+
+check_a() {
+    local addrs=()
+    tb_say "looking up the address of $domain"
+    mapfile -t addrs < <(rr A "$domain")
+    check_failed
+    if (( ${#addrs[@]} == 0 )); then
+        mapfile -t addrs < <(rr AAAA "$domain")
+        check_failed
+    fi
+    if (( ${#addrs[@]} )); then
+        result A pass "$(join_some 3 "${addrs[@]}")"
+        return 0
+    fi
+    result A warn "no A or AAAA record, fine for a domain that only does mail"
+    return 1
+}
+
+check_mx() {
+    local lines=() shown=() l pref host
+    tb_say "looking up the mail servers of $domain"
+    mapfile -t lines < <(rr MX "$domain" | sort -n)
+    check_failed
+    if (( ${#lines[@]} == 0 )); then
+        result MX fail "no MX record, mail for $domain has nowhere to go"
+        return 1
+    fi
+    HAVE_MX=1
+    if (( ${#lines[@]} == 1 )) && [[ ${lines[0]} =~ ^0[[:space:]]+\.$ ]]; then
+        result MX pass "null MX, this domain takes no mail"
+        return 0
+    fi
+    for l in "${lines[@]}"; do
+        read -r pref host <<<"$l"
+        shown+=("$pref ${host%.}")
+    done
+    result MX pass "$(join_some 3 "${shown[@]}")"
+}
+
+# Count the DNS lookups an SPF record makes, following include and redirect.
+# Adds to SPF_LOOKUPS, and sets SPF_BROKEN when an include has no record.
+spf_walk() {
+    local record=$1 depth=$2 term mech target sub terms=()
+    (( depth > 10 )) && return 0
+    read -ra terms <<<"$record"
+    for term in "${terms[@]}"; do
+        term=${term#[+~?-]}
+        mech=${term%%[:=/]*}
+        case ${mech,,} in
+            include|redirect)
+                ((SPF_LOOKUPS++))
+                target=${term#*[:=]}
+                [[ $target == *%* ]] && continue
+                [[ " $SPF_SEEN " == *" $target "* ]] && continue
+                SPF_SEEN+=" $target"
+                sub=$(rr TXT "$target" | grep -iE '^v=spf1( |$)' | head -n 1)
+                check_failed
+                if [[ -z $sub ]]; then
+                    SPF_BROKEN=${SPF_BROKEN:-$target}
+                    continue
+                fi
+                spf_walk "$sub" $(( depth + 1 )) ;;
+            a|mx|ptr|exists)
+                ((SPF_LOOKUPS++)) ;;
+        esac
+    done
+}
+
+check_spf() {
+    local records=() rec all
+    tb_say "looking up the SPF record of $domain"
+    mapfile -t records < <(rr TXT "$domain" | grep -iE '^v=spf1( |$)')
+    check_failed
+    if (( ${#records[@]} == 0 )); then
+        result SPF fail "no SPF record, any server can send mail as $domain"
+        return
+    fi
+    if (( ${#records[@]} > 1 )); then
+        result SPF fail "${#records[@]} SPF records, a domain may have only one"
+        return
+    fi
+    rec=${records[0]}
+    SPF_LOOKUPS=0 SPF_SEEN="" SPF_BROKEN=""
+    spf_walk "$rec" 1
+    all=$(grep -oiE '(^| )[+~?-]?all( |$)' <<<"$rec" | tr -d ' ' | tail -n 1)
+    if [[ -n $SPF_BROKEN ]]; then
+        result SPF fail "include:$SPF_BROKEN has no SPF record, so SPF fails for every message"
+    elif (( SPF_LOOKUPS > 10 )); then
+        result SPF fail "$SPF_LOOKUPS DNS lookups, the limit is 10"
+    elif [[ ${all,,} == +all || ${all,,} == all ]]; then
+        result SPF fail "$all lets any server send mail as $domain"
+    elif [[ $all == "?all" ]]; then
+        result SPF warn "?all, mail from other servers is neither passed nor failed"
+    elif [[ -z $all && ${rec,,} != *redirect=* ]]; then
+        result SPF warn "no all at the end, mail from other servers is neither passed nor failed"
+    else
+        result SPF pass "$(cut_text "$rec"), $(tb_plural "$SPF_LOOKUPS" lookup)"
+    fi
+}
+
+# A tag from a "k=v; k=v" record, such as p from DMARC or DKIM.
+tag() {
+    local want=$1 rec=$2 part k parts=()
+    IFS=';' read -ra parts <<<"$rec"
+    for part in "${parts[@]}"; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        k=${part%%=*}
+        k="${k%"${k##*[![:space:]]}"}"
+        if [[ ${k,,} == "$want" && $part == *=* ]]; then
+            part=${part#*=}
+            part="${part#"${part%%[![:space:]]*}"}"
+            echo "${part%"${part##*[![:space:]]}"}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_dkim() {
+    local sel name rec k p bytes bits
+    if (( ${#selectors[@]} == 0 )); then
+        result DKIM skip "give a selector with -s, your mail provider names it"
+        return
+    fi
+    for sel in "${selectors[@]}"; do
+        name="$sel._domainkey.$domain"
+        tb_say "looking up the DKIM key at $name"
+        rec=$(rr TXT "$name" | grep -iE '(^|;)[[:space:]]*(v=DKIM1|p=|k=)' | head -n 1)
+        check_failed
+        if [[ -z $rec ]]; then
+            result DKIM fail "no record at $name"
+            continue
+        fi
+        k=$(tag k "$rec") || k=rsa
+        p=$(tag p "$rec") || p=""
+        p=${p//[[:space:]]/}
+        if [[ -z $p ]]; then
+            result DKIM fail "$sel._domainkey, the key is revoked, p= is empty"
+            continue
+        fi
+        case ${k,,} in
+            ed25519)
+                result DKIM pass "$sel._domainkey, Ed25519" ;;
+            rsa)
+                # The key is base64 DER. Its length gives the key size.
+                bytes=$(( ${#p} * 3 / 4 ))
+                if (( bytes >= 500 )); then bits=4096
+                elif (( bytes >= 400 )); then bits=3072
+                elif (( bytes >= 260 )); then bits=2048
+                elif (( bytes >= 150 )); then bits=1024
+                else bits=512; fi
+                if (( bits < 1024 )); then
+                    result DKIM fail "$sel._domainkey, RSA $bits, far too short, use 2048"
+                elif (( bits < 2048 )); then
+                    result DKIM warn "$sel._domainkey, RSA $bits, use 2048 or more"
+                else
+                    result DKIM pass "$sel._domainkey, RSA $bits"
+                fi ;;
+            *)
+                result DKIM warn "$sel._domainkey, unknown key type k=$k" ;;
+        esac
+    done
+}
+
+check_dmarc() {
+    local name="_dmarc.$domain" records=() rec p rua pct text
+    tb_say "looking up the DMARC policy at $name"
+    mapfile -t records < <(rr TXT "$name" | grep -iE '^v=DMARC1[[:space:]]*(;|$)')
+    check_failed
+    if (( ${#records[@]} == 0 )); then
+        result DMARC fail "no record at $name"
+        return
+    fi
+    if (( ${#records[@]} > 1 )); then
+        result DMARC fail "${#records[@]} DMARC records, a domain may have only one"
+        return
+    fi
+    rec=${records[0]}
+    p=$(tag p "$rec") || p=""
+    rua=$(tag rua "$rec") || rua=""
+    pct=$(tag pct "$rec") || pct=100
+    if [[ -n $rua ]]; then
+        rua=${rua//mailto:/}
+        text="reports to ${rua//,/, }"
+    else
+        text="no reports asked for"
+    fi
+    case ${p,,} in
+        reject|quarantine)
+            if [[ $pct =~ ^[0-9]+$ ]] && (( pct < 100 )); then
+                result DMARC warn "p=${p,,} for only $pct% of failing mail, $text"
+            else
+                result DMARC pass "p=${p,,}, $text"
+            fi ;;
+        none)
+            result DMARC warn "p=none, failing mail is still delivered, $text" ;;
+        *)
+            result DMARC fail "no valid p= policy in $(cut_text "$rec" 50)" ;;
+    esac
+}
+
+main() {
+    local have_a=0
+    HAVE_MX=0
+    tb_need_any tool dig drill
+    tb_tmpdir tmp || tb_die 1 "cannot make a temp folder"
+    tb_color_stdout
+    check_a && have_a=1
+    check_mx
+    if (( ! have_a && ! HAVE_MX )) && no_such_domain; then
+        tb_die 1 "$domain does not exist in DNS, check the spelling"
+    fi
+    check_spf
+    check_dkim
+    check_dmarc
+    (( FAILS == 0 ))
+}
+
+domain=""
+selectors=()
+tb_expand "s" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -s|--selector) tb_optarg "$@"
+                       [[ $2 =~ ^[A-Za-z0-9._-]+$ ]] || tb_usage_error "not a DKIM selector: $2"
+                       selectors+=("$2"); shift ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)             [[ -z $domain ]] || tb_usage_error "one domain at a time, not $domain and $1"
+                       domain=$1 ;;
+    esac
+    shift
+done
+[[ -n $domain ]] || tb_usage_error "give a domain, such as: dnscheck example.com"
+# Accept a URL or a mail address, and keep only the domain.
+domain=${domain#*://}
+domain=${domain%%/*}
+domain=${domain##*@}
+domain=${domain%.}
+domain=${domain,,}
+[[ $domain =~ ^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)+$ ]] ||
+    tb_usage_error "not a domain name: $domain"
+
+main
+exit $?
