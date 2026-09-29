@@ -85,6 +85,34 @@ never ran, as with a pull error, `kwhy` skips the logs.
 `kubectl could not read the logs` with kubectl's own reason and carries on with the next pod. A container that
 wrote nothing shows `(no output)`.
 
+## When a node is NotReady
+
+A node that stops answering takes every pod on it down at once, and each pod looks broken in its own way. Its
+kubelet no longer reports, so a pod that was fine still says `Running 1/1` while the cluster counts it as not
+Ready, and `kubectl logs` cannot reach the node at all.
+
+When some pods are not Ready, `kwhy` also lists the nodes. A node that is not Ready gets one line under the header,
+with how long it has been down and how many of the listed pods are on it.
+
+```console
+$ kwhy -n demo
+context kind-toolbelt, namespace demo, 3 of 3 pods not Ready
+node toolbelt-control-plane is NotReady since 2m, 3 pods on it, see knodes
+crasher                Error              restarts 17
+  event  Back-off restarting failed container main
+  exit   1, 4m ago
+  logs   not readable while the node is NotReady
+  hint   fix the node first
+web-58ccdc5667-btlc4   not Ready          restarts 0
+  hint   the node is NotReady, the pod may be fine
+web-58ccdc5667-z8xjx   not Ready          restarts 0
+  hint   the node is NotReady, the pod may be fine
+```
+
+A pod that only looked `Running` shows as `not Ready`, since the app in it may be fine. Other pods on the node keep
+their reason and event, skip the logs and get the hint `fix the node first`. When your account may not list nodes,
+`kwhy` skips this check and prints what it did before.
+
 ## Pass-through
 
 Options after `--` go to every kubectl call, so a context or a kubeconfig reaches all of them.
@@ -105,6 +133,7 @@ name everywhere.
 
 `kwhy` reads pods, events and logs, so the account behind your context needs `get` and `list` on pods and events
 and `get` on `pods/log` in the namespaces you look at.
+`list` on nodes is optional. Without it, `kwhy` cannot name a NotReady node.
 
 ## Examples
 

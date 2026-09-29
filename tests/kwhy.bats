@@ -44,6 +44,14 @@ JSON
 JSON
     jq '{kind: "List", items: [.items[3]]}' "$FX/pods.json" > "$FX/ready.json"
     jq '.items[1]' "$FX/pods.json" > "$FX/api.json"
+    # web keeps its old Ready container when its node stops answering.
+    jq '.items[1].spec.nodeName = "kind-worker" | .items[3].spec.nodeName = "kind-worker"
+        | .items[3].status.conditions[0].status = "False"' "$FX/pods.json" > "$FX/lost.json"
+    jq -n --arg t "$(date -u -d @$(( $(date +%s) - 180 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+        date -u -r $(( $(date +%s) - 180 )) +%Y-%m-%dT%H:%M:%SZ)" '{kind: "List", items: [
+        {metadata: {name: "kind-control-plane"}, status: {conditions: [{type: "Ready", status: "True"}]}},
+        {metadata: {name: "kind-worker"}, status: {conditions: [{type: "Ready", status: "Unknown",
+         lastTransitionTime: $t}]}}]}' > "$FX/nodes.json"
     cat > "$BATS_TEST_TMPDIR/stubs/kubectl" <<'SH'
 #!/usr/bin/env bash
 echo "kubectl $*" >> "$CALLS"
@@ -60,6 +68,9 @@ case " $* " in
         echo 'Error from server (NotFound): pods "nosuch" not found' >&2; exit 1 ;;
     *" get pod api-5b8c9d7f6-mk4tn "*) cat "$FX/api.json" ;;
     *" get pod web-6d4cf56db6-xk2p9 "*) jq '.items[0]' "$FX/ready.json" ;;
+    *" get nodes "*)
+        [[ -n ${NODES:-} ]] || { echo 'Error from server (Forbidden): nodes is forbidden' >&2; exit 1; }
+        cat "$FX/$NODES.json" ;;
     *" get pods "*) cat "$FX/${PODS:-pods}.json" ;;
     *" logs "*)
         printf '09:12:04 INFO  loading config\n09:12:04 ERROR DATABASE_URL is not set\npanic: missing DATABASE_URL\n' ;;
@@ -211,4 +222,23 @@ SH
     sed -i 's|        printf .09:12:04 INFO.*|        printf "unable to retrieve container logs for containerd://abc" ;;|' "$BATS_TEST_TMPDIR/stubs/kubectl"
     run kwhy api-5b8c9d7f6-mk4tn
     [[ $output == *"    the node no longer keeps that container's logs"$'\n'"  hint   "* ]]
+}
+
+@test "a NotReady node is named once and its pods blame it" {
+    PODS=lost NODES=nodes run kwhy
+    [ "$status" -eq 1 ]
+    [ "${lines[1]}" = "node kind-worker is NotReady since 3m, 2 pods on it, see knodes" ]
+    [[ $output == *"  exit   1, "*" ago"$'\n'"  logs   not readable while the node is NotReady"$'\n'"  hint   fix the node first"* ]]
+    [[ $output == *"web-6d4cf56db6-xk2p9     not Ready          restarts 0"$'\n'"  hint   the node is NotReady, the pod may be fine"* ]]
+    # cart is on a Ready node and keeps its own hint.
+    [[ $output == *"  hint   the tag does not exist, or the pull secret is wrong"* ]]
+    [ -z "$(grep ' logs ' "$CALLS")" ]
+}
+
+@test "a login that cannot list nodes changes nothing" {
+    PODS=lost run kwhy
+    [ "$status" -eq 1 ]
+    [[ $output != *"NotReady"* ]]
+    [[ $output == *"web-6d4cf56db6-xk2p9     Running 1/1"* ]]
+    grep -q ' logs api-' "$CALLS"
 }

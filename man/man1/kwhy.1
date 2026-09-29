@@ -1,4 +1,4 @@
-.TH "KWHY" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "KWHY" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 kwhy \- show why pods are not Ready, on one screen
 .SH SYNOPSIS
@@ -91,6 +91,30 @@ For a Pending pod, the hint repeats what the pod asks for, such as \fBno node ha
 For each pod, \fBkwhy\fR picks the container that explains the reason. That is the first init container that has not finished, or else the first container that is waiting, crashed or not ready. When that container restarted at least once, the logs come from its previous run, since the current run has often not written anything yet. When it never ran, as with a pull error, \fBkwhy\fR skips the logs.
 .PP
 \fBkubectl logs\fR can fail for a pod whose node is gone or whose logs were rotated away. \fBkwhy\fR then prints \fBkubectl could not read the logs\fR with kubectl's own reason and carries on with the next pod. A container that wrote nothing shows \fB(no output)\fR.
+.SH WHEN A NODE IS NOTREADY
+.PP
+A node that stops answering takes every pod on it down at once, and each pod looks broken in its own way. Its kubelet no longer reports, so a pod that was fine still says \fBRunning 1/1\fR while the cluster counts it as not Ready, and \fBkubectl logs\fR cannot reach the node at all.
+.PP
+When some pods are not Ready, \fBkwhy\fR also lists the nodes. A node that is not Ready gets one line under the header, with how long it has been down and how many of the listed pods are on it.
+.PP
+.RS 4
+.nf
+$ kwhy -n demo
+context kind-toolbelt, namespace demo, 3 of 3 pods not Ready
+node toolbelt-control-plane is NotReady since 2m, 3 pods on it, see knodes
+crasher                Error              restarts 17
+  event  Back-off restarting failed container main
+  exit   1, 4m ago
+  logs   not readable while the node is NotReady
+  hint   fix the node first
+web-58ccdc5667-btlc4   not Ready          restarts 0
+  hint   the node is NotReady, the pod may be fine
+web-58ccdc5667-z8xjx   not Ready          restarts 0
+  hint   the node is NotReady, the pod may be fine
+.fi
+.RE
+.PP
+A pod that only looked \fBRunning\fR shows as \fBnot Ready\fR, since the app in it may be fine. Other pods on the node keep their reason and event, skip the logs and get the hint \fBfix the node first\fR. When your account may not list nodes, \fBkwhy\fR skips this check and prints what it did before.
 .SH PASS\-THROUGH
 .PP
 Options after \fB\-\-\fR go to every kubectl call, so a context or a kubeconfig reaches all of them.
@@ -107,7 +131,7 @@ $ kwhy -n shop -- --kubeconfig ~/.kube/lab.yaml
 .PP
 \fBkubectl\fR and \fBjq\fR. On Debian and Ubuntu, \fBkubectl\fR comes from the Kubernetes apt repository or the \fBkubectl\fR package, on Fedora and openSUSE from \fBkubernetes\-client\fR, and on Arch and Alpine from \fBkubectl\fR. \fBjq\fR has the same name everywhere.
 .PP
-\fBkwhy\fR reads pods, events and logs, so the account behind your context needs \fBget\fR and \fBlist\fR on pods and events and \fBget\fR on \fBpods/log\fR in the namespaces you look at.
+\fBkwhy\fR reads pods, events and logs, so the account behind your context needs \fBget\fR and \fBlist\fR on pods and events and \fBget\fR on \fBpods/log\fR in the namespaces you look at. \fBlist\fR on nodes is optional. Without it, \fBkwhy\fR cannot name a NotReady node.
 .SH EXAMPLES
 .SS What is wrong in this namespace
 .PP
