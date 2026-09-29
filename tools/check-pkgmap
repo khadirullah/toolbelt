@@ -24,7 +24,7 @@ exists() {
         apt)    apt-cache show "$1" >/dev/null 2>&1 ;;
         dnf)    dnf -q info "$1" >/dev/null 2>&1 ;;
         pacman) pacman -Si "$1" >/dev/null 2>&1 ;;
-        zypper) zypper -q info "$1" 2>/dev/null | grep -q '^Name' ;;
+        zypper) zypper -q info "$1" 2>/dev/null | grep '^Name' >/dev/null ;;
         apk)    [[ -n $(apk search -e "$1" 2>/dev/null) ]] ;;
     esac
 }
