@@ -33,7 +33,7 @@ setup() {
     tb_setup
     printf 'DB_HOST=db.example.com\n' > secrets.env
     mkdir -p photos/2026
-    head -c 2K /dev/urandom > photos/2026/a.jpg
+    head -c 2048 /dev/urandom > photos/2026/a.jpg
     printf 'album\n' > photos/albums.txt
 }
 

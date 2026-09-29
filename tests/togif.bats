@@ -12,12 +12,12 @@ fake_ffmpeg() {
 esac'
     tb_stub ffmpeg 'echo "$*" >> "$BATS_TEST_TMPDIR/ffmpeg.log"
 [[ -n ${FAKE_FAIL:-} ]] && exit 1
-head -c 3K /dev/zero > "${!#}"'
+head -c 3072 /dev/zero > "${!#}"'
 }
 
 setup() {
     tb_setup
-    head -c 4K /dev/urandom > demo.mp4
+    head -c 4096 /dev/urandom > demo.mp4
 }
 
 @test "help prints usage and exits 0" {

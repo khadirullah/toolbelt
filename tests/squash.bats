@@ -8,7 +8,7 @@ setup() {
     mkdir -p photos/sub
     printf 'hello\n' > photos/a.txt
     seq 1 2000 > photos/sub/n.txt
-    head -c 4K /dev/urandom > photos/r.bin
+    head -c 4096 /dev/urandom > photos/r.bin
 }
 
 # Entries in a tar stream on stdin, one per line.
@@ -390,7 +390,7 @@ tb_has_any() { local t; for t; do command -v "$t" >/dev/null && return 0; done; 
 
 @test "-s uses 7z volumes and zip parts" {
     tb_needs 7z
-    head -c 150K /dev/urandom > photos/big.bin
+    head -c 153600 /dev/urandom > photos/big.bin
     run squash -t -f 7z -s 64K photos
     [ "$status" -eq 0 ]
     [ -f photos.7z.001 ]

@@ -317,7 +317,7 @@ SH
 }
 
 @test "a file that is not an image archive exits 1" {
-    head -c 2K /dev/urandom > junk.tar
+    head -c 2048 /dev/urandom > junk.tar
     run imgpeek junk.tar
     [ "$status" -eq 1 ]
     [[ $output == "imgpeek: cannot read junk.tar as an image archive"* ]]

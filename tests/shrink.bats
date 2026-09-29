@@ -45,8 +45,8 @@ make_pdf() {
 
 setup() {
     tb_setup
-    head -c 100K /dev/zero > photo.jpg
-    head -c 100K /dev/zero > shot.png
+    head -c 102400 /dev/zero > photo.jpg
+    head -c 102400 /dev/zero > shot.png
 }
 
 @test "help prints usage and exits 0" {
@@ -74,7 +74,7 @@ setup() {
     run shrink photo.jpg 50K
     [ "$status" -eq 3 ]
     [[ $output == "shrink: needs magick."* ]]
-    head -c 20K /dev/zero > clip.mp4
+    head -c 20480 /dev/zero > clip.mp4
     run shrink clip.mp4 10K
     [ "$status" -eq 3 ]
     [[ $output == "shrink: needs ffmpeg."* ]]
@@ -150,7 +150,7 @@ setup() {
 
 @test "an image that cannot fit writes nothing" {
     fake_magick
-    head -c 300K /dev/zero > big.jpg
+    head -c 307200 /dev/zero > big.jpg
     run shrink big.jpg 1K
     [ "$status" -eq 1 ]
     [[ $output == *"wrote nothing. The smallest ImageMagick gets for big.jpg is 1.3KB, at 10% wide"* ]]
@@ -174,7 +174,7 @@ setup() {
 
 @test "a video gets two passes at a bitrate from its length" {
     fake_ffmpeg
-    head -c 150K /dev/zero > clip.mp4
+    head -c 153600 /dev/zero > clip.mp4
     run shrink -v clip.mp4 100K -- -preset slow
     [ "$status" -eq 0 ]
     [[ $output == *"shrink: bitrate: 100KB over 2s, less 96k for sound, is 301k"* ]]
@@ -185,7 +185,7 @@ setup() {
 
 @test "a video that overshoots gets one more try" {
     fake_ffmpeg
-    head -c 150K /dev/zero > clip.mp4
+    head -c 153600 /dev/zero > clip.mp4
     FAKE_OVER=110 run shrink clip.mp4 100K
     [ "$status" -eq 0 ]
     [[ $output == *"trying again at 268k"* ]]
@@ -197,8 +197,8 @@ setup() {
 
 @test "a webm stays webm, an avi becomes mp4, and a tiny target is refused" {
     fake_ffmpeg
-    head -c 150K /dev/zero > clip.webm
-    head -c 150K /dev/zero > old.avi
+    head -c 153600 /dev/zero > clip.webm
+    head -c 153600 /dev/zero > old.avi
     FAKE_SILENT=1 run shrink -s 100K clip.webm old.avi
     [ "$status" -eq 0 ]
     [ -f clip-small.webm ]
@@ -212,7 +212,7 @@ setup() {
 
 @test "a file of another kind exits 1" {
     printf 'text\n' > notes.txt
-    head -c 2K /dev/zero >> notes.txt
+    head -c 2048 /dev/zero >> notes.txt
     run shrink notes.txt 1K
     [ "$status" -eq 1 ]
     [[ $output == *"notes.txt is not an image, a video or a PDF"* ]]

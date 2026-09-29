@@ -478,7 +478,7 @@ esac"
 }
 
 @test "a .001 set" {
-    head -c 4K /dev/urandom > backup/rand
+    head -c 4096 /dev/urandom > backup/rand
     tar -cf backup.tar backup && rm -rf backup
     split -b 3k -d -a 3 --numeric-suffixes=1 backup.tar backup.tar.
     rm backup.tar
@@ -498,7 +498,7 @@ esac"
 
 @test "a .7z.001 set" {
     need_7z
-    head -c 8K /dev/urandom > backup/rand
+    head -c 8192 /dev/urandom > backup/rand
     7z a -v4k -bd -bso0 backup.7z backup >/dev/null && rm -rf backup
     [ -f backup.7z.002 ]
     run unpack -k backup.7z.002
@@ -509,7 +509,7 @@ esac"
 
 @test "a .zip.001 set" {
     command -v zip >/dev/null || skip "zip is not installed"
-    head -c 4K /dev/urandom > backup/rand
+    head -c 4096 /dev/urandom > backup/rand
     zip -q -r backup.zip backup && rm -rf backup
     split -b 2k -d -a 3 --numeric-suffixes=1 backup.zip backup.zip.
     rm backup.zip
@@ -520,7 +520,7 @@ esac"
 
 @test "a .z01 set, and a lone last part" {
     command -v zip >/dev/null || skip "zip is not installed"
-    head -c 70K /dev/urandom > backup/rand
+    head -c 71680 /dev/urandom > backup/rand
     zip -q -r -s 64k backup.zip backup && rm -rf backup
     [ -f backup.z01 ]
     mv backup.z01 aside
@@ -659,7 +659,7 @@ esac"
 }
 
 @test "-t fails a cut archive" {
-    head -c 8K /dev/urandom > backup/rand
+    head -c 8192 /dev/urandom > backup/rand
     tar -czf full.tgz backup && rm -rf backup
     head -c 5000 full.tgz > cut.tgz
     run unpack -t cut.tgz
@@ -875,7 +875,7 @@ exec $real \"\$@\""
 }
 
 # Zeros squeeze far past 100x.
-mk_bomb() { head -c 2M /dev/zero > zeros; gzip -c zeros > zeros.gz; rm zeros; }
+mk_bomb() { head -c 2097152 /dev/zero > zeros; gzip -c zeros > zeros.gz; rm zeros; }
 
 @test "over 100x with no terminal is refused" {
     mk_bomb

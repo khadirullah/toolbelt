@@ -6,9 +6,9 @@ load helpers
 setup() {
     tb_setup
     mkdir -p vms dl 'my docs'
-    head -c 40K /dev/zero > vms/disk.img
-    head -c 20K /dev/zero > dl/debian.iso
-    head -c 8K /dev/zero > 'my docs/tax 2025.pdf'
+    head -c 40960 /dev/zero > vms/disk.img
+    head -c 20480 /dev/zero > dl/debian.iso
+    head -c 8192 /dev/zero > 'my docs/tax 2025.pdf'
     printf 'hi\n' > small.txt
     touch -d '10 days ago' dl/debian.iso
 }

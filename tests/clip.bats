@@ -134,7 +134,7 @@ log() { cat "$BOARD.log" 2>/dev/null; }
 
 @test "options after -- go to the tool" {
     export WAYLAND_DISPLAY=wayland-0
-    head -c 1K /dev/urandom > report.png
+    head -c 1024 /dev/urandom > report.png
     run clip report.png -- --type image/png
     [ "$status" -eq 0 ]
     [[ $(log) == "wl-copy --type image/png" ]]

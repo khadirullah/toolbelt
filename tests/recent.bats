@@ -8,7 +8,7 @@ setup() {
     mkdir -p src tests .git node_modules/pkg .cache
     printf 'print(1)\n' > src/app.py
     printf 'x\n' > tests/test_app.py
-    head -c 3K /dev/zero > README.md
+    head -c 3072 /dev/zero > README.md
     printf 'old\n' > old.txt
     printf 'ref\n' > .git/HEAD
     printf 'js\n' > node_modules/pkg/index.js
