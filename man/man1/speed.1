@@ -1,0 +1,231 @@
+.TH "SPEED" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+speed \- download and upload speed test
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+speed [options] [-- tool options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBspeed\fR measures how fast this machine can download and upload, and how long a round trip to a nearby server takes. It prints one line per result, with a bar so download and upload compare at a glance, and says how much data the test used.
+.PP
+.RS 4
+.nf
+$ speed
+server    Cloudflare MAA, ping 18 ms, jitter 3 ms
+download   94.3 Mbit/s  ████████████████████
+upload     41.8 Mbit/s  █████████
+used      100 MB down, 100 MB up in 29s
+wifi      Home-5G, 5 GHz, signal -61 dBm
+.fi
+.RE
+.PP
+On Wi\-Fi it adds the network, the band and the signal strength, since a weak signal is the most common reason for a low number. Compare with a cable before you blame the provider.
+.SH WHAT THE NUMBERS MEAN
+.TP
+\fBserver\fR
+Where the test ran. With curl, \fBMAA\fR is the Cloudflare data centre, named after the nearest airport code.
+.TP
+\fBping\fR
+The fastest of five round trips to the server, in milliseconds. Games and video calls feel it most.
+.TP
+\fBjitter\fR
+How much the round trip changes from one try to the next. Above about 30 ms, calls start to stutter.
+.TP
+\fBdownload\fR, \fBupload\fR
+Megabits per second, the unit providers sell. Divide by 8 for megabytes per second.
+.TP
+\fBused\fR
+The data the test moved, and how long the whole run took.
+.TP
+\fBwifi\fR
+The network, the band, and the signal in dBm.
+.PP
+Signal strength in dBm is negative, and closer to zero is better. \-50 is excellent, \-60 good, \-70 fair, and below \-75 the link slows down and drops. The 5 GHz and 6 GHz bands are faster than 2.4 GHz but reach less far through walls.
+.SH HOW IT TESTS
+.PP
+\fBspeed\fR uses the first of these that is installed:
+.TP
+\fBlibrespeed\-cli\fR
+Server: The nearest LibreSpeed server.. Notes: Open source. \fB\-\- \-\-server ID\fR picks another, and \fBlibrespeed\-cli \-\-list\fR shows them.
+.TP
+\fBspeedtest\fR
+Server: The nearest Ookla server.. Notes: Ookla's own CLI. The older Python \fBspeedtest\-cli\fR, which is also called \fBspeedtest\fR, is skipped because its output differs.
+.TP
+\fBcurl\fR
+Server: The nearest Cloudflare edge, \fBspeed.cloudflare.com\fR.. Notes: Always there, and the only one that honours \fB\-d\fR, \fB\-u\fR and \fB\-s\fR.
+.PP
+\fB\-d\fR, \fB\-u\fR and \fB\-s\fR always use curl, since the other tools do not let you choose the direction or the size.
+.SS The curl test
+.PP
+With curl, \fBspeed\fR does three things:
+.IP \(bu 2
+It asks \fBhttps://speed.cloudflare.com/cdn\-cgi/trace\fR five times. Each time, the time curl takes to open the TCP connection is one round trip. The fastest of the five is the ping, and the average change between tries is the jitter. The answer also names the data centre.
+.IP \(bu 2
+It downloads \fB\-s\fR megabytes, 100 by default, as four streams of a quarter each from \fBhttps://speed.cloudflare.com/__down?bytes=N\fR, all at once.
+.IP \(bu 2
+It uploads the same amount as four streams of zeros to \fBhttps://speed.cloudflare.com/__up\fR.
+.PP
+Four streams side by side fill a fast line better than one. A single TCP stream often stops short of the real speed, because it takes time to ramp up and a lost packet slows it down again.
+.PP
+The speed is the bytes moved times 8, divided by the time of the slowest stream. Nothing is saved to disk, since the downloads go to \fB/dev/null\fR and the uploads are read from \fB/dev/zero\fR.
+.SH DATA USE
+.PP
+A full default test moves about 200 MB with curl, 100 MB each way. LibreSpeed and Ookla run for a fixed time rather than a fixed size, so on a fast line they use more, often several hundred MB.
+.PP
+That matters on a phone hotspot or a capped plan. \fBspeed\fR asks NetworkManager whether the connection is metered, and asks before it starts:
+.PP
+.RS 4
+.nf
+speed: Pixel-8 hotspot is a metered connection, and the test
+       uses about 200 MB. Run it anyway? [y/N]
+.fi
+.RE
+.PP
+NetworkManager marks a connection as metered when you set it so, and guesses it for phone hotspots. Answering no exits 5 and moves no data. With no terminal to ask in, \fBspeed\fR refuses with exit 4. \fB\-y\fR goes ahead without asking.
+.PP
+\fB\-s 10\fR keeps a test small. It is less exact on fast lines, since the test ends before the streams reach full speed, but fine for telling 5 Mbit/s from 50.
+.SH OPTIONS
+.TP
+\fB\-d\fR, \fB\-\-down\fR
+Download only.
+.TP
+\fB\-u\fR, \fB\-\-up\fR
+Upload only.
+.TP
+\fB\-s\fR, \fB\-\-size MB\fR
+Megabytes per direction, 1 to 1000. 100 by default, split into 4 streams.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Do not ask on a metered connection.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the numbers in Mbit/s, download first, such as \fB94.3 41.8\fR. With \fB\-d\fR or \fB\-u\fR, one number.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the commands before they run.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to whichever tool runs:
+.PP
+.RS 4
+.nf
+$ speed -- --server 52
+$ speed -- --server-id 12345
+$ speed -d -- --interface wlp3s0
+.fi
+.RE
+.PP
+The first picks a LibreSpeed server, the second an Ookla server. The third is for curl, and makes the download go through the Wi\-Fi card even when a cable is plugged in too.
+.SH NEEDS
+.PP
+\fBcurl\fR, from the \fBcurl\fR package on every distro.
+.PP
+\fBlibrespeed\-cli\fR and \fBspeedtest\fR are optional. Neither is in the main repos of most distros. LibreSpeed publishes \fBlibrespeed\-cli\fR builds on its GitHub releases page, and Ookla ships \fBspeedtest\fR from its own repository at \fBspeedtest.net/apps/cli\fR.
+.PP
+\fBnmcli\fR from NetworkManager is optional. It gives the metered flag. Without it, \fBspeed\fR never asks. \fBiw\fR gives the Wi\-Fi band and signal, with \fB/proc/net/wireless\fR and \fBnmcli\fR as the fallback. \fBip\fR finds the interface of the default route.
+.SH EXAMPLES
+.SS A full test
+.PP
+.RS 4
+.nf
+$ speed
+server    Cloudflare MAA, ping 18 ms, jitter 3 ms
+download   94.3 Mbit/s  ████████████████████
+upload     41.8 Mbit/s  █████████
+used      100 MB down, 100 MB up in 29s
+wifi      Home-5G, 5 GHz, signal -61 dBm
+.fi
+.RE
+.SS Only the numbers, for a log
+.PP
+.RS 4
+.nf
+$ speed -q
+94.3 41.8
+$ echo "$(date -I) $(speed -q -y)" >> ~/speed.log
+.fi
+.RE
+.SS A small download test, with the command shown
+.PP
+.RS 4
+.nf
+$ speed -v -d -s 25
+speed: testing with curl on wlp3s0
++ curl -s --max-time 5 https://speed.cloudflare.com/cdn-cgi/trace
++ curl -s -o /dev/null -w '%{size_download} %{time_total}' 'https://speed.cloudflare.com/__down?bytes=6250000'
+server    Cloudflare MAA, ping 18 ms, jitter 3 ms
+download  91.8 Mbit/s, 25 MB in 2.2s
+wifi      Home-5G, 5 GHz, signal -61 dBm
+.fi
+.RE
+.PP
+The command shown is one of the four streams.
+.SS With LibreSpeed installed
+.PP
+.RS 4
+.nf
+$ speed
+server    Chennai, India (Example), ping 18 ms, jitter 3 ms
+download   94.3 Mbit/s  ████████████████████
+upload     41.8 Mbit/s  █████████
+used      118 MB down, 52 MB up in 21s
+.fi
+.RE
+.SS On a phone hotspot
+.PP
+.RS 4
+.nf
+$ speed
+speed: Pixel-8 hotspot is a metered connection, and the test
+       uses about 200 MB. Run it anyway? [y/N] n
+Nothing changed.
+.fi
+.RE
+.SS No internet
+.PP
+.RS 4
+.nf
+$ speed
+speed: no answer from speed.cloudflare.com. Check the link with: netcheck
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+The number is far below what the plan promises : Test over a cable to rule out Wi\-Fi. If the cable number is good, move closer to the router or switch to 5 GHz. If the cable number is also low, test at another time of day. Evening slowdowns point at the provider's network.
+.PP
+Download is fine but upload is very low : Most home plans sell far less upload than download, so check the plan first. A VPN also slows upload more.
+.PP
+The result changes a lot between runs : Other devices on the network share the line. Pause big downloads and streams, and run it twice.
+.PP
+\fBspeedtest\fR is installed but \fBspeed\fR uses curl : The installed \fBspeedtest\fR is the older Python one. Remove it, or install Ookla's CLI.
+.PP
+The test is slow to start : LibreSpeed and Ookla first ping a list of servers to find the nearest one. Pass a server with \fB\-\- \-\-server ID\fR.
+.SH EXIT STATUS
+.TP
+0
+The test finished.
+.TP
+1
+The test failed, such as no answer from the server or a stream that broke.
+.TP
+2
+Bad usage, such as \fB\-d\fR with \fB\-u\fR, or a size outside 1 to 1000.
+.TP
+3
+\fBcurl\fR is missing.
+.TP
+4
+A metered connection with no terminal to ask in.
+.TP
+5
+You answered no on a metered connection.
+.SH SEE ALSO
+.PP
+\fBnetcheck\fR, \fBhttptime\fR, \fBmyip\fR, \fBcurl(1)\fR, \fBnmcli(1)\fR

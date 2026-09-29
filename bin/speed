@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# speed: download and upload speed test.
+set -uo pipefail
+TB_CMD=speed
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: speed [options] [-- tool options]
+
+Download and upload speed test.
+
+Options:
+  -d, --down          download only
+  -u, --up            upload only
+  -s, --size MB       data per direction, 100 by default, in 4 streams
+  -y, --yes           do not ask on a metered connection
+  -q, --quiet         only the numbers in Mbit/s, such as "94.3 41.8"
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to librespeed-cli, speedtest or curl, whichever runs.
+
+Examples:
+  speed
+  speed -d -s 25
+  speed -q
+
+Needs: curl. librespeed-cli or speedtest when installed. nmcli for the
+       metered flag and Wi-Fi band. See man speed.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+CF=https://speed.cloudflare.com
+STREAMS=4
+
+# Megabytes, in powers of ten like every speed test.
+mb() { awk -v b="$1" 'BEGIN { m = b / 1000000; if (m < 10) printf "%.1f MB", m; else printf "%d MB", m + 0.5 }'; }
+
+# A bar of up to 20 blocks for a value against the largest.
+bar() {
+    awk -v v="$1" -v max="$2" 'BEGIN {
+        n = max > 0 ? int(v / max * 20 + 0.5) : 0
+        if (n == 0 && v > 0) n = 1
+        for (i = 0; i < n; i++) printf "\342\226\210"
+    }'
+}
+
+# One number from flat JSON, such as "download":94.3.
+json_num() { grep -o "\"$1\":[0-9.eE+-]*" <<<"$2" | head -n1 | cut -d: -f2; }
+
+# The interface of the default route.
+default_iface() {
+    ip route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+# Ask before a test on a metered connection, such as a phone hotspot.
+check_metered() {
+    local dev=$1 metered name estimate
+    tb_has nmcli && [[ -n $dev ]] || return 0
+    metered=$(nmcli -t -g GENERAL.METERED device show "$dev" 2>/dev/null | head -n1)
+    [[ $metered == yes* ]] || return 0
+    name=$(nmcli -t -g GENERAL.CONNECTION device show "$dev" 2>/dev/null | head -n1)
+    if [[ $backend == curl ]]; then
+        estimate="uses about $(( (do_down + do_up) * size_mb )) MB"
+    else
+        estimate="can use a few hundred MB"
+    fi
+    if (( TB_YES )); then
+        tb_info "speed: ${name:-$dev} is a metered connection, going ahead because of --yes"
+        return 0
+    fi
+    tb_err "${name:-$dev} is a metered connection, and the test"
+    tb_confirm "$(printf '%*s' $(( ${#TB_CMD} + 2 )) "")$estimate. Run it anyway?"
+}
+
+# The Wi-Fi line: network, band and signal. Empty on a wired link.
+wifi_line() {
+    local dev=$1 link freq="" signal="" name="" band=""
+    [[ -n $dev ]] || return 0
+    if tb_has iw; then
+        link=$(iw dev "$dev" link 2>/dev/null)
+        [[ $link == Connected* ]] || return 0
+        freq=$(sed -n 's/^[[:space:]]*freq: \([0-9.]*\).*/\1/p' <<<"$link" | head -n1)
+        signal=$(sed -n 's/^[[:space:]]*signal: \(-\{0,1\}[0-9]*\).*/\1/p' <<<"$link" | head -n1)
+        name=$(sed -n 's/^[[:space:]]*SSID: //p' <<<"$link" | head -n1)
+    elif [[ -r /proc/net/wireless ]] && grep -q "^ *$dev:" /proc/net/wireless; then
+        signal=$(awk -v d="$dev:" '$1 == d { sub(/\.$/, "", $4); print $4 }' /proc/net/wireless)
+        if tb_has nmcli; then
+            freq=$(nmcli -t -f ACTIVE,FREQ device wifi list ifname "$dev" --rescan no 2>/dev/null |
+                awk -F: '$1 == "yes" { print $2 + 0; exit }')
+            name=$(nmcli -t -g GENERAL.CONNECTION device show "$dev" 2>/dev/null | head -n1)
+        fi
+    else
+        return 0
+    fi
+    if [[ -n $freq ]]; then
+        freq=${freq%.*}
+        if (( freq >= 5925 )); then band="6 GHz"
+        elif (( freq >= 4900 )); then band="5 GHz"
+        else band="2.4 GHz"; fi
+    fi
+    local out=${name:-$dev}
+    [[ -n $band ]] && out+=", $band"
+    [[ -n $signal ]] && out+=", signal $signal dBm"
+    echo "$out"
+}
+
+# ---------------------------------------------------------------- curl
+
+# Round trips to the nearest Cloudflare edge. Sets colo, ping_ms and jitter_ms.
+cf_ping() {
+    local i out rtts=() first=1
+    colo=""
+    tb_show curl -s --max-time 5 "$CF/cdn-cgi/trace"
+    for i in 1 2 3 4 5; do
+        out=$(curl -s --max-time 5 -w '\nrtt=%{time_connect} %{time_namelookup}\n' ${TB_PASS[@]+"${TB_PASS[@]}"} "$CF/cdn-cgi/trace") || continue
+        if (( first )); then
+            colo=$(sed -n 's/^colo=//p' <<<"$out" | head -n1)
+            first=0
+        fi
+        rtts+=("$(awk '/^rtt=/ { sub(/^rtt=/, ""); printf "%.3f", ($1 - $2) * 1000 }' <<<"$out")")
+    done
+    (( ${#rtts[@]} )) || return 1
+    read -r ping_ms jitter_ms < <(printf '%s\n' "${rtts[@]}" | awk '
+        { v[NR] = $1; if (NR == 1 || $1 < min) min = $1 }
+        END {
+            j = 0
+            for (i = 2; i <= NR; i++) { d = v[i] - v[i - 1]; j += d < 0 ? -d : d }
+            printf "%.0f %.0f\n", min, (NR > 1 ? j / (NR - 1) : 0)
+        }')
+}
+
+# Run the streams for one direction. Prints "bytes seconds" for all of them.
+cf_run() {
+    local dir=$1 work=$2 per i pids=() rc=0 out bytes=0 secs=0 b s
+    per=$(( size_mb * 1000000 / STREAMS ))
+    if [[ $dir == down ]]; then
+        tb_show curl -s -o /dev/null -w '%{size_download} %{time_total}' ${TB_PASS[@]+"${TB_PASS[@]}"} "$CF/__down?bytes=$per"
+    else
+        tb_show curl -s -o /dev/null -w '%{size_upload} %{time_total}' -X POST -T - ${TB_PASS[@]+"${TB_PASS[@]}"} "$CF/__up"
+    fi
+    for ((i = 1; i <= STREAMS; i++)); do
+        if [[ $dir == down ]]; then
+            curl -s -o /dev/null --max-time 300 -w '%{size_download} %{time_total}' ${TB_PASS[@]+"${TB_PASS[@]}"} \
+                "$CF/__down?bytes=$per" > "$work/$dir.$i" 2>/dev/null &
+        else
+            head -c "$per" /dev/zero | curl -s -o /dev/null --max-time 300 -w '%{size_upload} %{time_total}' \
+                -X POST -H 'Content-Type: application/octet-stream' -T - ${TB_PASS[@]+"${TB_PASS[@]}"} \
+                "$CF/__up" > "$work/$dir.$i" 2>/dev/null &
+        fi
+        pids+=($!)
+    done
+    for i in "${pids[@]}"; do
+        wait "$i" || rc=$?
+    done
+    # The streams ran side by side, so the time is the slowest stream.
+    for ((i = 1; i <= STREAMS; i++)); do
+        read -r b s < "$work/$dir.$i" 2>/dev/null || continue
+        bytes=$(( bytes + ${b%.*} ))
+        secs=$(awk -v a="$secs" -v b="$s" 'BEGIN { print (b > a ? b : a) }')
+    done
+    (( rc == 0 && bytes > 0 )) || return 1
+    echo "$bytes $secs"
+}
+
+run_curl() {
+    local work r
+    tb_need curl
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    tb_line "speed: ping"
+    cf_ping || { tb_line_end; tb_die 1 "no answer from speed.cloudflare.com. Check the link with: netcheck"; }
+    server="Cloudflare${colo:+ $colo}"
+    if (( do_down )); then
+        tb_line "speed: download, $(tb_plural "$STREAMS" stream)"
+        r=$(cf_run down "$work") || { tb_line_end; tb_die 1 "the download from speed.cloudflare.com failed"; }
+        read -r down_bytes down_secs <<<"$r"
+        down=$(awk -v b="$down_bytes" -v s="$down_secs" 'BEGIN { printf "%.1f", (s > 0 ? b * 8 / s / 1000000 : 0) }')
+    fi
+    if (( do_up )); then
+        tb_line "speed: upload, $(tb_plural "$STREAMS" stream)"
+        r=$(cf_run up "$work") || { tb_line_end; tb_die 1 "the upload to speed.cloudflare.com failed"; }
+        read -r up_bytes up_secs <<<"$r"
+        up=$(awk -v b="$up_bytes" -v s="$up_secs" 'BEGIN { printf "%.1f", (s > 0 ? b * 8 / s / 1000000 : 0) }')
+    fi
+    tb_line_end
+}
+
+# ---------------------------------------------------------------- other tools
+
+run_librespeed() {
+    local out
+    tb_show librespeed-cli --json ${TB_PASS[@]+"${TB_PASS[@]}"}
+    tb_line "speed: testing with librespeed-cli"
+    out=$(librespeed-cli --json ${TB_PASS[@]+"${TB_PASS[@]}"} 2>/dev/null)
+    tb_line_end
+    down=$(json_num download "$out")
+    [[ -n $down ]] || tb_die 1 "librespeed-cli gave no result. Run it by hand to see why, or uninstall it to use curl"
+    up=$(json_num upload "$out")
+    ping_ms=$(json_num ping "$out")
+    jitter_ms=$(json_num jitter "$out")
+    down_bytes=$(json_num bytes_received "$out")
+    up_bytes=$(json_num bytes_sent "$out")
+    server=$(grep -o '"server":{"name":"[^"]*"' <<<"$out" | head -n1 | sed 's/.*"name":"//; s/"$//')
+    down=$(awk -v v="$down" 'BEGIN { printf "%.1f", v }')
+    up=$(awk -v v="$up" 'BEGIN { printf "%.1f", v }')
+    ping_ms=$(awk -v v="${ping_ms:-0}" 'BEGIN { printf "%.0f", v }')
+    jitter_ms=$(awk -v v="${jitter_ms:-0}" 'BEGIN { printf "%.0f", v }')
+}
+
+# Ookla's speedtest, not the older Python speedtest-cli with the same name.
+is_ookla() {
+    tb_has speedtest && speedtest --version 2>/dev/null | head -n1 | grep -q Ookla
+}
+
+run_ookla() {
+    local out dl ul dls uls
+    tb_show speedtest -f json --accept-license --accept-gdpr ${TB_PASS[@]+"${TB_PASS[@]}"}
+    tb_line "speed: testing with speedtest"
+    out=$(speedtest -f json --accept-license --accept-gdpr ${TB_PASS[@]+"${TB_PASS[@]}"} 2>/dev/null)
+    tb_line_end
+    # "download":{"bandwidth":11787500,"bytes":123456,"elapsed":10000}
+    dl=$(grep -o '"download":{[^}]*}' <<<"$out")
+    ul=$(grep -o '"upload":{[^}]*}' <<<"$out")
+    [[ -n $dl ]] || tb_die 1 "speedtest gave no result. Run it by hand to see why, or uninstall it to use curl"
+    down=$(awk -v v="$(json_num bandwidth "$dl")" 'BEGIN { printf "%.1f", v * 8 / 1000000 }')
+    up=$(awk -v v="$(json_num bandwidth "$ul")" 'BEGIN { printf "%.1f", v * 8 / 1000000 }')
+    down_bytes=$(json_num bytes "$dl")
+    up_bytes=$(json_num bytes "$ul")
+    dls=$(json_num elapsed "$dl")
+    uls=$(json_num elapsed "$ul")
+    down_secs=$(awk -v v="${dls:-0}" 'BEGIN { print v / 1000 }')
+    up_secs=$(awk -v v="${uls:-0}" 'BEGIN { print v / 1000 }')
+    ping_ms=$(awk -v v="$(json_num latency "$out")" 'BEGIN { printf "%.0f", v }')
+    jitter_ms=$(awk -v v="$(json_num jitter "$out")" 'BEGIN { printf "%.0f", v }')
+    server=$(grep -o '"server":{[^}]*}' <<<"$out" | grep -o '"name":"[^"]*"' | head -n1 | sed 's/"name":"//; s/"$//')
+    local loc
+    loc=$(grep -o '"server":{[^}]*}' <<<"$out" | grep -o '"location":"[^"]*"' | head -n1 | sed 's/"location":"//; s/"$//')
+    [[ -n $loc ]] && server+=" $loc"
+}
+
+# ---------------------------------------------------------------- output
+
+report() {
+    local max wifi t0=$1 took
+    took=$(tb_elapsed $(( $(tb_now_ms) - t0 )))
+    if (( TB_QUIET )); then
+        local nums=()
+        (( do_down )) && nums+=("$down")
+        (( do_up )) && nums+=("$up")
+        echo "${nums[*]}"
+        return 0
+    fi
+    printf '%-10s%s, ping %s ms, jitter %s ms\n' server "${server:-unknown}" "$ping_ms" "$jitter_ms"
+    if (( do_down && do_up )); then
+        max=$(awk -v a="$down" -v b="$up" 'BEGIN { print (a > b ? a : b) }')
+        printf '%-10s%5s Mbit/s  %s\n' download "$down" "$(bar "$down" "$max")"
+        printf '%-10s%5s Mbit/s  %s\n' upload "$up" "$(bar "$up" "$max")"
+        if [[ -n $down_bytes && -n $up_bytes ]]; then
+            printf '%-10s%s down, %s up in %s\n' used "$(mb "$down_bytes")" "$(mb "$up_bytes")" "$took"
+        fi
+    elif (( do_down )); then
+        printf '%-10s%s Mbit/s, %s in %ss\n' download "$down" "$(mb "$down_bytes")" \
+            "$(awk -v s="$down_secs" 'BEGIN { printf "%.1f", s }')"
+    else
+        printf '%-10s%s Mbit/s, %s in %ss\n' upload "$up" "$(mb "$up_bytes")" \
+            "$(awk -v s="$up_secs" 'BEGIN { printf "%.1f", s }')"
+    fi
+    wifi=$(wifi_line "$dev")
+    [[ -n $wifi ]] && printf '%-10s%s\n' wifi "$wifi"
+    return 0
+}
+
+main() {
+    local t0
+    dev=""
+    tb_has ip && dev=$(default_iface)
+    if (( do_down && do_up && ! size_set )) && tb_has librespeed-cli; then
+        backend=librespeed
+    elif (( do_down && do_up && ! size_set )) && is_ookla; then
+        backend=ookla
+    else
+        backend=curl
+        tb_need curl
+    fi
+    check_metered "$dev"
+    tb_say "testing with $backend on ${dev:-the default route}"
+    t0=$(tb_now_ms)
+    case $backend in
+        librespeed) run_librespeed ;;
+        ookla) run_ookla ;;
+        curl) run_curl ;;
+    esac
+    report "$t0"
+}
+
+do_down=1
+do_up=1
+size_mb=100
+size_set=0
+down="" up="" down_bytes="" up_bytes="" down_secs=0 up_secs=0 ping_ms=0 jitter_ms=0 server="" colo="" backend="" dev=""
+only=""
+tb_expand "s" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -d|--down) [[ $only == up ]] && tb_usage_error "-d and -u do not go together, leave both out for both"; only=down ;;
+        -u|--up)   [[ $only == down ]] && tb_usage_error "-d and -u do not go together, leave both out for both"; only=up ;;
+        -s|--size) tb_optarg "$@"; size_mb=$2; size_set=1; shift ;;
+        --)        shift; TB_PASS=("$@"); break ;;
+        -*)        tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)         tb_usage_error "speed takes no arguments, got $1" ;;
+    esac
+    shift
+done
+[[ $size_mb =~ ^[0-9]+$ ]] && (( size_mb >= 1 && size_mb <= 1000 )) || tb_usage_error "--size needs megabytes from 1 to 1000, got $size_mb"
+[[ $only == down ]] && do_up=0
+[[ $only == up ]] && do_down=0
+
+main
+exit $?
