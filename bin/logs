@@ -88,10 +88,15 @@ parse_since() {
         return 0
     fi
     case $s in
-        today|yesterday|now) SINCE_EPOCH=$(date -d "$s 00:00" +%s 2>/dev/null) ;;
+        now) SINCE_EPOCH=$now ;;
+        today|yesterday)
+            # BusyBox date reads neither word, so give it the date itself.
+            SINCE_EPOCH=$(date -d "$(printf '%(%F)T' -1) 00:00" +%s 2>/dev/null)
+            if [[ $s == yesterday && -n $SINCE_EPOCH ]]; then
+                SINCE_EPOCH=$(date -d "$(printf '%(%F)T' $(( SINCE_EPOCH - 43200 ))) 00:00" +%s 2>/dev/null)
+            fi ;;
         *) SINCE_EPOCH=$(date -d "$s" +%s 2>/dev/null) ;;
     esac
-    [[ $s == now ]] && SINCE_EPOCH=$now
     if [[ ! $SINCE_EPOCH =~ ^[0-9]+$ ]]; then
         tb_err "cannot read the time $s. Try 2h, today, yesterday or 2026-09-28 18:00."
         exit "$E_USAGE"
