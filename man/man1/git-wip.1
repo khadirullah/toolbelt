@@ -1,0 +1,167 @@
+.TH "GIT-WIP" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+git\-wip \- save every change as a commit named wip
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+git wip [options]
+git-wip [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBgit wip\fR puts everything you have not committed into one commit named \fBwip\fR, short for work in progress. That covers changed files, deleted files and new files git has never seen. Files that \fB.gitignore\fR names stay out.
+.PP
+Use it when you have to leave a branch in a hurry, to review a pull request or fix something on \fBmain\fR. \fBgit stash\fR does a similar job, but a stash is easy to forget, it belongs to no branch, and it skips new files unless you remember \fB\-u\fR. A wip commit stays on the branch you were on, and \fBgit log\fR shows it the next time you look.
+.PP
+When you come back, \fBgit undo\fR asks, then takes the commit back and leaves all its changes staged. You carry on as if you never left.
+.PP
+\fBgit wip\fR works from any folder inside the repository. It always saves the whole working tree, not only the folder you are in.
+.PP
+It commits with \fB\-\-no\-verify\fR, so pre\-commit and commit\-msg hooks do not run. A linter or test hook would otherwise block exactly the half\-done work \fBgit wip\fR is for. The hooks run as usual when you make the real commit.
+.PP
+It is a script named \fBgit\-wip\fR in toolbelt's \fBbin\fR folder. Git runs any program named \fBgit\-NAME\fR on your PATH as \fBgit NAME\fR.
+.SH OPTIONS
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show the count and each git command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fBgit wip\fR takes no arguments. The commit is always named \fBwip\fR, so you can spot it in \fBgit log\fR and scripts can look for it.
+.SH HOW IT COUNTS FILES
+.PP
+The result line counts files from \fBgit status \-\-porcelain \-\-untracked\-files=all\fR.
+.IP \(bu 2
+A file git knows that you changed, deleted or renamed counts as changed.
+.IP \(bu 2
+A file git has never seen, or one you added with \fBgit add\fR but never committed, counts as new.
+.IP \(bu 2
+Every file inside a new folder counts on its own, so a new folder with 3 files adds 3.
+.SH HELP AND THE MAN PAGE
+.PP
+\fBgit wip \-h\fR and \fBgit\-wip \-\-help\fR print the help. \fBgit wip \-\-help\fR makes git open the man page \fBgit\-wip(1)\fR, which toolbelt installs from this document. Without an installed man page git says \fBNo manual entry for git\-wip\fR.
+.SH SAFETY CHECKS
+.IP \(bu 2
+A clean working tree has nothing to save. \fBgit wip\fR exits 1 and makes no empty commit.
+.IP \(bu 2
+A merge, rebase, cherry\-pick or revert that is half done makes \fBgit wip\fR refuse with exit 4. A wip commit in the middle of a rebase would end up inside the rebased history.
+.IP \(bu 2
+A bare repository has no files to save. \fBgit wip\fR exits 1.
+.IP \(bu 2
+It never pushes. The wip commit stays on your machine until you push it yourself.
+.SH PASS\-THROUGH
+.PP
+None. \fBgit wip\fR runs \fBgit add \-A\fR and \fBgit commit \-q \-\-no\-verify \-m wip\fR, and \fB\-v\fR prints both.
+.SH NEEDS
+.PP
+git 2.30 or newer, from the \fBgit\fR package on every distro.
+.SH EXAMPLES
+.SS Save and leave
+.PP
+.RS 4
+.nf
+$ git wip
+saved 1 changed and 2 new files as 378f844 "wip" on feat/ctx-warn
+git undo brings them back
+$ git switch main
+.fi
+.RE
+.SS Come back
+.PP
+.RS 4
+.nf
+$ git switch feat/ctx-warn
+Switched to branch 'feat/ctx-warn'
+Your branch is ahead of 'origin/feat/ctx-warn' by 2 commits.
+  (use "git push" to publish your local commits)
+$ git undo -q -y
+undid 378f844 "wip"
+$ git status --short
+M  ctx.sh
+A  lib/prod.sh
+A  notes.md
+.fi
+.RE
+.PP
+The two new files are staged, so they are safe from \fBgit clean\fR from now on.
+.SS See the steps
+.PP
+.RS 4
+.nf
+$ git wip -v
++ git status --porcelain --untracked-files=all
+git-wip: 1 changed and 2 new files to save
++ git add -A
++ git commit -q --no-verify -m wip
+saved 1 changed and 2 new files as 378f844 "wip" on feat/ctx-warn
+git undo brings them back
+.fi
+.RE
+.SS Nothing to save
+.PP
+.RS 4
+.nf
+$ git wip
+git-wip: nothing to save, the working tree is clean
+$ echo $?
+1
+.fi
+.RE
+.SS On a detached HEAD
+.PP
+.RS 4
+.nf
+$ git wip
+saved 1 changed file as e8c02a8 "wip" on a detached HEAD
+git undo brings them back
+.fi
+.RE
+.PP
+A commit on a detached HEAD belongs to no branch. Run \fBgit switch \-c NAME\fR before you leave, or note the hash.
+.SS Save before switching, in one line
+.PP
+.RS 4
+.nf
+$ git wip && git switch main
+saved 1 changed file as fc45a11 "wip" on feat/ctx-warn
+git undo brings them back
+Switched to branch 'main'
+Your branch is up to date with 'origin/main'.
+.fi
+.RE
+.PP
+The \fB&&\fR means the switch only happens when the save worked.
+.SH TROUBLESHOOTING
+.PP
+\fBgit\-wip: nothing to save, the working tree is clean\fR : Everything is committed already. Check with \fBgit status\fR. Files that \fB.gitignore\fR names never count.
+.PP
+\fBgit\-wip: refused, a rebase is in progress. Finish it or abort it first\fR : Run \fBgit status\fR to see where it stopped, then \fBgit rebase \-\-continue\fR or \fBgit rebase \-\-abort\fR.
+.PP
+\fBgit\-wip: git commit failed. The changes are staged, see git status\fR : Most often git has no name or email to commit with. \fBgit whoami\fR shows what is set. Commit signing that needs a passphrase can fail here too when no agent is running.
+.PP
+A wip commit ended up on the remote : \fBgit undo\fR refuses a pushed commit. Make the real commit on top instead, or squash the two with \fBgit rebase \-i\fR before the branch is merged.
+.SH EXIT STATUS
+.TP
+0
+The changes are saved as a wip commit.
+.TP
+1
+Nothing to save, not a repository, or git failed.
+.TP
+2
+Bad usage, such as a message after \fBgit wip\fR.
+.TP
+3
+git is not installed.
+.TP
+4
+Refused, because a merge, rebase, cherry\-pick or revert is in progress.
+.SH SEE ALSO
+.PP
+\fBgit\-undo\fR, \fBgit\-sync\fR, \fBgit\-stash(1)\fR, \fBgit\-commit(1)\fR

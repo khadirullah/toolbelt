@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# git-wip: save every change as a commit named wip.
+set -uo pipefail
+TB_CMD=git-wip
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: git wip [options]
+
+Save every change as a commit named wip.
+
+Options:
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each git command before it runs
+  -h, --help          this help
+
+It stages changed, deleted and new files, skips files that .gitignore
+names, and commits them without running the commit hooks. git undo takes
+the commit back and leaves the changes staged.
+
+Examples:
+  git wip
+  git wip && git switch main
+  git undo
+
+Needs: git 2.30 or newer. See man git-wip.
+Exit: 0 ok, 1 failed or nothing to save, 2 bad usage, 3 no git, 4 refused.
+EOF
+}
+
+git_path() { git rev-parse --git-path "$1" 2>/dev/null; }
+
+check_busy() {
+    local what="" p
+    if [[ -d $(git_path rebase-merge) || -d $(git_path rebase-apply) ]]; then what="a rebase"
+    elif p=$(git_path MERGE_HEAD) && [[ -f $p ]]; then what="a merge"
+    elif p=$(git_path CHERRY_PICK_HEAD) && [[ -f $p ]]; then what="a cherry-pick"
+    elif p=$(git_path REVERT_HEAD) && [[ -f $p ]]; then what="a revert"
+    fi
+    [[ -z $what ]] || tb_die "$E_SAFE" "refused, $what is in progress. Finish it or abort it first"
+}
+
+# "4 changed and 2 new files", "1 changed file", "3 new files".
+count_text() {
+    local changed=$1 new=$2 total=$(( $1 + $2 )) word=files text=""
+    (( total == 1 )) && word=file
+    (( changed )) && text="$changed changed"
+    if (( new )); then
+        [[ -n $text ]] && text+=" and "
+        text+="$new new"
+    fi
+    echo "$text $word"
+}
+
+main() {
+    local status changed=0 new=0 line branch short
+    tb_need git
+    git rev-parse --git-dir >/dev/null 2>&1 || tb_die 1 "not inside a git repository"
+    [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]] ||
+        tb_die 1 "this is a bare repository, it has no files to save"
+    check_busy
+    cd "$(git rev-parse --show-toplevel)" || tb_die 1 "cannot enter the top of the repository"
+
+    tb_show git status --porcelain --untracked-files=all
+    status=$(git status --porcelain --untracked-files=all) || tb_die 1 "git status failed"
+    [[ -n $status ]] || tb_die 1 "nothing to save, the working tree is clean"
+    while IFS= read -r line; do
+        case ${line:0:2} in
+            '??'|A?) ((new++)) ;;
+            *) ((changed++)) ;;
+        esac
+    done <<<"$status"
+    tb_say "$(count_text "$changed" "$new") to save"
+
+    tb_run git add -A || tb_die 1 "git add failed, nothing was saved"
+    # Hooks such as linters would block the half-done work this is for.
+    if ! tb_run git commit -q --no-verify -m wip; then
+        tb_die 1 "git commit failed. The changes are staged, see git status"
+    fi
+    short=$(git rev-parse --short HEAD)
+    branch=$(git symbolic-ref -q --short HEAD) || branch="a detached HEAD"
+    echo "saved $(count_text "$changed" "$new") as $short \"wip\" on $branch"
+    tb_info "git undo brings them back"
+}
+
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -*) tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)  tb_usage_error "git wip takes no arguments, the commit is always named wip" ;;
+    esac
+    shift
+done
+
+main
+exit $?
