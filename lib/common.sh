@@ -160,6 +160,13 @@ tb_unknown() { tb_usage_error "unknown option $1"; }
 
 tb_has() { command -v "$1" >/dev/null 2>&1; }
 
+# True while a pid runs. A zombie counts as gone, since in a container whose
+# PID 1 never reaps, a process that ended stays a zombie for good.
+tb_alive() {
+    kill -0 "$1" 2>/dev/null || return 1
+    ! grep -qs '^State:[[:space:]]*Z' "/proc/$1/status"
+}
+
 # The package manager of this machine: apt, dnf, pacman, zypper or apk.
 tb_pm() {
     if [[ -z ${TB_PM:-} ]]; then

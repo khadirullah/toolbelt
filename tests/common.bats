@@ -34,6 +34,7 @@ case \$cmd in
     run)    tb_run "\$@" ;;
     tmp)    tb_tmpdir d; echo "\$d" ;;
     freename) tb_free_name "\$@" ;;
+    alive)  tb_alive "\$1" && echo alive || echo gone ;;
 esac
 SH
     chmod +x "$BATS_TEST_TMPDIR/stubs/demo"
@@ -172,6 +173,25 @@ SH
     run demo tmp
     [ -n "$output" ]
     [ ! -e "$output" ]
+}
+
+@test "alive counts a zombie as gone" {
+    run demo alive $$
+    [ "$output" = alive ]
+    run demo alive 99999999
+    [ "$output" = gone ]
+    # A child of a process that never waits stays a zombie while that process runs.
+    local z=$BATS_TEST_TMPDIR/zpid holder
+    bash -c 'sleep 0 & echo $! > "$1"; exec sleep 5' _ "$z" &
+    holder=$!
+    for _ in $(seq 50); do
+        [ -s "$z" ] && grep -qs '^State:[[:space:]]*Z' "/proc/$(cat "$z")/status" && break
+        sleep 0.1
+    done
+    kill -0 "$(cat "$z")"
+    run demo alive "$(cat "$z")"
+    kill "$holder"; wait "$holder" || true
+    [ "$output" = gone ]
 }
 
 @test "free_name numbers before the extension" {

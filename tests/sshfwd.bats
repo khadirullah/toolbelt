@@ -190,7 +190,7 @@ spare_port() {
     kill "$FG_PID"
     wait "$FG_PID" || true
     FG_PID=""
-    ! kill -0 "$master" 2>/dev/null
+    ! kill -0 "$master" 2>/dev/null || grep -qs '^State:[[:space:]]*Z' "/proc/$master/status"
 
     nohup sshfwd k8s-master "$p" > out 2>&1 &
     FG_PID=$!

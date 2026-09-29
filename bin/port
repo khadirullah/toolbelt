@@ -160,9 +160,6 @@ show_all() {
     print_lines <<<"$lines"
 }
 
-# True while a pid is alive.
-alive() { kill -0 "$1" 2>/dev/null; }
-
 # Stop one process: TERM, wait up to 5 seconds, then ask before KILL.
 stop_pid() {
     local pid=$1 name=$2 p=$3 start i user
@@ -183,17 +180,17 @@ stop_pid() {
     start=$(tb_now_ms)
     tb_run kill -TERM "$pid" || { tb_err "could not signal pid $pid"; return 1; }
     for ((i = 0; i < 50; i++)); do
-        alive "$pid" || break
+        tb_alive "$pid" || break
         sleep 0.1
     done
-    if alive "$pid"; then
+    if tb_alive "$pid"; then
         tb_confirm "pid $pid did not stop after 5s. Send KILL, which gives it no chance to clean up?"
         tb_run kill -KILL "$pid" || { tb_err "could not signal pid $pid"; return 1; }
         for ((i = 0; i < 20; i++)); do
-            alive "$pid" || break
+            tb_alive "$pid" || break
             sleep 0.1
         done
-        if alive "$pid"; then
+        if tb_alive "$pid"; then
             tb_err "pid $pid is still running after KILL, it may be stuck in the kernel"
             return 1
         fi

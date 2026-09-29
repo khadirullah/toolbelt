@@ -100,7 +100,7 @@ close_master() {
     ssh -S "$sock" -O exit "$host" >/dev/null 2>&1
     # The socket should be gone now. When ssh does not answer, stop the pid,
     # but only when it is the ssh that owns this socket.
-    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+    if [[ -n $pid ]] && tb_alive "$pid"; then
         if tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -qF -- "$sock"; then
             kill "$pid" 2>/dev/null
         fi
@@ -242,7 +242,7 @@ open_tunnel() {
         [[ $mode == socks ]] && printf '%-8s%s\n' "try it" "curl --socks5-hostname 127.0.0.1:$socks_port https://example.com"
         echo "Ctrl+C closes it."
     fi
-    while kill -0 "$pid" 2>/dev/null; do
+    while tb_alive "$pid"; do
         sleep 1
     done
     CLOSED=1
@@ -280,7 +280,7 @@ list_tunnels() {
         read_info "$f" || continue
         host=${info[0]}
         pid=${info[3]}
-        if ! kill -0 "$pid" 2>/dev/null; then
+        if ! tb_alive "$pid"; then
             tb_info "tunnel $id to $host had stopped, removed it"
             rm -f "$f" "$dir/$id.sock" "$dir/$id.log"
             continue
