@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# boottime: where the boot time went.
+set -uo pipefail
+TB_CMD=boottime
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: boottime [options] [-- systemd-analyze options]
+
+Where the boot time went.
+
+Options:
+  -n, --top COUNT     how many slow units to list, 5 by default
+      --history       total and userspace time for each boot in the journal
+  -q, --quiet         only the systemd-analyze time line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to systemd-analyze, such as --user.
+
+Examples:
+  boottime
+  boottime -n 10
+  boottime --history
+  boottime -- --user
+
+Needs: systemd-analyze, and systemd as PID 1. journalctl for --history.
+See man boottime.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# Tests point this at a fake tree with run/systemd/system and proc/uptime.
+ROOT=${TB_ROOTFS:-}
+
+# The message systemd logs when a boot finishes, in every version.
+STARTUP_ID=b07a249cd024414a82dd00cd181378ff
+
+# A systemd time span such as "1min 2.345s", "345ms" or "8.1s" in milliseconds.
+span_ms() {
+    awk -v s="$1" 'BEGIN {
+        ms = 0
+        n = split(s, p, " ")
+        for (i = 1; i <= n; i++) {
+            v = p[i]
+            sub(/\.$/, "", v)
+            if (v ~ /min$/) ms += (v + 0) * 60000
+            else if (v ~ /ms$/) ms += (v + 0)
+            else if (v ~ /us$/ || v ~ /µs$/) ms += (v + 0) / 1000
+            else if (v ~ /h$/) ms += (v + 0) * 3600000
+            else if (v ~ /s$/) ms += (v + 0) * 1000
+        }
+        printf "%d\n", ms + 0.5
+    }'
+}
+
+# Milliseconds as 0.9s, 22.9s or 1m05s.
+secs() {
+    local ms=$1
+    if (( ms < 60000 )); then
+        local t=$(( (ms + 50) / 100 ))
+        printf '%d.%ds\n' $(( t / 10 )) $(( t % 10 ))
+    else
+        tb_elapsed "$ms"
+        echo
+    fi
+}
+
+# systemd must be PID 1, or there is no boot to time.
+check_systemd() {
+    [[ -d $ROOT/run/systemd/system ]] && return 0
+    tb_err "systemd is not PID 1 here, so there is no boot to time."
+    printf '%*s%s\n' $(( ${#TB_CMD} + 2 )) "" "Inside a container? Run it on the host." >&2
+    exit 1
+}
+
+# The last boot: phases, the slowest units and a hint.
+show_last() {
+    local out line phases target="" total=0 user_ms=0 name val start tstr
+    local cmd=(systemd-analyze ${TB_PASS[@]+"${TB_PASS[@]}"} time)
+    tb_show "${cmd[@]}"
+    if ! out=$("${cmd[@]}" 2>&1); then
+        tb_die 1 "systemd-analyze could not time the boot, ${out%%$'\n'*}"
+    fi
+    line=$(grep -m1 '^Startup finished in' <<<"$out")
+    if [[ -z $line ]]; then
+        tb_die 1 "the boot has not finished yet, try again in a minute"
+    fi
+    if (( TB_QUIET )); then
+        printf '%s\n' "$out" | sed 's/[[:space:]]*$//'
+        return 0
+    fi
+    target=$(sed -n 's/^\([^ ]*\.target\) reached after .*/\1/p' <<<"$out" | head -n 1)
+    # "8.1s (firmware) + 2.3s (loader) + ... = 22.9s"
+    phases=${line#Startup finished in }
+    total=$(span_ms "${phases##*= }")
+    phases=${phases% = *}
+
+    # The start time comes from this machine, so leave it out for another one.
+    start=""
+    [[ " ${TB_PASS[*]-} " =~ \ (-H|--host|-M|--machine) ]] || start=$(boot_start)
+    local reach="to the end of startup"
+    case $target in
+        graphical.target) reach="to the desktop" ;;
+        multi-user.target) reach="to the login prompt" ;;
+        "") ;;
+        *) reach="to $target" ;;
+    esac
+    tstr="last boot"
+    [[ -n $start ]] && tstr+="  $start,"
+    echo "$tstr $(secs "$total") $reach"
+    local part
+    while [[ -n $phases ]]; do
+        part=${phases%% + *}
+        if [[ $phases == *" + "* ]]; then phases=${phases#* + }; else phases=""; fi
+        [[ $part =~ ^(.*)\ \(([a-z-]+)\)$ ]] || continue
+        val=$(span_ms "${BASH_REMATCH[1]}")
+        name=${BASH_REMATCH[2]}
+        if [[ $name == userspace ]]; then
+            user_ms=$val
+            printf '  %-10s %6s%s\n' "$name" "$(secs "$val")" "${target:+  until $target}"
+        else
+            printf '  %-10s %6s\n' "$name" "$(secs "$val")"
+        fi
+    done
+    show_blame "$user_ms"
+}
+
+# The start of the last boot, as "Sep 26 09:10".
+boot_start() {
+    local up now t
+    read -r up _ 2>/dev/null <"$ROOT/proc/uptime" || return 0
+    printf -v now '%(%s)T' -1
+    printf -v t '%(%b %d %H:%M)T' $(( now - ${up%.*} ))
+    echo "$t"
+}
+
+# The slowest units from systemd-analyze blame, and a hint when one of
+# them held up the boot.
+show_blame() {
+    local user_ms=$1 cmd time unit ms first_ms=0 first_unit="" n=0
+    cmd=(systemd-analyze ${TB_PASS[@]+"${TB_PASS[@]}"} blame --no-pager)
+    tb_show "${cmd[@]}"
+    echo "slowest units"
+    while read -r line; do
+        [[ -n $line ]] || continue
+        unit=${line##* }
+        time=${line% *}
+        ms=$(span_ms "$time")
+        printf '  %6s  %s\n' "$(secs "$ms")" "$unit"
+        if (( n == 0 )); then first_ms=$ms; first_unit=$unit; fi
+        n=$(( n + 1 ))
+        (( n >= count )) && break
+    done < <("${cmd[@]}" 2>/dev/null)
+    (( n )) || echo "  none listed"
+    # A unit that took 2 seconds or more and 40% of userspace held up the boot.
+    (( first_ms >= 2000 && user_ms > 0 && first_ms * 10 >= user_ms * 4 )) || return 0
+    local what="$first_unit" target=$first_unit
+    case $first_unit in
+        NetworkManager-wait-online.service|systemd-networkd-wait-online.service|*wait-online*)
+            what="waiting for the network"
+            target=network-online.target ;;
+        plymouth-quit-wait.service)
+            what="the boot splash waiting for the login screen" ;;
+    esac
+    printf 'hint  %s went to %s. See what needs it:\n' "$(secs "$first_ms")" "$what"
+    printf '      systemd-analyze critical-chain %s\n' "$target"
+}
+
+# Total and userspace time for each boot the journal still holds.
+show_history() {
+    local boots msgs idx id rest total user started line bid msg
+    tb_need journalctl
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    tb_show journalctl --list-boots --no-pager -q
+    journalctl --list-boots --no-pager -q 2>/dev/null >"$work/boots"
+    tb_show journalctl "MESSAGE_ID=$STARTUP_ID" _PID=1 -o json --output-fields=MESSAGE,_BOOT_ID --no-pager -q
+    journalctl "MESSAGE_ID=$STARTUP_ID" _PID=1 -o json --output-fields=MESSAGE,_BOOT_ID --no-pager -q 2>/dev/null |
+        awk '{
+            b = ""; m = ""
+            if (match($0, /"_BOOT_ID":"[0-9a-f]+"/)) b = substr($0, RSTART + 12, RLENGTH - 13)
+            if (match($0, /"MESSAGE":"[^"]*"/)) m = substr($0, RSTART + 11, RLENGTH - 12)
+            if (b != "" && m ~ /^Startup finished in/) print b "\t" m
+        }' >"$work/msgs"
+    if [[ ! -s $work/msgs ]]; then
+        if (( EUID != 0 )); then
+            tb_die 1 "no boot times in the journal you can read. Join the systemd-journal group, or run it with sudo"
+        fi
+        tb_die 1 "the journal holds no boot times"
+    fi
+    # One row per boot, newest first: index, start epoch, total ms, userspace ms.
+    : >"$work/rows"
+    while read -r idx id rest; do
+        [[ $idx =~ ^-?[0-9]+$ ]] || continue
+        msg=$(awk -F '\t' -v id="$id" '$1 == id { m = $2 } END { print m }' "$work/msgs")
+        [[ -n $msg ]] || continue
+        started=$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}' <<<"$rest" | head -n 1)
+        started=$(date -d "$started" +%s 2>/dev/null) || started=0
+        total=$(span_ms "${msg##*= }")
+        user=0
+        if [[ $msg =~ \+\ ([^+]*)\ \(userspace\) ]]; then user=$(span_ms "${BASH_REMATCH[1]}"); fi
+        echo "$idx $started $total $user" >>"$work/rows"
+    done <"$work/boots"
+    [[ -s $work/rows ]] || tb_die 1 "the journal holds no boot times"
+    local median
+    median=$(awk '{ print $3 }' "$work/rows" | sort -n | awk '{ a[NR] = $1 } END { print a[int((NR + 1) / 2)] }')
+    printf '%sBOOT  STARTED        TOTAL  USERSPACE%s\n' "$C_BOLD" "$C_OFF"
+    while read -r idx started total user; do
+        local when note=""
+        if (( started > 0 )); then printf -v when '%(%b %d %H:%M)T' "$started"; else when="-"; fi
+        (( total * 2 > median * 3 && total - median > 5000 )) && note="  slow, see: logs -b $idx"
+        printf '%4s  %-12s %7s  %6s%s\n' "$idx" "$when" "$(secs "$total")" "$(secs "$user")" "$note"
+    done < <(sort -k1,1nr "$work/rows")
+}
+
+count=5
+history=0
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--top)  tb_optarg "$@"; count=$2; shift
+                   [[ $count =~ ^[0-9]+$ ]] && (( count >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                   ;;
+        --history) history=1 ;;
+        --)        shift; TB_PASS=("$@"); break ;;
+        -*)        tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)         tb_usage_error "boottime takes no names, see --help" ;;
+    esac
+    shift
+done
+tb_color_stdout
+
+tb_need systemd-analyze
+check_systemd
+if (( history )); then
+    show_history
+else
+    show_last
+fi
+exit $?

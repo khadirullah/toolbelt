@@ -1,0 +1,229 @@
+.TH "BOOTTIME" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+boottime \- where the boot time went
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+boottime [options] [-- systemd-analyze options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBboottime\fR shows how long the last boot took and what took the time. It splits the boot into its stages, from the firmware to the login screen, lists the slowest services, and points at the one that held everything up when there is one. With \fB\-\-history\fR it shows the boot time of every boot the journal still remembers, so you can see when booting got slow.
+.PP
+It reads what systemd measured during the boot, through \fBsystemd\-analyze\fR and the journal. It never changes a service, never disables anything, and never needs root.
+.SS The stages of a boot
+.PP
+The first line gives the total time and the goal the boot reached. \fBto the desktop\fR means the graphical login screen was up. \fBto the login prompt\fR means a server or console machine was ready for a text login. The lines under it split the total.
+.TP
+\fBfirmware\fR
+The UEFI or BIOS, from power on until it starts the boot loader. Only UEFI machines report it.
+.TP
+\fBloader\fR
+The boot loader, such as GRUB or systemd\-boot, including the time its menu waits. Only UEFI machines report it.
+.TP
+\fBkernel\fR
+The Linux kernel, from its start until it hands over to the initrd or to systemd.
+.TP
+\fBinitrd\fR
+The small first\-stage system that finds and mounts the real root, and asks for a disk password.
+.TP
+\fBuserspace\fR
+systemd starting every service until the goal target is reached.
+.PP
+A long \fBloader\fR stage is usually the GRUB menu timeout. A long \fBinitrd\fR stage on an encrypted machine includes the time you took to type the disk password. A long \fBfirmware\fR stage is set in the firmware setup, such as a fast boot option or a slow network boot check.
+.PP
+Virtual machines and old BIOS machines report only \fBkernel\fR and \fBuserspace\fR, because their firmware does not pass its timings to the kernel.
+.SS The slowest units
+.PP
+\fBsystemd\-analyze blame\fR lists every unit by how long it took to start. \fBboottime\fR shows the top 5, or as many as \fB\-n\fR asks for. A unit that took long did not always delay the boot, because systemd starts many units at the same time. A 10\-second unit that nothing waits for costs nothing.
+.SS The hint
+.PP
+\fBboottime\fR prints a hint when the slowest unit took at least 2 seconds and at least 40% of the userspace stage. Such a unit very likely held up the boot. The hint names the command that shows the chain of units that waited for it.
+.PP
+The most common case is a unit that waits for the network, such as \fBNetworkManager\-wait\-online.service\fR or \fBsystemd\-networkd\-wait\-online.service\fR. These wait until the network is fully up. The hint then points at \fBnetwork\-online.target\fR, because the real question is which service asked to wait for the network. Often it is a network mount or a service that does not need to wait at all.
+.SS History
+.PP
+\fB\-\-history\fR reads the journal. systemd writes one "Startup finished" line at the end of each boot, and the journal keeps it for as long as it keeps that boot. \fBboottime\fR lists each boot with its start time, the total and the userspace stage, newest first.
+.PP
+A boot that took more than 1.5 times the middle value, and more than 5 seconds longer, is marked \fBslow\fR, with the \fBlogs\fR command that shows the errors from that boot.
+.PP
+A boot that never finished, such as one that hung and was powered off, has no line in the journal, so it does not appear.
+.SS Containers
+.PP
+Inside a container, systemd is usually not PID 1 and there is no boot to time. \fBboottime\fR checks for \fB/run/systemd/system\fR, which exists only when systemd runs the machine, and stops with a clear message when it is missing.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-top COUNT\fR
+How many of the slowest units to list. 5 by default.
+.TP
+\fB\-\-history\fR
+Show total and userspace time for each boot in the journal, instead of the last boot in detail.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the lines of \fBsystemd\-analyze time\fR, as they are.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and each command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBsystemd\-analyze\fR, for both the time and the blame commands. The useful ones are these.
+.TP
+\fB\-\-user\fR
+Time your own user session instead of the machine.
+.TP
+\fB\-H user@host\fR
+Ask another machine over ssh.
+.TP
+\fB\-M name\fR
+Ask a local container that runs systemd.
+.PP
+\fB\-\-history\fR reads the journal and ignores these options.
+.SH PER\-DISTRO NOTES
+.IP \(bu 2
+\fBEvery systemd distro.\fR Debian, Ubuntu, Fedora, Arch and openSUSE all work the same way.
+.IP \(bu 2
+\fBAlpine, Devuan, Gentoo with OpenRC, Void.\fR These do not use systemd, so there is no boot for \fBboottime\fR to time. It exits with status 1 and says so.
+.IP \(bu 2
+\fBDebian 11 and older.\fR The journal lives in memory by default, so \fB\-\-history\fR shows only the current boot. Run \fBsudo mkdir \-p /var/log/journal\fR and reboot to keep it.
+.IP \(bu 2
+\fBJournal access.\fR \fB\-\-history\fR reads system entries, which on most distros need the \fBsystemd\-journal\fR group or root. Without them it finds no boot times and says so.
+.SH NEEDS
+.IP \(bu 2
+\fBsystemd\-analyze\fR, part of systemd.
+.IP \(bu 2
+\fBjournalctl\fR, part of systemd, for \fB\-\-history\fR.
+.IP \(bu 2
+systemd running as PID 1.
+.SH EXAMPLES
+.SS A laptop that waits for the network
+.PP
+.RS 4
+.nf
+$ boottime
+last boot  Sep 29 12:04, 22.9s to the desktop
+  firmware     8.1s
+  loader       2.3s
+  kernel       1.8s
+  initrd       3.1s
+  userspace    7.6s  until graphical.target
+slowest units
+    3.4s  NetworkManager-wait-online.service
+    0.8s  plymouth-quit-wait.service
+    0.6s  dev-nvme0n1p3.device
+    0.4s  systemd-udev-settle.service
+    0.2s  firewalld.service
+hint  3.4s went to waiting for the network. See what needs it:
+      systemd-analyze critical-chain network-online.target
+.fi
+.RE
+.PP
+Almost half of userspace went to waiting for the network. The 8.1 seconds of firmware time is worth a look in the firmware setup too.
+.SS A virtual machine
+.PP
+.RS 4
+.nf
+$ boottime
+last boot  Sep 29 00:16, 41.5s to the desktop
+  kernel      33.9s
+  userspace    7.6s  until graphical.target
+slowest units
+    2.6s  containerd.service
+    2.1s  docker.service
+    1.9s  fwupd.service
+    1.8s  blueman-mechanism.service
+    0.9s  dev-vda1.device
+.fi
+.RE
+.PP
+No hint here. The slowest unit took 2.6 seconds, about a third of userspace, and several units ran at the same time. The long kernel stage is the virtual machine's own start.
+.SS Only the top 3
+.PP
+.RS 4
+.nf
+$ boottime -n 3
+last boot  Sep 29 00:16, 41.5s to the desktop
+  kernel      33.9s
+  userspace    7.6s  until graphical.target
+slowest units
+    2.6s  containerd.service
+    2.1s  docker.service
+    1.9s  fwupd.service
+.fi
+.RE
+.SS Every boot the journal remembers
+.PP
+.RS 4
+.nf
+$ boottime --history
+BOOT  STARTED        TOTAL  USERSPACE
+   0  Sep 29 09:05   12.4s    7.6s
+  -1  Sep 26 08:30   46.1s   41.2s  slow, see: logs -b -1
+  -2  Sep 25 09:10   12.3s    7.4s
+.fi
+.RE
+.PP
+The boot on Sep 26 took 34 seconds longer, all of it in userspace. \fBlogs \-b \-1\fR shows what went wrong in it.
+.SS The raw numbers for a script
+.PP
+.RS 4
+.nf
+$ boottime -q
+Startup finished in 33.880s (kernel) + 7.585s (userspace) = 41.465s
+graphical.target reached after 7.585s in userspace.
+.fi
+.RE
+.SS Your own session
+.PP
+.RS 4
+.nf
+$ boottime -n 3 -- --user
+last boot  Sep 29 00:16, 0.1s to default.target
+slowest units
+    0.5s  xdg-desktop-portal.service
+    0.3s  gnome-terminal-server.service
+    0.2s  gvfs-goa-volume-monitor.service
+.fi
+.RE
+.PP
+The user session reached its goal in a tenth of a second. The units listed started later, when programs asked for them, so they did not slow the login.
+.SS Inside a container
+.PP
+.RS 4
+.nf
+$ boottime
+boottime: systemd is not PID 1 here, so there is no boot to time.
+          Inside a container? Run it on the host.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB`boottime: the boot has not finished yet, try again in a minute`\fR systemd is still starting units, or a unit is stuck and the goal target was never reached. \fBsvc\fR shows what is still starting or has failed.
+.PP
+\fB`boottime: no boot times in the journal you can read`\fR You are not in the \fBsystemd\-journal\fR group. Run \fBsudo usermod \-aG systemd\-journal $USER\fR and log in again, or run \fBsudo boottime \-\-history\fR.
+.PP
+\fB`\-\-history` shows only one boot.\fR The journal is kept in memory, or it was vacuumed. \fBjournalctl \-\-list\-boots\fR shows which boots it holds.
+.PP
+\fBThe total is much longer than it felt.\fR The firmware and loader stages count from power on, including the time a boot menu waited for you.
+.PP
+\fBA unit is at the top every boot.\fR Check whether anything waits for it with \fBsystemd\-analyze critical\-chain\fR. If nothing does, it costs no time. If something does, \fBsvc NAME\fR shows what it is doing.
+.SH EXIT STATUS
+.TP
+0
+It worked.
+.TP
+1
+systemd is not PID 1, the boot has not finished, systemd\-analyze failed, or \fB\-\-history\fR found no boot times.
+.TP
+2
+Bad usage, such as \fB\-n 0\fR or a name.
+.TP
+3
+systemd\-analyze is missing, or journalctl for \fB\-\-history\fR.
+.SH SEE ALSO
+.PP
+\fBlogs\fR, \fBsvc\fR, \fBsysinfo\fR, \fBsystemd\-analyze(1)\fR, \fBbootup(7)\fR
