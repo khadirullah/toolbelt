@@ -1,0 +1,211 @@
+.TH "EPOCH" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+epoch \- convert Unix timestamps and dates both ways
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+epoch [options] [timestamp | date]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+A Unix timestamp counts the seconds since 1970\-01\-01 00:00:00 UTC. Logs, databases, JWTs, Kubernetes objects and most APIs store times this way, and none of us can read \fB1790000000\fR at a glance.
+.PP
+Give \fBepoch\fR a number and it prints that moment in your local time, in UTC, and how long ago it was:
+.PP
+.RS 4
+.nf
+local  Mon 2026-09-21 19:43:20 IST
+utc    Mon 2026-09-21 14:13:20 UTC
+ago    8 days
+.fi
+.RE
+.PP
+Give it a date and it prints the timestamp:
+.PP
+.RS 4
+.nf
+$ epoch "2026-09-29 14:30"
+1790672400
+.fi
+.RE
+.PP
+Give it nothing and it prints the timestamp of this moment.
+.SS How it tells a number from a date
+.PP
+Input that is only digits, with an optional minus sign and an optional fraction, is a timestamp. \fB@1790000000\fR, the form \fBdate \-d\fR uses, is a timestamp too. Anything else is a date.
+.PP
+Many systems count in milliseconds or smaller units, and the number of digits gives it away. A timestamp for a date between 2001 and 2286 has 10 digits in seconds, 13 in milliseconds, 16 in microseconds and 19 in nanoseconds. \fBepoch\fR reads the number by its length:
+.TP
+up to 11
+Read as: seconds. Seen in: Unix tools, JWT \fBexp\fR and \fBiat\fR, most APIs
+.TP
+12 to 14
+Read as: milliseconds. Seen in: JavaScript \fBDate.now()\fR, Java, Elasticsearch, Kafka
+.TP
+15 to 17
+Read as: microseconds. Seen in: PostgreSQL, Python \fBtime.time_ns() // 1000\fR
+.TP
+18 and 19
+Read as: nanoseconds. Seen in: Go, Prometheus, Loki, containerd logs
+.PP
+When it reads the number as anything but seconds, it says so on stderr, \fBepoch: read as milliseconds\fR, and shows the first three digits of the fraction.
+.PP
+A fraction, as in \fB1790000000.5\fR, is seconds with a decimal part, which Python's \fBtime.time()\fR and many JSON logs print.
+.SS The "ago" line
+.PP
+The last line counts from now to the timestamp in the two largest units that apply: years, days, hours, minutes and seconds. A time in the future says \fBin\fR instead of \fBago\fR. A year counts as 365 days, so over many years the count drifts by a day for each leap year.
+.SS Dates it reads
+.PP
+\fBepoch\fR hands a date to \fBdate \-d\fR, so it reads everything GNU \fBdate\fR reads:
+.IP \(bu 2
+\fB2026\-09\-29\fR, midnight at the start of the day
+.IP \(bu 2
+\fB2026\-09\-29 14:30\fR and \fB2026\-09\-29 14:30:05\fR
+.IP \(bu 2
+\fB2026\-09\-29T09:00:00Z\fR and \fB2026\-09\-29T14:30:00+05:30\fR, ISO 8601 with a zone
+.IP \(bu 2
+\fBTue, 29 Sep 2026 09:00:00 GMT\fR, the form in HTTP headers and emails
+.IP \(bu 2
+\fByesterday 18:00\fR, \fBnext friday\fR, \fB2 hours ago\fR
+.PP
+A date without a zone is local time. \fB\-u\fR reads it as UTC. A date with a zone, such as \fBZ\fR or \fB+05:30\fR, ignores \fB\-u\fR, because it already says which zone it is in.
+.PP
+Words after \fBepoch\fR join with spaces, so \fBepoch 2026\-09\-29 14:30\fR works without quotes.
+.SH OPTIONS
+.TP
+\fB\-u\fR, \fB\-\-utc\fR
+Read a date without a zone as UTC, not local time.
+.TP
+\fB\-\-ms\fR
+Print the timestamp in milliseconds, for a date or for now.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Hide the "read as" line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print how it read the input and the \fBdate\fR command it runs. For a date, also print the date back in full, so you can check it read what you meant.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH TIME ZONES
+.PP
+The local line uses your time zone, from \fBTZ\fR or the system setting. Set \fBTZ\fR for one command to see a timestamp in another place:
+.PP
+.RS 4
+.nf
+$ TZ=America/New_York epoch 1790000000
+local  Mon 2026-09-21 10:13:20 EDT
+utc    Mon 2026-09-21 14:13:20 UTC
+ago    8 days
+.fi
+.RE
+.PP
+\fBtimedatectl list\-timezones\fR lists the names.
+.SH PASS\-THROUGH
+.PP
+None. It calls \fBdate\fR with fixed options.
+.SH NEEDS
+.PP
+\fBdate\fR from coreutils. BusyBox \fBdate\fR, on Alpine, reads timestamps fine but knows far fewer date forms. Stick to \fB2026\-09\-29 14:30\fR there. \fB\-\-ms\fR for a date uses \fB%N\fR, and on BusyBox it prints whole seconds times 1000.
+.SH EXAMPLES
+.SS A timestamp from a log
+.PP
+.RS 4
+.nf
+$ epoch 1790000000
+local  Mon 2026-09-21 19:43:20 IST
+utc    Mon 2026-09-21 14:13:20 UTC
+ago    8 days
+.fi
+.RE
+.SS Milliseconds
+.PP
+.RS 4
+.nf
+$ epoch 1790000000123
+epoch: read as milliseconds
+local  Mon 2026-09-21 19:43:20.123 IST
+utc    Mon 2026-09-21 14:13:20.123 UTC
+ago    8 days
+.fi
+.RE
+.SS When a token expires
+.PP
+.RS 4
+.nf
+$ epoch 1800000000
+local  Fri 2027-01-15 13:30:00 IST
+utc    Fri 2027-01-15 08:00:00 UTC
+in     107 days, 16 hours
+.fi
+.RE
+.SS A date to a timestamp
+.PP
+.RS 4
+.nf
+$ epoch "2026-09-29 14:30"
+1790672400
+.fi
+.RE
+.SS The same moment, typed in UTC
+.PP
+.RS 4
+.nf
+$ epoch -u 2026-09-29 09:00
+1790672400
+.fi
+.RE
+.SS Checking what it read
+.PP
+.RS 4
+.nf
+$ epoch -v 2026-09-29T09:00:00Z
++ date -d 2026-09-29T09:00:00Z +%s
+epoch: Tue 2026-09-29 14:30:00 IST
+1790672400
+.fi
+.RE
+.SS Milliseconds for an API
+.PP
+.RS 4
+.nf
+$ epoch --ms "2026-09-29 14:30:00.250"
+1790672400250
+.fi
+.RE
+.SS Something it cannot read
+.PP
+.RS 4
+.nf
+$ epoch next-ish
+epoch: cannot read next-ish as a timestamp or a date
+Try 'epoch --help' for the options.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBepoch: cannot read next\-ish as a timestamp or a date\fR : \fBdate \-d\fR did not understand the text. Write the date as \fB2026\-09\-29 14:30\fR, or check it with \fBdate \-d 'text'\fR.
+.PP
+The date is off by hours : A date without a zone is local time. For a UTC time from a log, add \fB\-u\fR, or write the zone, as in \fB2026\-09\-29T09:00:00Z\fR.
+.PP
+A timestamp shows a date in 1970 or far in the future : The number is in a different unit than its length suggests, such as a 13\-digit value in seconds, or a value someone cut short. Divide or multiply by 1000 and try again.
+.PP
+A year in the thousands, such as 5138 : An 11\-digit number reads as seconds, and 99999999999 seconds is more than 3000 years. The number is probably milliseconds with its last digits cut off.
+.SH EXIT STATUS
+.TP
+0
+It worked.
+.TP
+1
+It failed, such as a timestamp too large for \fBdate\fR to show.
+.TP
+2
+The input is neither a timestamp nor a date.
+.TP
+3
+\fBdate\fR is missing.
+.SH SEE ALSO
+.PP
+\fBjwtpeek\fR, \fBdate(1)\fR

@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# epoch: convert Unix timestamps and dates both ways.
+set -uo pipefail
+TB_CMD=epoch
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: epoch [options] [timestamp | date]
+
+Convert Unix timestamps and dates both ways.
+
+Options:
+  -u, --utc           read a date without a zone as UTC, not local time
+  --ms                print the timestamp in milliseconds
+  -q, --quiet         no lines of its own
+  -v, --verbose       how it read the input, and the date command
+  -h, --help          this help
+
+With nothing to read it prints the timestamp of now. A number of 12 or
+more digits is read as milliseconds, 15 or more as microseconds, and 18
+or more as nanoseconds.
+
+Examples:
+  epoch 1790000000
+  epoch 1790000000123
+  epoch "2026-09-29 14:30"
+  epoch -u 2026-09-29T09:00
+  epoch --ms
+
+Needs: date. See man epoch.
+Exit: 0 ok, 1 failed, 2 not a timestamp or a date.
+EOF
+}
+
+# "7 days, 18 hours" for a number of seconds: the two largest units.
+span() {
+    local s=$1 parts=() n unit sizes=(31536000 86400 3600 60 1) names=(year day hour minute second) i
+    for i in 0 1 2 3 4; do
+        n=$(( s / sizes[i] ))
+        if (( n > 0 )); then
+            parts+=("$(tb_plural "$n" "${names[i]}")")
+            s=$(( s % sizes[i] ))
+        elif (( ${#parts[@]} )); then
+            break
+        fi
+        (( ${#parts[@]} == 2 )) && break
+    done
+    (( ${#parts[@]} )) || parts=("0 seconds")
+    if (( ${#parts[@]} == 2 )); then echo "${parts[0]}, ${parts[1]}"; else echo "${parts[0]}"; fi
+}
+
+# Print the local and UTC dates of a timestamp, and how long ago it was.
+# Arguments: whole seconds, and the fraction as text such as ".123" or "".
+show_stamp() {
+    local secs=$1 frac=$2 now diff
+    tb_show date -d "@$secs" "+%a %F %T$frac %Z"
+    local loc utc
+    loc=$(date -d "@$secs" "+%a %F %T$frac %Z" 2>/dev/null) || tb_die 1 "date cannot show $secs, it is out of range"
+    utc=$(TZ=UTC date -d "@$secs" "+%a %F %T$frac %Z")
+    printf 'local  %s\n' "$loc"
+    printf 'utc    %s\n' "$utc"
+    now=$(date +%s)
+    diff=$(( now - secs ))
+    if (( diff >= 0 )); then
+        printf 'ago    %s\n' "$(span "$diff")"
+    else
+        printf 'in     %s\n' "$(span $(( -diff )))"
+    fi
+}
+
+# A number: seconds, milliseconds, microseconds or nanoseconds by its length.
+from_number() {
+    local t=$1 sign="" digits secs frac="" unit=seconds whole part
+    if [[ $t == -* ]]; then sign=-; t=${t#-}; fi
+    if [[ $t == *.* ]]; then
+        whole=${t%%.*} part=${t#*.}
+        secs=$(( 10#${whole:-0} ))
+        part=${part:0:3}
+        [[ -n $part ]] && frac=.$part
+    else
+        t=$(( 10#$t ))
+        digits=${#t}
+        if (( digits >= 18 )); then unit=nanoseconds; secs=$(( t / 1000000000 )); frac=$(printf '.%03d' $(( t % 1000000000 / 1000000 )))
+        elif (( digits >= 15 )); then unit=microseconds; secs=$(( t / 1000000 )); frac=$(printf '.%03d' $(( t % 1000000 / 1000 )))
+        elif (( digits >= 12 )); then unit=milliseconds; secs=$(( t / 1000 )); frac=$(printf '.%03d' $(( t % 1000 )))
+        else secs=$t
+        fi
+    fi
+    [[ $sign == - ]] && secs=$(( -secs ))
+    if [[ $unit != seconds ]]; then
+        tb_info "$TB_CMD: read as $unit"
+    else
+        tb_say "read as seconds"
+    fi
+    if [[ $sign == - && -n $frac ]]; then
+        # -1.5 is half a second before -1, so show it from the second below.
+        tb_say "a negative time with a fraction is shown to the whole second"
+        frac=""
+    fi
+    show_stamp "$secs" "$frac"
+}
+
+# A date: print its timestamp.
+from_date() {
+    local d=$1 out tz_args=()
+    (( utc )) && tz_args=(-u)
+    tb_show date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s
+    out=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s 2>/dev/null) ||
+        tb_usage_error "cannot read $d as a timestamp or a date"
+    if (( ms )); then
+        local n
+        n=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s%3N 2>/dev/null)
+        [[ $n =~ ^-?[0-9]+$ ]] || n=$(( out * 1000 ))
+        out=$n
+    fi
+    tb_say "$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" '+%a %F %T %Z')"
+    echo "$out"
+}
+
+main() {
+    local input=$1
+    if [[ -z $input ]]; then
+        if (( ms )); then tb_now_ms; else date +%s; fi
+        return 0
+    fi
+    if [[ $input =~ ^-?[0-9]{1,19}(\.[0-9]*)?$ ]]; then
+        from_number "$input"
+    elif [[ $input =~ ^@-?[0-9]{1,19}$ ]]; then
+        from_number "${input#@}"
+    else
+        from_date "$input"
+    fi
+}
+
+utc=0 ms=0 words=() args=()
+# A negative timestamp such as -86400 is a word, not a bundle of options.
+for a in "$@"; do
+    if [[ $a =~ ^-[0-9] ]]; then
+        args+=("$a")
+    else
+        tb_expand "" "$a"
+        args+=("${TB_EXPANDED[@]}")
+    fi
+done
+set -- ${args[@]+"${args[@]}"}
+while (( $# )); do
+    case $1 in
+        -u|--utc) utc=1 ;;
+        --ms)     ms=1 ;;
+        --)       shift; words+=("$@"); break ;;
+        -[0-9]*)  words+=("$1") ;;
+        -*)       tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)        words+=("$1") ;;
+    esac
+    shift
+done
+
+tb_need date
+main "${words[*]}"
+exit $?
