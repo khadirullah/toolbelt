@@ -1,0 +1,264 @@
+.TH "PKG" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+pkg \- one package command on every distro
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+pkg install|remove|search|info NAME ... [-- tool options]
+pkg owner PATH ...
+pkg files NAME
+pkg upgrade [--all] [-- tool options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Every Linux family has its own package manager with its own words. Debian and Ubuntu use \fBapt\fR, Fedora and RHEL use \fBdnf\fR, Arch uses \fBpacman\fR, openSUSE uses \fBzypper\fR and Alpine uses \fBapk\fR. The same job has five spellings. Searching is \fBapt search\fR, \fBdnf search\fR, \fBpacman \-Ss\fR, \fBzypper search\fR and \fBapk search\fR. The list of files in a package is \fBdpkg \-L\fR, \fBrpm \-ql\fR, \fBpacman \-Qlq\fR and \fBapk info \-L\fR.
+.PP
+\fBpkg\fR gives you one set of words and runs the real command for the machine it is on. It does not install anything by itself and it has no package list of its own. The distro's package manager does all the work, prints its own output and asks its own questions. \fBpkg\fR adds three things on top.
+.IP \(bu 2
+It finds the package manager by looking for the commands themselves, in the order apt\-get, dnf, yum, pacman, zypper and apk. The first one found wins. That makes Linux Mint and Pop!_OS count as apt, Rocky and Alma as dnf, and Manjaro and EndeavourOS as pacman, with no list of distros to keep up to date.
+.IP \(bu 2
+It puts \fBsudo\fR in front of the commands that change the system, unless you are root. \fBsearch\fR, \fBinfo\fR, \fBowner\fR and \fBfiles\fR only read, so they never use sudo.
+.IP \(bu 2
+After an install or a remove it prints one line you can trust, such as \fBpkg: installed ripgrep 14.1.1\-1+b4\fR, with the version read back from the package database. The package manager's own output can run to a hundred lines, and that line is the one that matters.
+.PP
+\fBpkg owner\fR answers "which package put this file here?". It takes a path or a bare command name. For a bare name it looks the command up on your \fBPATH\fR first, so \fBpkg owner ss\fR means \fBpkg owner /usr/bin/ss\fR. It also handles merged \fB/usr\fR, where \fB/bin\fR is a link to \fB/usr/bin\fR. The database may know the file as \fB/bin/ss\fR or as \fB/usr/bin/ss\fR, so \fBpkg\fR asks about both, then about the real file behind a symlink. A file no package owns shows as \fBno package, installed by hand\fR. That is how you spot a binary someone copied into \fB/usr/local/bin\fR.
+.PP
+\fBpkg upgrade\fR refreshes the package lists and updates everything the package manager installed. With \fB\-\-all\fR it also updates flatpak apps, snaps and device firmware through fwupd, each one skipped when it is not installed. When the update brought a newer kernel than the one running, the last line says so, because the new kernel only takes effect after a reboot.
+.SH OPTIONS
+.TP
+\fB\-\-all\fR
+With \fBupgrade\fR, also run \fBflatpak update\fR, \fBsnap refresh\fR and \fBfwupdmgr update\fR.
+.TP
+\fB\-n\fR, \fB\-\-dry\-run\fR
+Print the commands \fBpkg\fR would run, one per line, then stop. Nothing runs, not even sudo.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Pass the package manager's own yes flag, so it does not ask.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the result lines. The package manager's output still shows, since it is theirs.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Say which distro and package manager it found, and show each command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+Options can go anywhere before \fB\-\-\fR. \fBpkg install htop \-y\fR and \fBpkg \-y install htop\fR are the same.
+.SH ACTIONS
+.TP
+\fBinstall NAME ...\fR
+What it does: Install one or more packages, then print the installed version of each.. Needs root: yes
+.TP
+\fBremove NAME ...\fR
+What it does: Remove one or more packages.. Needs root: yes
+.TP
+\fBsearch WORD\fR
+What it does: Search the package names and descriptions in the repos.. Needs root: no
+.TP
+\fBinfo NAME\fR
+What it does: Show a package's version, size, dependencies and description.. Needs root: no
+.TP
+\fBowner PATH ...\fR
+What it does: Show which installed package owns each file, with its version.. Needs root: no
+.TP
+\fBfiles NAME\fR
+What it does: List every file an installed package put on the disk.. Needs root: no
+.TP
+\fBupgrade\fR
+What it does: Refresh the package lists and update everything.. Needs root: yes
+.SH THE COMMANDS IT RUNS
+.PP
+This is the whole translation table. \fB\-n\fR prints the same commands for your machine.
+.TP
+install
+apt: \fBapt install\fR. dnf: \fBdnf install\fR. pacman: \fBpacman \-S\fR. zypper: \fBzypper install\fR. apk: \fBapk add\fR
+.TP
+remove
+apt: \fBapt remove\fR. dnf: \fBdnf remove\fR. pacman: \fBpacman \-Rs\fR. zypper: \fBzypper remove\fR. apk: \fBapk del\fR
+.TP
+search
+apt: \fBapt search\fR. dnf: \fBdnf search\fR. pacman: \fBpacman \-Ss\fR. zypper: \fBzypper search\fR. apk: \fBapk search\fR
+.TP
+info
+apt: \fBapt show\fR. dnf: \fBdnf info\fR. pacman: \fBpacman \-Si\fR. zypper: \fBzypper info\fR. apk: \fBapk info\fR
+.TP
+owner
+apt: \fBdpkg \-S\fR. dnf: \fBrpm \-qf\fR. pacman: \fBpacman \-Qo\fR. zypper: \fBrpm \-qf\fR. apk: \fBapk info \-W\fR
+.TP
+files
+apt: \fBdpkg \-L\fR. dnf: \fBrpm \-ql\fR. pacman: \fBpacman \-Qlq\fR. zypper: \fBrpm \-ql\fR. apk: \fBapk info \-L\fR
+.TP
+upgrade
+apt: \fBapt update\fR, \fBapt upgrade\fR. dnf: \fBdnf upgrade\fR. pacman: \fBpacman \-Syu\fR. zypper: \fBzypper update\fR. apk: \fBapk update\fR, \fBapk upgrade\fR
+.PP
+With \fB\-y\fR, apt and dnf get \fB\-y\fR, pacman gets \fB\-\-noconfirm\fR and zypper gets \fB\-\-non\-interactive\fR before the subcommand, which is where zypper wants it. apk never asks, so it gets nothing.
+.PP
+\fBpacman \-Rs\fR removes the package and the dependencies nothing else needs, which is what most people expect from "remove". \fBapt remove\fR keeps the config files in \fB/etc\fR. Pass \fB\-\- \-\-purge\fR to drop them too.
+.SH PER\-DISTRO NOTES
+.PP
+Debian and Ubuntu : \fBpkg\fR uses \fBapt\fR when it is there and \fBapt\-get\fR and \fBapt\-cache\fR when it is not, as on minimal images. \fBapt\fR prints \fBWARNING: apt does not have a stable CLI interface\fR when its output goes to a pipe. The warning is harmless.
+.PP
+Fedora, RHEL, Rocky and Alma : \fBpkg\fR uses \fBdnf\fR, or \fByum\fR on old releases without it. \fBdnf upgrade\fR refreshes the metadata on its own, so there is no separate update step.
+.PP
+Arch, Manjaro and EndeavourOS : \fBpkg upgrade\fR runs \fBpacman \-Syu\fR, the only supported way to update Arch. \fBpkg install\fR runs \fBpacman \-S\fR without \fB\-y\fR, so it never does a partial upgrade. AUR packages are out of scope. Use your AUR helper for those.
+.PP
+openSUSE : Tumbleweed is updated with \fBzypper dup\fR, not \fBzypper update\fR. \fBpkg upgrade\fR runs \fBzypper update\fR, which is right for Leap. On Tumbleweed run \fBsudo zypper dup\fR yourself instead of \fBpkg upgrade\fR.
+.PP
+Alpine : \fBapk\fR never asks questions, so \fB\-y\fR changes nothing. \fBpkg files\fR needs the package installed.
+.SH SAFETY
+.IP \(bu 2
+\fBpkg\fR never runs a package manager command you did not ask for. \fB\-n\fR shows the exact commands first.
+.IP \(bu 2
+\fBsearch\fR, \fBinfo\fR, \fBowner\fR and \fBfiles\fR never use sudo and never change anything.
+.IP \(bu 2
+The package manager asks its usual "Do you want to continue?" question. \fBpkg\fR does not answer it for you unless you pass \fB\-y\fR.
+.IP \(bu 2
+When the package manager fails, \fBpkg\fR stops and exits 1 with its exit code, and does not run the next step. A failed \fBapt update\fR means no \fBapt upgrade\fR.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to the package manager, in the right place for \fBinstall\fR, \fBremove\fR, \fBsearch\fR, \fBinfo\fR and \fBupgrade\fR. \fBowner\fR and \fBfiles\fR take none.
+.PP
+.RS 4
+.nf
+$ pkg -n install nginx -- --no-install-recommends
+sudo apt install --no-install-recommends nginx
+.fi
+.RE
+.PP
+On Fedora the same idea is \fBpkg install nginx \-\- \-\-setopt=install_weak_deps=False\fR.
+.SH NEEDS
+.PP
+One of apt, dnf, yum, pacman, zypper or apk, which every distro has. sudo for \fBinstall\fR, \fBremove\fR and \fBupgrade\fR when you are not root, from the \fBsudo\fR package. flatpak, snapd and fwupd are optional, for \fBupgrade \-\-all\fR.
+.SH EXAMPLES
+.SS Install a package
+.PP
+.RS 4
+.nf
+$ pkg install ripgrep
+Reading package lists... Done
+Building dependency tree... Done
+The following NEW packages will be installed:
+  ripgrep
+Do you want to continue? [Y/n] y
+Setting up ripgrep (14.1.1-1+b4) ...
+pkg: installed ripgrep 14.1.1-1+b4
+.fi
+.RE
+.PP
+The lines above the last are apt's own. The last line is read back from the package database, so it only says installed when the package really is.
+.SS See the commands first
+.PP
+.RS 4
+.nf
+$ pkg -n install ripgrep
+sudo apt install ripgrep
+$ pkg -n upgrade --all
+sudo apt update
+sudo apt upgrade
+fwupdmgr refresh
+fwupdmgr update
+.fi
+.RE
+.PP
+The same line on Fedora prints \fBsudo dnf install ripgrep\fR, and on Arch \fBsudo pacman \-S ripgrep\fR.
+.SS Which package owns a file
+.PP
+.RS 4
+.nf
+$ pkg owner /usr/bin/curl ls
+/usr/bin/curl  curl 8.14.1-2+deb13u4
+/usr/bin/ls    coreutils 9.7-3
+.fi
+.RE
+.PP
+\fBls\fR is a bare name, so \fBpkg\fR found it on the \fBPATH\fR first. On Debian the database lists \fBls\fR as \fB/bin/ls\fR and \fBpkg\fR still finds it.
+.SS A binary nobody installed
+.PP
+.RS 4
+.nf
+$ pkg owner /usr/local/bin/k9s /usr/bin/curl
+/usr/local/bin/k9s  no package, installed by hand
+/usr/bin/curl       curl 8.14.1-2+deb13u4
+$ echo $?
+1
+.fi
+.RE
+.PP
+The exit code is 1 when any path has no package, so a script can check a machine for hand\-copied binaries.
+.SS Update everything
+.PP
+.RS 4
+.nf
+$ pkg upgrade --all
+Hit:1 http://deb.debian.org/debian trixie InRelease
+\&...
+apt       updated
+Looking for updates...
+Nothing to do.
+flatpak   updated
+snap      not installed, skipped
+No updatable devices
+fwupd     updated
+pkg: all updated in 48.2s.
+     Reboot to use kernel 6.12.107+deb13-amd64.
+.fi
+.RE
+.PP
+fwupd exits with code 2 when no device has an update. \fBpkg\fR counts that as updated.
+.SS List a package's files
+.PP
+.RS 4
+.nf
+$ pkg files coreutils | head -5
+/.
+/usr
+/usr/bin
+/usr/bin/[
+/usr/bin/arch
+.fi
+.RE
+.SS See what it found
+.PP
+.RS 4
+.nf
+$ pkg -v install htop
+pkg: Debian GNU/Linux 13 (trixie), package manager apt
++ sudo apt install htop
+\&...
+pkg: installed htop 3.4.1-5
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBpkg: no known package manager found, looked for apt, dnf, yum, pacman, zypper and apk\fR : The machine has none of them on the \fBPATH\fR, as in a distroless container or on NixOS. Use the image's own way to add software.
+.PP
+\fBpkg: apt install stopped with exit 100, see its message above\fR : apt printed why above this line. The usual causes are a typo in the name (\fBE: Unable to locate package\fR), stale package lists (run \fBpkg upgrade\fR or \fBsudo apt update\fR), or another apt holding the lock.
+.PP
+\fBCould not get lock /var/lib/dpkg/lock\-frontend\fR : Another apt is running, often the automatic updater after boot. Wait a minute and try again. Do not delete the lock file.
+.PP
+\fBsudo: a terminal is required to read the password\fR : \fBpkg\fR ran from a script with no terminal. Run it as root, or give the user a sudo rule for the package manager.
+.PP
+\fBpkg: installed NAME\fR with no version : The package has a different name in the database than the one you typed, such as a virtual package on apt or a group on dnf. The install still worked.
+.PP
+\fBerror: target not found\fR on Arch : The package is in the AUR, not in the repos. \fBpkg\fR does not handle the AUR.
+.PP
+\fBpkg owner\fR says \fBno such file or command\fR : The path does not exist, or the bare name is not on your \fBPATH\fR. Give the full path.
+.SH EXIT STATUS
+.TP
+0
+It worked.
+.TP
+1
+The package manager failed, with its exit code in the message. For \fBowner\fR, a path has no package. For \fBupgrade \-\-all\fR, one of the others failed.
+.TP
+2
+Bad usage, such as \fBinstall\fR with no name or \fB\-\-all\fR without \fBupgrade\fR.
+.TP
+3
+No known package manager, or sudo is missing when it is needed.
+.SH SEE ALSO
+.PP
+\fBcleanup\fR, \fBsysinfo\fR, \fBapt(8)\fR, \fBdnf(8)\fR, \fBpacman(8)\fR, \fBzypper(8)\fR, \fBapk(8)\fR

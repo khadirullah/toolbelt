@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# pkg: one package command on every distro.
+set -uo pipefail
+TB_CMD=pkg
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: pkg install|remove|search|info NAME ... [-- tool options]
+       pkg owner PATH ...
+       pkg files NAME
+       pkg upgrade [--all] [-- tool options]
+
+One package command on every distro.
+
+Options:
+  --all               with upgrade, also flatpak, snap and device firmware
+  -n, --dry-run       print the commands it would run, then stop
+  -y, --yes           pass the package manager's own yes flag
+  -q, --quiet         only the result lines
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to the package manager, for install, remove,
+  search, info and upgrade.
+
+Examples:
+  pkg install htop
+  pkg -v search ripgrep
+  pkg owner /usr/bin/ss ~/.local/bin/k9s
+  pkg upgrade --all
+  pkg install nginx -- --setopt=install_weak_deps=False
+
+Needs: apt, dnf, yum, pacman, zypper or apk, and sudo. See man pkg.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# A command line as a person would type it, quoted where needed.
+cmd_text() {
+    local out="" a
+    for a in "$@"; do
+        if [[ $a =~ ^[][A-Za-z0-9_./:=,@%+^-]+$ ]]; then
+            out+=" $a"
+        else
+            out+=" '${a//\'/\'\\\'\'}'"
+        fi
+    done
+    echo "${out# }"
+}
+
+# Run a command, or print it with -n.
+do_cmd() {
+    if (( dry_run )); then
+        cmd_text "$@"
+        return 0
+    fi
+    tb_run "$@"
+}
+
+# The distro name from os-release, for -v.
+distro_name() {
+    local f line
+    for f in /etc/os-release /usr/lib/os-release; do
+        [[ -r $f ]] || continue
+        while IFS= read -r line; do
+            if [[ $line == PRETTY_NAME=* ]]; then
+                line=${line#PRETTY_NAME=}
+                line=${line#\"}
+                echo "${line%\"}"
+                return 0
+            fi
+        done <"$f"
+    done
+    echo "this machine"
+}
+
+# Find the package manager, and the binary for it. Exit 3 when there is none.
+find_pm() {
+    PM=$(tb_pm)
+    case $PM in
+        apt)
+            if tb_has apt; then APT=apt; else APT=apt-get; fi ;;
+        dnf)
+            if tb_has dnf; then DNF=dnf; else DNF=yum; fi ;;
+        pacman|zypper|apk) ;;
+        *)
+            tb_die "$E_TOOL" "no known package manager found, looked for apt, dnf, yum, pacman, zypper and apk" ;;
+    esac
+    tb_say "$(distro_name), package manager ${DNF:-${APT:-$PM}}"
+}
+
+# sudo in front of commands that change the system, unless we are root.
+find_sudo() {
+    SUDO=()
+    (( EUID == 0 )) && return 0
+    (( dry_run )) && { SUDO=(sudo); return 0; }
+    tb_need sudo
+    SUDO=(sudo)
+}
+
+# The native words for an action, in the array CMD.
+native() {
+    case $1:$PM in
+        install:apt)    CMD=("$APT" install) ;;
+        remove:apt)     CMD=("$APT" remove) ;;
+        search:apt)     if [[ $APT == apt ]]; then CMD=(apt search); else CMD=(apt-cache search); fi ;;
+        info:apt)       if [[ $APT == apt ]]; then CMD=(apt show); else CMD=(apt-cache show); fi ;;
+        files:apt)      CMD=(dpkg -L) ;;
+        install:dnf)    CMD=("$DNF" install) ;;
+        remove:dnf)     CMD=("$DNF" remove) ;;
+        search:dnf)     CMD=("$DNF" search) ;;
+        info:dnf)       CMD=("$DNF" info) ;;
+        files:dnf|files:zypper) CMD=(rpm -ql) ;;
+        install:pacman) CMD=(pacman -S) ;;
+        remove:pacman)  CMD=(pacman -Rs) ;;
+        search:pacman)  CMD=(pacman -Ss) ;;
+        info:pacman)    CMD=(pacman -Si) ;;
+        files:pacman)   CMD=(pacman -Qlq) ;;
+        install:zypper) CMD=(zypper install) ;;
+        remove:zypper)  CMD=(zypper remove) ;;
+        search:zypper)  CMD=(zypper search) ;;
+        info:zypper)    CMD=(zypper info) ;;
+        install:apk)    CMD=(apk add) ;;
+        remove:apk)     CMD=(apk del) ;;
+        search:apk)     CMD=(apk search) ;;
+        info:apk)       CMD=(apk info) ;;
+        files:apk)      CMD=(apk info -L) ;;
+    esac
+    # Each manager spells "yes" its own way, and zypper wants it first.
+    if (( TB_YES )) && [[ $1 == install || $1 == remove ]]; then
+        case $PM in
+            apt|dnf) CMD+=(-y) ;;
+            pacman)  CMD+=(--noconfirm) ;;
+            zypper)  CMD=(zypper --non-interactive "${CMD[@]:1}") ;;
+        esac
+    fi
+}
+
+# The installed version of a package, or return 1.
+installed_version() {
+    local name=$1 out
+    case $PM in
+        apt)
+            out=$(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' -- "$name" 2>/dev/null) || return 1
+            [[ $out == ii* ]] || return 1
+            echo "${out##* }" ;;
+        dnf|zypper)
+            rpm -q --qf '%{VERSION}-%{RELEASE}\n' -- "$name" 2>/dev/null | head -n 1
+            (( PIPESTATUS[0] == 0 )) ;;
+        pacman)
+            out=$(pacman -Q -- "$name" 2>/dev/null) || return 1
+            echo "${out##* }" ;;
+        apk)
+            out=$(apk list -I -- "$name" 2>/dev/null | awk -v n="$name-" 'index($1, n) == 1 { print substr($1, length(n) + 1); exit }')
+            [[ -n $out ]] || return 1
+            echo "$out" ;;
+    esac
+}
+
+# install, remove, search, info and files: one call to the package manager.
+do_simple() {
+    local action=$1 rc name ver
+    (( ${#names[@]} )) || tb_usage_error "$action needs a package name"
+    native "$action"
+    if [[ $action == install || $action == remove ]]; then
+        find_sudo
+        do_cmd "${SUDO[@]}" "${CMD[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} "${names[@]}"
+    elif [[ $action == files ]]; then
+        (( ${#TB_PASS[@]} )) && tb_usage_error "files takes no options after --"
+        do_cmd "${CMD[@]}" "${names[@]}"
+    else
+        do_cmd "${CMD[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} "${names[@]}"
+    fi
+    rc=$?
+    (( dry_run )) && return 0
+    if (( rc != 0 )); then
+        tb_die 1 "${CMD[0]} $action stopped with exit $rc, see its message above"
+    fi
+    case $action in
+        install)
+            for name in "${names[@]}"; do
+                if ver=$(installed_version "$name") && [[ -n $ver ]]; then
+                    echo "pkg: installed $name $ver"
+                else
+                    echo "pkg: installed $name"
+                fi
+            done ;;
+        remove)
+            for name in "${names[@]}"; do
+                echo "pkg: removed $name"
+            done ;;
+    esac
+    return 0
+}
+
+# "name version" of the package that owns one path, or return 1.
+owner_of() {
+    local path=$1 out name
+    case $PM in
+        apt)
+            out=$(dpkg -S -- "$path" 2>/dev/null | grep -v '^diversion by' | head -n 1)
+            [[ -n $out ]] || return 1
+            name=${out%%: *}
+            name=${name%%,*}
+            name=${name%%:*}
+            echo "$name $(installed_version "$name")" ;;
+        dnf|zypper)
+            out=$(rpm -qf --qf '%{NAME} %{VERSION}-%{RELEASE}\n' -- "$path" 2>/dev/null) || return 1
+            echo "${out%%$'\n'*}" ;;
+        pacman)
+            out=$(pacman -Qo -- "$path" 2>/dev/null) || return 1
+            awk '{ print $(NF - 1), $NF; exit }' <<<"$out" ;;
+        apk)
+            out=$(apk info -W -- "$path" 2>/dev/null) || return 1
+            out=${out##* }
+            [[ -n $out && $out != "$path" ]] || return 1
+            if [[ $out =~ ^(.+)-([0-9][^-]*-r[0-9]+)$ ]]; then
+                echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+            else
+                echo "$out"
+            fi ;;
+    esac
+}
+
+# The paths to ask about for one argument. A bare command name is looked
+# up on PATH. Merged /usr means /bin/ss and /usr/bin/ss can be the same
+# file registered under either name, so both are tried, then the target
+# of a symlink.
+owner_candidates() {
+    local p=$1 abs real
+    CANDIDATES=()
+    if [[ $p != */* && ! -e $p ]]; then
+        p=$(type -P -- "$p") || return 1
+    fi
+    [[ -e $p || -L $p ]] || return 1
+    if [[ $p == /* ]]; then abs=$p; else abs=$PWD/$p; fi
+    abs=${abs//\/.\//\/}
+    CANDIDATES+=("$abs")
+    case $abs in
+        /usr/bin/*|/usr/sbin/*|/usr/lib/*|/usr/lib64/*) CANDIDATES+=("${abs#/usr}") ;;
+        /bin/*|/sbin/*|/lib/*|/lib64/*)                 CANDIDATES+=("/usr$abs") ;;
+    esac
+    real=$(readlink -f -- "$abs" 2>/dev/null)
+    [[ -n $real && $real != "$abs" ]] && CANDIDATES+=("$real")
+    SHOWN=$abs
+}
+
+do_owner() {
+    local p c found missing=0 width=0 i
+    local shown=() result=()
+    (( ${#names[@]} )) || tb_usage_error "owner needs a path"
+    (( ${#TB_PASS[@]} )) && tb_usage_error "owner takes no options after --"
+    for p in "${names[@]}"; do
+        if ! owner_candidates "$p"; then
+            tb_err "$p: no such file or command"
+            missing=1
+            continue
+        fi
+        found=""
+        for c in "${CANDIDATES[@]}"; do
+            tb_say "asking $PM about $c"
+            if found=$(owner_of "$c") && [[ -n $found ]]; then
+                break
+            fi
+            found=""
+        done
+        shown+=("$SHOWN")
+        if [[ -n $found ]]; then
+            result+=("${found% }")
+        else
+            result+=("no package, installed by hand")
+            missing=1
+        fi
+        (( ${#SHOWN} > width )) && width=${#SHOWN}
+    done
+    for i in "${!shown[@]}"; do
+        printf '%-*s  %s\n' "$width" "${shown[i]}" "${result[i]}"
+    done
+    return "$missing"
+}
+
+# The kernel the machine would boot next, when it is newer than the running one.
+newer_kernel() {
+    local running newest
+    running=$(uname -r)
+    [[ -d /lib/modules ]] || return 1
+    newest=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -n 1)
+    [[ -n $newest && $newest != "$running" ]] || return 1
+    [[ $(printf '%s\n%s\n' "$running" "$newest" | sort -V | tail -n 1) == "$newest" ]] || return 1
+    echo "$newest"
+}
+
+# The result line of one extra updater for --all.
+extra_result() {
+    (( dry_run )) && return 0
+    if (( $2 == 0 )); then
+        printf '%-9s %s\n' "$1" "updated"
+    else
+        printf '%-9s %s\n' "$1" "failed with exit $2"
+        failed=1
+    fi
+}
+
+# flatpak, snap and fwupd, each skipped when it is not installed.
+# fwupdmgr exits 2 when there is nothing to do, which is not a failure.
+extras() {
+    local rc yes=()
+    (( TB_YES )) && yes=(-y)
+    if tb_has flatpak; then
+        do_cmd flatpak update "${yes[@]}"
+        extra_result flatpak $?
+    elif (( ! dry_run )); then
+        printf '%-9s %s\n' flatpak "not installed, skipped"
+    fi
+    if tb_has snap; then
+        do_cmd "${SUDO[@]}" snap refresh
+        extra_result snap $?
+    elif (( ! dry_run )); then
+        printf '%-9s %s\n' snap "not installed, skipped"
+    fi
+    if tb_has fwupdmgr; then
+        do_cmd fwupdmgr refresh
+        rc=$?
+        if (( rc == 0 || rc == 2 )); then
+            do_cmd fwupdmgr update "${yes[@]}"
+            rc=$?
+        fi
+        (( rc == 2 )) && rc=0
+        extra_result fwupd "$rc"
+    elif (( ! dry_run )); then
+        printf '%-9s %s\n' fwupd "not installed, skipped"
+    fi
+}
+
+do_upgrade() {
+    local start rc k yes=()
+    (( ${#names[@]} )) && tb_usage_error "upgrade takes no package names, it updates everything"
+    find_sudo
+    start=$(tb_now_ms)
+    failed=0
+    case $PM in
+        apt)
+            do_cmd "${SUDO[@]}" "$APT" update || tb_die 1 "$APT update failed, check the network and /etc/apt/sources.list"
+            (( TB_YES )) && yes=(-y)
+            do_cmd "${SUDO[@]}" "$APT" upgrade "${yes[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} ;;
+        dnf)
+            (( TB_YES )) && yes=(-y)
+            do_cmd "${SUDO[@]}" "$DNF" upgrade "${yes[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} ;;
+        pacman)
+            (( TB_YES )) && yes=(--noconfirm)
+            do_cmd "${SUDO[@]}" pacman -Syu "${yes[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} ;;
+        zypper)
+            (( TB_YES )) && yes=(--non-interactive)
+            do_cmd "${SUDO[@]}" zypper "${yes[@]}" update ${TB_PASS[@]+"${TB_PASS[@]}"} ;;
+        apk)
+            do_cmd "${SUDO[@]}" apk update || tb_die 1 "apk update failed, check the network and /etc/apk/repositories"
+            do_cmd "${SUDO[@]}" apk upgrade ${TB_PASS[@]+"${TB_PASS[@]}"} ;;
+    esac
+    rc=$?
+    if (( rc != 0 )); then
+        tb_die 1 "the $PM upgrade stopped with exit $rc, see its message above"
+    fi
+    (( dry_run )) || printf '%-9s %s\n' "$PM" "updated"
+    (( all )) && extras
+    (( dry_run )) && return 0
+    if (( failed )); then
+        echo "pkg: $PM updated, one or more of the others failed, see above"
+        return 1
+    fi
+    echo "pkg: all updated in $(tb_elapsed $(( $(tb_now_ms) - start )))."
+    if k=$(newer_kernel); then
+        echo "     Reboot to use kernel $k."
+    fi
+    return 0
+}
+
+main() {
+    [[ -n $action ]] || tb_usage_error "say what to do: install, remove, search, info, owner, files or upgrade"
+    (( all )) && [[ $action != upgrade ]] && tb_usage_error "--all works with upgrade only"
+    find_pm
+    case $action in
+        install|remove|search|info|files) do_simple "$action" ;;
+        owner)   do_owner ;;
+        upgrade) do_upgrade ;;
+    esac
+}
+
+action=""
+names=()
+all=0
+dry_run=0
+PM="" APT="" DNF=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --all)        all=1 ;;
+        -n|--dry-run) dry_run=1 ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            if [[ -z $action ]]; then
+                case $1 in
+                    install|remove|search|info|owner|files|upgrade) action=$1 ;;
+                    *) tb_usage_error "unknown action $1, use install, remove, search, info, owner, files or upgrade" ;;
+                esac
+            else
+                names+=("$1")
+            fi ;;
+    esac
+    shift
+done
+
+main
+exit $?
