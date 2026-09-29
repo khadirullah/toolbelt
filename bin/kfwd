@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# kfwd: port-forward a service to a spare local port.
+set -uo pipefail
+TB_CMD=kfwd
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: kfwd [-n NAMESPACE] [--local PORT] [--port PORT] [--open] SERVICE
+            [-- kubectl port-forward options]
+
+Port-forward a service to a spare local port.
+
+Options:
+  -n, --namespace NS  the service's namespace, the context's own by default
+  --local PORT        use this local port instead of a spare one
+  --port PORT         the service port, by number or name, when it has several
+  --open              open the URL in your browser
+  -q, --quiet         print only the URL
+  -v, --verbose       every step, and each kubectl command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to kubectl port-forward, such as --address 0.0.0.0
+  or --context.
+
+Examples:
+  kfwd -n monitoring grafana
+  kfwd -n monitoring prometheus-server --port 9090
+  kfwd --local 3000 --open -n monitoring grafana
+  kfwd grafana -- --address 0.0.0.0
+
+Needs: kubectl and jq. xdg-open for --open. See man kfwd.
+Exit: 0 stopped with Ctrl+C, 1 port taken, no such service or kubectl
+      failed, 2 bad usage or unclear service port, 3 missing tool.
+EOF
+}
+
+# Who listens on a local TCP port, as "node (pid 18422)", when ss can tell.
+port_owner() {
+    tb_has ss || return 1
+    ss -Hltnp "sport = :$1" 2>/dev/null |
+        sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1 (pid \2)/p' | head -n 1
+}
+
+# The service ports as "name port" lines, TCP only.
+pick_port() {
+    local lines n=0 pname pnum list=() opts=()
+    RPORT="" RNAME=""
+    lines=$(jq -r '.spec.ports[]? | select((.protocol // "TCP") == "TCP") | "\(.name // "-")\t\(.port)"' "$TMP/svc")
+    [[ -n $lines ]] || tb_die 1 "svc/$name has no TCP ports to forward"
+    while IFS=$'\t' read -r pname pnum; do
+        ((n++))
+        if [[ $pname == - ]]; then list+=("$pnum"); else list+=("$pname $pnum"); fi
+        opts+=("--port $pnum")
+        if [[ -n $want && ( $want == "$pnum" || $want == "$pname" ) ]]; then
+            RPORT=$pnum RNAME=${pname#-}
+        fi
+    done <<<"$lines"
+    if [[ -n $want ]]; then
+        [[ -n ${RPORT:-} ]] && return 0
+        tb_die "$E_USAGE" "svc/$name has no port $want. Its ports are $(join_and "${list[@]}")"
+    fi
+    if (( n > 1 )); then
+        tb_err "svc/$name has $n ports, $(join_and "${list[@]}")"
+        tb_die "$E_USAGE" "pick one with $(join_and "${opts[@]}" | sed 's/ and / or /')"
+    fi
+    IFS=$'\t' read -r RNAME RPORT <<<"$lines"
+    [[ $RNAME == - ]] && RNAME=""
+    return 0
+}
+
+# Start kubectl port-forward in the background, pid in PF.
+start_pf() {
+    : > "$TMP/pf.log"
+    tb_show kubectl port-forward "svc/$name" "$LPORT:$RPORT" -n "$ns" ${TB_PASS[@]+"${TB_PASS[@]}"}
+    kubectl port-forward "svc/$name" "$LPORT:$RPORT" -n "$ns" ${TB_PASS[@]+"${TB_PASS[@]}"} \
+        >"$TMP/pf.log" 2>&1 &
+    PF=$!
+}
+
+# Wait up to 15 seconds for "Forwarding from". Returns 1 when kubectl exits first.
+wait_ready() {
+    local i
+    for ((i = 0; i < 150; i++)); do
+        grep -q '^Forwarding from' "$TMP/pf.log" 2>/dev/null && return 0
+        if ! kill -0 "$PF" 2>/dev/null; then
+            grep -q '^Forwarding from' "$TMP/pf.log" 2>/dev/null
+            return
+        fi
+        (( stopping )) && return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+stop_pf() {
+    if [[ -n ${PF:-} ]] && kill -0 "$PF" 2>/dev/null; then
+        kill "$PF" 2>/dev/null
+        wait "$PF" 2>/dev/null
+    fi
+    PF=""
+}
+
+main() {
+    local hint start url scheme=http tries=0 err
+    tb_need kubectl jq
+    (( open )) && tb_need xdg-open
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    [[ -n $ns ]] || ns=$KNS
+
+    local saved=("${TB_PASS[@]}")
+    TB_PASS=(${KCFG[@]+"${KCFG[@]}"})
+    if ! kube_to "$TMP/svc" get svc "$name" -n "$ns" -o json; then
+        if kube_notfound; then
+            kube_to "$TMP/names" get svc -n "$ns" -o name 2>/dev/null
+            hint=$(sed 's|^service/||' "$TMP/names" 2>/dev/null | closest "$name")
+            [[ -n $hint ]] && tb_die 1 "no service $name in $ns. Did you mean $hint?"
+            tb_die 1 "no service $name in $ns. List them with: kubectl get svc -n $ns"
+        fi
+        kube_fail
+    fi
+    TB_PASS=(${saved[@]+"${saved[@]}"})
+    pick_port
+
+    if [[ -n $LPORT ]]; then
+        if tb_port_used "$LPORT"; then
+            local who
+            who=$(port_owner "$LPORT")
+            if [[ -n $who ]]; then tb_err "port $LPORT is used by $who"; else tb_err "port $LPORT is in use"; fi
+            tb_die 1 "pick another, or leave out --local for a spare one"
+        fi
+    else
+        start=$RPORT
+        (( start < 1024 )) && start=$(( 8000 + RPORT ))
+        LPORT=$(tb_free_port "$start") || LPORT=$(tb_free_port 8000) ||
+            tb_die 1 "no free local port found"
+    fi
+    [[ $RPORT == 443 || $RPORT == 8443 || $RNAME == *https* ]] && scheme=https
+    url="$scheme://127.0.0.1:$LPORT"
+    tb_say "service port $RPORT${RNAME:+ ($RNAME)}, local port $LPORT"
+
+    stopping=0
+    trap 'stopping=1; [[ -n ${PF:-} ]] && kill "$PF" 2>/dev/null' INT TERM
+    trap 'stop_pf; tb_cleanup' EXIT
+
+    start_pf
+    if ! wait_ready; then
+        (( stopping )) && { stop_pf; return 0; }
+        stop_pf
+        cp "$TMP/pf.log" "$TMP/kerr"
+        grep -q 'unable to listen\|address already in use' "$TMP/kerr" &&
+            tb_die 1 "cannot listen on port $LPORT: $(grep -m1 . "$TMP/kerr")"
+        kube_fail
+    fi
+    if (( TB_QUIET )); then
+        echo "$url"
+    else
+        echo "forwarding svc/$name port $RPORT to $url"
+        tb_info "Ctrl+C stops it"
+    fi
+    if (( open )); then
+        tb_show xdg-open "$url"
+        xdg-open "$url" >/dev/null 2>&1 &
+    fi
+
+    while :; do
+        wait "$PF" 2>/dev/null
+        (( stopping )) && break
+        err=$(grep -v '^Forwarding from\|^Handling connection' "$TMP/pf.log" | grep -m1 .)
+        tb_say "kubectl port-forward stopped${err:+: $err}"
+        tb_info "$TB_CMD: the connection to svc/$name dropped, reconnecting"
+        while :; do
+            (( stopping )) && break 2
+            sleep "$(( tries < 4 ? tries + 1 : 5 ))" &
+            wait $! 2>/dev/null
+            (( stopping )) && break 2
+            start_pf
+            if wait_ready; then
+                tries=0
+                tb_info "$TB_CMD: back on $url"
+                break
+            fi
+            (( stopping )) && break 2
+            ((tries++))
+            if (( tries >= 5 )); then
+                err=$(grep -m1 . "$TMP/pf.log")
+                tb_die 1 "gave up after 5 tries${err:+: $err}"
+            fi
+        done
+    done
+    stop_pf
+    return 0
+}
+
+ns=""
+LPORT=""
+want=""
+open=0
+name=""
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--namespace) tb_optarg "$@"; ns=$2; shift ;;
+        --local)        tb_optarg "$@"
+                        [[ $2 =~ ^[0-9]+$ ]] && (( $2 >= 1 && $2 <= 65535 )) ||
+                            tb_usage_error "--local needs a port from 1 to 65535"
+                        LPORT=$2; shift ;;
+        --port)         tb_optarg "$@"; want=$2; shift ;;
+        --open)         open=1 ;;
+        --)             shift; TB_PASS=("$@"); break ;;
+        -*)             tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            [[ -z $name ]] || tb_usage_error "one service at a time, not $name and $1"
+            name=${1#svc/}
+            name=${name#service/} ;;
+    esac
+    shift
+done
+[[ -n $name ]] || tb_usage_error "give a service, such as: kfwd grafana"
+
+main
+exit $?

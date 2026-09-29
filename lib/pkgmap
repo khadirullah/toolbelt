@@ -156,3 +156,4 @@ stty           coreutils            coreutils            coreutils            co
 kubectl        kubectl              -                    kubectl              kubernetes-client    kubectl
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
+xdg-open       xdg-utils            xdg-utils            xdg-utils            xdg-utils            xdg-utils

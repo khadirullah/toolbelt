@@ -1,0 +1,231 @@
+.TH "KFWD" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+kfwd \- port\-forward a service to a spare local port
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+kfwd [-n NAMESPACE] [--local PORT] [--port PORT] [--open] SERVICE [-- kubectl port-forward options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBkubectl port\-forward svc/grafana 3000:80\fR is the quick way to reach a service inside a cluster from your own machine. It has three habits that make it tiring to use. You have to know the service port and pick a free local port yourself. It fails with \fBaddress already in use\fR when something else has that port. And it exits for good the moment the pod behind the service restarts, often with a \fBlost connection to pod\fR line you only see later, when the browser tab stops loading.
+.PP
+\fBkfwd\fR takes a service name and does the rest. It reads the service, picks its port, finds a spare local port, starts \fBkubectl port\-forward\fR and prints the URL. When the forward drops, it starts it again with a short back\-off, and says so. Ctrl+C stops it and exits 0.
+.PP
+\fBkfwd\fR forwards to services only, not to single pods. A service keeps working when the pod behind it changes, which is what makes the reconnect useful. For one pod, \fBkubectl port\-forward pod/NAME\fR does the job.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-namespace NS\fR
+The service's namespace. The context's own namespace by default.
+.TP
+\fB\-\-local PORT\fR
+Listen on this local port instead of a spare one.
+.TP
+\fB\-\-port PORT\fR
+The service port to forward, by number or by name, such as \fB\-\-port 9090\fR or \fB\-\-port http\fR.
+.TP
+\fB\-\-open\fR
+Open the URL in your browser with \fBxdg\-open\fR once the forward runs.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the URL, and no reconnect messages.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print each kubectl command, the ports it picked, and why a forward stopped.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-p\fR is not an option here. Across this toolbelt \fB\-p\fR means a password, so ports use \fB\-\-local\fR and \fB\-\-port\fR.
+.SH HOW IT PICKS THE PORTS
+.PP
+The service port : A service with one TCP port uses it. A service with several stops with exit 2 and lists them, so you pick one with \fB\-\-port\fR. UDP ports are skipped, since \fBkubectl port\-forward\fR forwards TCP only.
+.PP
+The local port : \fB\-\-local PORT\fR is used as given. When something already listens there, \fBkfwd\fR names the program and its pid, as \fBss\fR reports it, and exits 1. Without \fB\-\-local\fR, \fBkfwd\fR looks for a free port starting at the service port, such as 9090 for 9090. Ports under 1024 need root to listen on, so for those it starts at 8000 plus the port, such as 8080 for 80 or 8443 for 443.
+.PP
+The URL : \fBhttp://127.0.0.1:PORT\fR, or \fBhttps://\fR when the service port is 443 or 8443 or its name has \fBhttps\fR in it.
+.SH RECONNECTING
+.PP
+\fBkubectl port\-forward\fR connects to one pod picked when it starts. When that pod restarts or is replaced, kubectl exits. \fBkfwd\fR notices, prints \fBthe connection to svc/NAME dropped, reconnecting\fR, and starts a new forward on the same local port, which picks a pod that is running now. A new forward that comes up prints \fBback on URL\fR.
+.PP
+Between tries it waits 1, 2, 3, 4 and then 5 seconds. After 5 failed tries in a row it stops with exit 1 and kubectl's last error, such as a pod that stays Pending. A successful reconnect resets the count.
+.PP
+Any browser tab or client keeps the same URL through all of this. Open connections break at the moment of the restart, as they would with the pod itself.
+.SH STOPPING
+.PP
+Ctrl+C, or a TERM signal from \fBkill PID\fR, stops the kubectl child first and then \fBkfwd\fR, which exits 0. \fBkfwd\fR tracks the child by its pid, so nothing keeps listening after it ends. A forward started with \fB&\fR in a shell stops the same way, with \fBkill %1\fR or \fBkill PID\fR.
+.SH USE FROM A SCRIPT
+.PP
+\fBkfwd\fR keeps running until you stop it, so \fBurl=$(kfwd \-q ...)\fR would wait forever. Start it in the background with its output in a file, read the URL once the file has it, and stop it by pid when you are done.
+.PP
+.RS 4
+.nf
+$ kfwd -q -n shop --port 9090 api > /tmp/api-url & pid=$!
+$ sleep 2; cat /tmp/api-url
+http://127.0.0.1:9090
+$ kill $pid; wait $pid; echo $?
+0
+.fi
+.RE
+.PP
+Between the \fBcat\fR and the \fBkill\fR, the script can reach the service at that URL, with \fBcurl\fR or anything else.
+.PP
+\fB\-q\fR also hides the reconnect messages, so the file holds the URL alone.
+.SH SECURITY
+.IP \(bu 2
+The forward listens on 127.0.0.1 only, so only your own machine reaches it. \fB\-\- \-\-address 0.0.0.0\fR changes that, on purpose and never by default.
+.IP \(bu 2
+The traffic goes from your machine to the API server over the same TLS connection kubectl always uses, and from there to the kubelet on the pod's node. Nothing is opened on the node itself.
+.IP \(bu 2
+The cluster records each port\-forward in its audit log, when audit logging is on, under your account.
+.IP \(bu 2
+\fBkfwd\fR never stops a program that holds a port. It names it, so you can decide.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBkubectl port\-forward\fR, and \fB\-\-context\fR and \fB\-\-kubeconfig\fR also to the call that reads the service.
+.PP
+.RS 4
+.nf
+$ kfwd grafana -- --address 0.0.0.0
+$ kfwd -n monitoring grafana -- --context kind-kind
+.fi
+.RE
+.PP
+\fB\-\-address 0.0.0.0\fR makes the port reachable from other machines on your network. Only do that on a network you trust, since the service gets no login of its own from \fBkfwd\fR.
+.SH NEEDS
+.PP
+\fBkubectl\fR and \fBjq\fR. \fBss\fR, from iproute2, to name the program that holds a port, and \fBxdg\-open\fR, from xdg\-utils, for \fB\-\-open\fR. Both are optional.
+.PP
+The account behind your context needs \fBget\fR on services and pods and \fBcreate\fR on \fBpods/portforward\fR.
+.SH EXAMPLES
+.SS Grafana on a spare port
+.PP
+.RS 4
+.nf
+$ kfwd -n monitoring grafana
+forwarding svc/grafana port 80 to http://127.0.0.1:8080
+Ctrl+C stops it
+kfwd: the connection to svc/grafana dropped, reconnecting
+kfwd: back on http://127.0.0.1:8080
+^C
+$ echo $?
+0
+.fi
+.RE
+.PP
+The Grafana pod restarted halfway through. The URL stayed the same.
+.SS A service with two ports
+.PP
+.RS 4
+.nf
+$ kfwd -n shop api
+kfwd: svc/api has 2 ports, http 80 and grpc 9090
+kfwd: pick one with --port 80 or --port 9090
+$ echo $?
+2
+$ kfwd -n shop api --port 8080
+kfwd: svc/api has no port 8080. Its ports are http 80 and grpc 9090
+.fi
+.RE
+.PP
+8080 was the container's port. \fB\-\-port\fR takes the service's own port, or its name, such as \fB\-\-port grpc\fR.
+.SS Only the URL, for a script
+.PP
+.RS 4
+.nf
+$ kfwd -q -n shop --port 9090 api
+http://127.0.0.1:9090
+.fi
+.RE
+.PP
+It keeps running after it prints the URL, until Ctrl+C. The section on use from a script shows how to read the URL and carry on.
+.SS What it runs
+.PP
+.RS 4
+.nf
+$ kfwd -v -n monitoring prometheus-server
++ kubectl get svc prometheus-server -n monitoring -o json
+kfwd: service port 9090 (web), local port 9090
++ kubectl port-forward svc/prometheus-server 9090:9090 -n monitoring
+forwarding svc/prometheus-server port 9090 to http://127.0.0.1:9090
+Ctrl+C stops it
+.fi
+.RE
+.SS A local port that is taken
+.PP
+.RS 4
+.nf
+$ kfwd --local 8820 -n monitoring grafana
+kfwd: port 8820 is used by python (pid 390057)
+kfwd: pick another, or leave out --local for a spare one
+$ echo $?
+1
+.fi
+.RE
+.PP
+\fBkfwd\fR only reports the program. It never stops it.
+.SS A typo in the service name
+.PP
+.RS 4
+.nf
+$ kfwd -n monitoring grafna
+kfwd: no service grafna in monitoring. Did you mean grafana?
+.fi
+.RE
+.SS The pod does not come back
+.PP
+.RS 4
+.nf
+$ kfwd -n monitoring grafana
+forwarding svc/grafana port 80 to http://127.0.0.1:8080
+Ctrl+C stops it
+kfwd: the connection to svc/grafana dropped, reconnecting
+kfwd: gave up after 5 tries: error: unable to forward port because pod is not running. Current status=Pending
+$ echo $?
+1
+.fi
+.RE
+.PP
+\fBkwhy \-n monitoring\fR shows why the new pod stays Pending.
+.SS Open it in the browser
+.PP
+.RS 4
+.nf
+$ kfwd --local 3000 --open -n monitoring grafana
+forwarding svc/grafana port 80 to http://127.0.0.1:3000
+Ctrl+C stops it
+.fi
+.RE
+.PP
+The browser opens on the URL once the forward runs, not before, so the first page load does not fail.
+.SH TROUBLESHOOTING
+.PP
+\fBkfwd: svc/NAME has no TCP ports to forward\fR : The service has only UDP ports, such as a DNS service, or no ports at all. \fBkubectl port\-forward\fR cannot forward those.
+.PP
+\fBkfwd: cannot listen on port PORT: ...\fR : kubectl could not open the local port, for example a port under 1024 without root. Leave out \fB\-\-local\fR, or pick a port above 1024.
+.PP
+The URL loads, but the page is empty or says bad gateway : The forward goes to the service port, which reaches the container's \fBtargetPort\fR. When the app listens on another port than the service's \fBtargetPort\fR, the connection opens and nothing answers. Compare them with \fBkyaml svc/NAME\fR.
+.PP
+\fBerror: unable to forward port because pod is not running\fR : The service has no running pod behind it. \fBkwhy\fR shows why.
+.PP
+The forward stops every few minutes : Some load balancers and proxies in front of the API server close idle connections. \fBkfwd\fR reconnects each time, so the URL keeps working. To stop the drops, raise the idle timeout on that load balancer.
+.PP
+No \fBHandling connection for PORT\fR lines : kubectl prints one for each new connection. \fBkfwd\fR keeps kubectl's output out of your terminal and reads it only to see when the forward is up and why it stopped. \fB\-v\fR prints the reason a forward stopped.
+.SH EXIT STATUS
+.TP
+0
+Stopped with Ctrl+C or a TERM signal.
+.TP
+1
+The local port is taken, no such service, kubectl failed, or it gave up after 5 tries.
+.TP
+2
+Bad usage, or a service with several ports and no \fB\-\-port\fR, or a \fB\-\-port\fR it does not have.
+.TP
+3
+kubectl or jq is missing.
+.SH SEE ALSO
+.PP
+\fBsshfwd\fR, \fBport\fR, \fBkwhy\fR, \fBkyaml\fR, \fBkubectl\-port\-forward(1)\fR
