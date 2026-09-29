@@ -128,7 +128,8 @@ fi"
 
 @test "-w redraws until stopped" {
     run timeout 2 mem -q -w 0.5
-    [ "$status" -eq 124 ]
+    # GNU timeout exits 124. BusyBox timeout passes on the exit code of what it stopped.
+    [[ $status == 124 || $status == 143 ]]
     [ "$(grep -c 'used, 488MB available' <<<"$output")" -ge 2 ]
 }
 
