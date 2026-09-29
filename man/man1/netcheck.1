@@ -1,0 +1,232 @@
+.TH "NETCHECK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+netcheck \- find where the network breaks, step by step
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+netcheck [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+"The internet is down" can mean six different things, and each has a different fix. \fBnetcheck\fR walks the path your traffic takes, from the network card to a real website, and tests each piece in order. The first piece that fails is where the fault is. The last line says so in words, with a command to try when there is one.
+.PP
+.RS 4
+.nf
+link      PASS  wlp3s0 up, Wi-Fi Home-5G, signal -61 dBm
+address   PASS  192.168.1.24/24 from DHCP
+gateway   PASS  192.168.1.1 answers, 2.1 ms
+internet  PASS  1.1.1.1 answers, 14 ms
+dns       PASS  example.com resolves through 192.168.1.1, 18 ms
+https     PASS  https://example.com answers 200, 212 ms
+netcheck: all good. If a site still fails, the fault is on its side.
+.fi
+.RE
+.PP
+Use it to tell a problem on your side from an outage somewhere else. When every step passes and a site still does not load, the site is down, not your network.
+.PP
+\fBnetcheck\fR runs every step, then prints the table. In a terminal a status line shows which step it is on.
+.SH THE STEPS
+.TP
+\fBlink\fR
+What it tests: The network card is on and connected to something, a cable or a Wi\-Fi network.. How: \fBip \-brief link show IFACE\fR
+.TP
+\fBaddress\fR
+What it tests: The card has an IP address, and it is not a self\-made \fB169.254.x.x\fR one.. How: \fBip \-4 addr show IFACE\fR
+.TP
+\fBgateway\fR
+What it tests: The router answers.. How: \fBping \-c 2 \-W 2\fR to the default route's gateway
+.TP
+\fBinternet\fR
+What it tests: Traffic gets past the router to the internet.. How: \fBping \-c 2 \-W 2 1.1.1.1\fR, then a TCP connection to \fB1.1.1.1\fR port 443 when ping fails
+.TP
+\fBdns\fR
+What it tests: Names turn into addresses.. How: \fBgetent ahosts HOST\fR, with a 6 second limit
+.TP
+\fBhttps\fR
+What it tests: A real web request works, including TLS.. How: \fBcurl\fR to the URL, with a 10 second limit
+.PP
+Each line has one of four marks:
+.IP \(bu 2
+\fBPASS\fR, the step works.
+.IP \(bu 2
+\fBFAIL\fR, the step does not work. \fBnetcheck\fR exits 1.
+.IP \(bu 2
+\fBWARN\fR, something is odd but traffic still flows, such as a router that does not answer ping.
+.IP \(bu 2
+\fBSKIP\fR, the step could not run because an earlier one failed. The text says which.
+.SS How the steps depend on each other
+.PP
+Without a link there can be no address, and without an address nothing can be sent. So a \fBlink\fR failure skips every other step, and an \fBaddress\fR failure skips the rest too.
+.PP
+After that \fBnetcheck\fR keeps going, because the later steps tell it more:
+.IP \(bu 2
+Some routers do not answer ping. When \fBgateway\fR fails but \fBinternet\fR passes, traffic clearly goes through the router, so \fBgateway\fR becomes \fBWARN\fR and does not count as a failure.
+.IP \(bu 2
+Some networks block ping to the internet. When the ping to \fB1.1.1.1\fR fails, \fBnetcheck\fR opens a TCP connection to \fB1.1.1.1\fR on port 443. When that works, \fBinternet\fR passes with \fBping is blocked here\fR.
+.IP \(bu 2
+\fBdns\fR runs even when \fBinternet\fR fails, because the router often answers DNS questions itself.
+.IP \(bu 2
+\fBhttps\fR needs \fBdns\fR, so a \fBdns\fR failure skips it.
+.SS The verdict
+.PP
+The last line names the first step that failed and what to try:
+.TP
+\fBlink\fR on Wi\-Fi
+Connect to a Wi\-Fi network, with \fBnmcli device wifi list\fR to see them.
+.TP
+\fBlink\fR on a cable
+Plug the cable in, or check the switch port.
+.TP
+\fBaddress\fR
+Ask DHCP again, with \fBnmcli device reapply IFACE\fR or \fBsudo dhclient IFACE\fR.
+.TP
+\fBgateway\fR
+The router does not answer. Restart it, or move closer to it.
+.TP
+\fBinternet\fR
+The router answers but nothing gets past it. The line to your provider is down.
+.TP
+\fBdns\fR
+The internet works but DNS does not. Try another server, with the command for this machine.
+.TP
+\fBhttps\fR
+DNS works, but the site does not answer over HTTPS. It may be down, or a firewall or proxy blocks it.
+.PP
+For DNS, the command it suggests depends on what runs the network. With systemd\-resolved it is \fBresolvectl dns IFACE 1.1.1.1\fR. With NetworkManager and no systemd\-resolved it is \fBnmcli connection modify 'NAME' ipv4.dns 1.1.1.1\fR. Otherwise it points at \fB/etc/resolv.conf\fR. The change from \fBresolvectl\fR lasts until the next reconnect. The one from \fBnmcli\fR stays, and takes effect after \fBnmcli connection up 'NAME'\fR.
+.SS Which interface
+.PP
+By default \fBnetcheck\fR checks the interface that carries the default route, the one your traffic uses. When there is no default route, it takes the first interface that is up. \fB\-i\fR picks one yourself, which also makes the pings go out through it with \fBping \-I\fR.
+.SH OPTIONS
+.TP
+\fB\-i\fR, \fB\-\-iface IFACE\fR
+Check this interface instead of the one with the default route.
+.TP
+\fB\-\-host URL\fR
+The site for the \fBdns\fR and \fBhttps\fR steps. \fBhttps://example.com\fR by default. A bare name such as \fBgit.example.com\fR gets \fBhttps://\fR in front.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the verdict, \fBall good\fR or \fBfails at STEP\fR.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each \fBip\fR, \fBping\fR, \fBgetent\fR and \fBcurl\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fBnetcheck\fR has no pass\-through. Each step calls a different tool, and \fB\-v\fR shows each command so you can run it by hand.
+.SH NEEDS
+.IP \(bu 2
+\fBip\fR from \fBiproute2\fR, or \fBiproute\fR on Fedora.
+.IP \(bu 2
+\fBping\fR from \fBiputils\-ping\fR on Debian and Ubuntu, or \fBiputils\fR on Fedora, Arch, openSUSE and Alpine. Minimal container images often lack it.
+.IP \(bu 2
+\fBgetent\fR, part of the C library on every distro. On Alpine it comes from \fBmusl\-utils\fR.
+.IP \(bu 2
+\fBcurl\fR.
+.IP \(bu 2
+\fBtimeout\fR from coreutils.
+.PP
+Optional: \fBnmcli\fR from NetworkManager, or \fBiw\fR, adds the Wi\-Fi network name. The signal comes from \fB/proc/net/wireless\fR, so it needs no tool. \fBresolvectl\fR names the real DNS server behind systemd\-resolved.
+.PP
+\fBnetcheck\fR exits 3 with the install line when \fBip\fR, \fBping\fR, \fBgetent\fR or \fBcurl\fR is missing.
+.SH EXAMPLES
+.SS Everything works
+.PP
+.RS 4
+.nf
+$ netcheck
+link      PASS  enp2s0 up
+address   PASS  192.168.122.210/24 from DHCP
+gateway   PASS  192.168.122.1 answers, 0.1 ms
+internet  PASS  1.1.1.1 answers, 10 ms
+dns       PASS  example.com resolves through 192.168.122.1, 25 ms
+https     PASS  https://example.com answers 200, 53 ms
+netcheck: all good. If a site still fails, the fault is on its side.
+.fi
+.RE
+.SS A name that does not resolve
+.PP
+.RS 4
+.nf
+$ netcheck --host https://nonexistent.invalid
+link      PASS  enp2s0 up
+address   PASS  192.168.122.210/24 from DHCP
+gateway   PASS  192.168.122.1 answers, 0.3 ms
+internet  PASS  1.1.1.1 answers, 11 ms
+dns       FAIL  nonexistent.invalid does not resolve through 192.168.122.1
+https     SKIP  needs dns
+netcheck: the internet works but DNS does not. Try another server:
+          nmcli connection modify 'Wired connection 1' ipv4.dns 1.1.1.1
+.fi
+.RE
+.PP
+Here DNS works and the name simply does not exist. When \fBnetcheck\fR with the default \fBexample.com\fR fails at \fBdns\fR, your DNS server is the problem.
+.SS An interface with no link
+.PP
+.RS 4
+.nf
+$ netcheck -i docker0
+link      FAIL  docker0 is up but has no carrier
+address   SKIP  needs link
+gateway   SKIP  needs link
+internet  SKIP  needs link
+dns       SKIP  needs link
+https     SKIP  needs link
+netcheck: no link on docker0. Plug the cable in, or check the switch port.
+.fi
+.RE
+.PP
+A Docker bridge has no carrier while no container runs, so this one is expected.
+.SS In a script
+.PP
+.RS 4
+.nf
+$ netcheck -q && ./deploy.sh
+all good
+.fi
+.RE
+.SS See every command
+.PP
+.RS 4
+.nf
+$ netcheck -v -q
++ ip route show default
++ ip -brief link show enp2s0
++ ip -4 addr show enp2s0
++ ip route show default
++ ping -c 2 -W 2 192.168.122.1
++ ping -c 2 -W 2 1.1.1.1
++ getent ahosts example.com
++ curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 10 https://example.com
+all good
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBaddress FAIL only 169.254.x.x, a self\-made address. DHCP gave none\fR : The machine asked for an address and nothing answered. The router's DHCP server may be off, or the Wi\-Fi joined but the password was wrong on a network that checks it late. Reconnect, then restart the router.
+.PP
+\fBgateway FAIL\fR on a laptop with a strong signal : Captive portals in hotels and trains often block everything until you accept terms in a browser. Open \fBhttp://neverssl.com\fR in a browser.
+.PP
+\fBhttps FAIL ... the certificate is not trusted, a proxy may be in the way\fR : A company proxy or antivirus tool that inspects HTTPS uses its own certificate. Install the company's root certificate, or ask IT.
+.PP
+\fBdns\fR passes but slowly, over 1000 ms : The first query after a while is slower because nothing is cached. Run \fBnetcheck\fR again. When it stays slow, try another DNS server with the command from the verdict.
+.PP
+\fBnetcheck: needs ping\fR in a container : Minimal images leave ping out. Install \fBiputils\-ping\fR on Debian and Ubuntu, or \fBiputils\fR elsewhere.
+.SH EXIT STATUS
+.TP
+0
+Every step passed. A \fBWARN\fR still counts as passed.
+.TP
+1
+At least one step failed. The verdict names the first.
+.TP
+2
+Bad usage.
+.TP
+3
+\fBip\fR, \fBping\fR, \fBgetent\fR or \fBcurl\fR is missing.
+.SH SEE ALSO
+.PP
+\fBmyip\fR, \fBhttptime\fR, \fBlan\fR, \fBping(8)\fR, \fBip(8)\fR, \fBresolvectl(1)\fR
