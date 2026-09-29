@@ -165,7 +165,11 @@ esac"
     re="/usr/local/bin/warm-cache +- +- +no record"
     [[ $output =~ $re ]]
     [[ $output == *"8 jobs, 1 failed last time."* ]]
-    [[ $output == *"cron keeps no exit code"* ]]
+    if [ "$EUID" -ne 0 ]; then
+        [[ $output == *"cron keeps no exit code"* ]]
+    else
+        [[ $output != *"cron keeps no exit code"* ]]
+    fi
 }
 
 @test "a failed job shows in the summary of the plain table" {

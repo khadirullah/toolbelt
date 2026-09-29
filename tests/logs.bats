@@ -139,6 +139,7 @@ esac"
 }
 
 @test "says when it can read only your own entries" {
+    [ "$EUID" -ne 0 ] || skip "root can read every entry"
     rm "$TB_ROOTFS/var/log/journal/abc/system.journal"
     run logs --priority err
     [[ $output == *"you can read only your own entries"* ]]

@@ -136,7 +136,11 @@ esac"
     tb_stub journalctl 'exit 0'
     run boottime --history
     [ "$status" -eq 1 ]
-    [[ $output == *"no boot times in the journal"* ]]
+    if [ "$EUID" -eq 0 ]; then
+        [ "$output" = "boottime: the journal holds no boot times" ]
+    else
+        [[ $output == *"no boot times in the journal you can read"* ]]
+    fi
 }
 
 @test "--history without journalctl exits 3" {

@@ -127,7 +127,9 @@ esac"
 @test "--health shows SMART data through sudo, and says when a bridge hides it" {
     run disks --health -v
     [ "$status" -eq 0 ]
-    [[ $output == *"+ sudo -n smartctl -H -i -A /dev/nvme0n1"* ]]
+    local sudo="sudo -n "
+    [ "$EUID" -ne 0 ] || sudo=""
+    [[ $output == *"+ ${sudo}smartctl -H -i -A /dev/nvme0n1"* ]]
     [[ $output == *"nvme0n1   SAMSUNG MZVLB256HAHQ-000L7"* ]]
     [[ $output == *"  smart             PASSED"* ]]
     [[ $output == *"  wear              11% used"* ]]
@@ -153,6 +155,7 @@ esac"
 }
 
 @test "--health without a sudo password exits 1 and says why" {
+    [ "$EUID" -ne 0 ] || skip "root needs no sudo"
     tb_stub sudo 'echo "sudo: a password is required" >&2; exit 1'
     run disks --health
     [ "$status" -eq 1 ]

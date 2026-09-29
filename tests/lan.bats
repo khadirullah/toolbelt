@@ -132,7 +132,9 @@ Nmap done: 1 IP address (1 host up) scanned in 3.40 seconds
 X'
     run lan -v -P nas.lan -- -sV
     [ "$status" -eq 0 ]
-    [ "${lines[0]}" = "+ sudo nmap -sS --top-ports 1000 -T4 -sV 192.168.1.52" ]
+    local sudo="sudo "
+    [ "$EUID" -ne 0 ] || sudo=""
+    [ "${lines[0]}" = "+ ${sudo}nmap -sS --top-ports 1000 -T4 -sV 192.168.1.52" ]
     [ "${lines[1]}" = "nas.lan  192.168.1.52  Synology" ]
     [ "${lines[2]}" = "22/tcp    ssh" ]
     [ "${lines[3]}" = "5000/tcp  upnp" ]
