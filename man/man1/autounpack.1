@@ -1,0 +1,226 @@
+.TH "AUTOUNPACK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+autounpack \- unpack archives as they land in ~/Downloads
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+autounpack [status]
+autounpack enable [dir] [-- unpack options]
+autounpack disable | log
+autounpack run dir [-- unpack options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBautounpack\fR watches a folder and runs \fBunpack\fR on each archive that lands in it. Download a \fB.zip\fR and a moment later its folder sits next to it. The archive always stays. \fBautounpack\fR passes \fB\-k\fR to \fBunpack\fR every time and refuses \fB\-\-rm\fR, so a file it did not expect never disappears.
+.PP
+\fBautounpack enable\fR writes a systemd user service and starts it, so the watch runs whenever you are logged in, with no terminal open and no root. \fBdisable\fR stops it and removes the service. \fBstatus\fR says whether it is on, which folder it watches and what it did last. \fBlog\fR shows what it unpacked, and what \fBunpack\fR refused.
+.PP
+The folder is \fB~/Downloads\fR by default, or the download folder your desktop set in \fB~/.config/user\-dirs.dirs\fR. Name another with \fBautounpack enable DIR\fR.
+.PP
+\fBautounpack run DIR\fR is the watch itself. The service runs it, and you can run it in a terminal to try a folder out before you enable it. Ctrl+C stops it.
+.SH COMMANDS
+.TP
+\fBstatus\fR
+On or off, the folder, the unpack options and the last run. The default command.
+.TP
+\fBenable [DIR]\fR
+Write the service for DIR, or \fB~/Downloads\fR, then enable and start it. Run it again to change the folder or options.
+.TP
+\fBdisable\fR
+Stop the service and remove it. Archives and folders already unpacked stay.
+.TP
+\fBlog\fR
+The last lines of the log, one per archive.
+.TP
+\fBrun DIR\fR
+Watch DIR in this terminal until Ctrl+C.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-lines N\fR
+With \fBlog\fR, how many lines to show. The default is 20.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only errors.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print each step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print the help.
+.SH WHAT IT UNPACKS
+.PP
+\fBautounpack\fR reacts when a file is closed after writing, or moved into the folder. Browsers write a download to a temporary name and rename it at the end, and the rename is the moment \fBautounpack\fR sees it.
+.PP
+It skips these:
+.IP \(bu 2
+partial downloads, ending in \fB.part\fR, \fB.crdownload\fR, \fB.download\fR, \fB.partial\fR, \fB.opdownload\fR or \fB.tmp\fR
+.IP \(bu 2
+hidden files, whose names start with a dot
+.IP \(bu 2
+later parts of a split set, such as \fB.part2.rar\fR, \fB.r00\fR, \fB.z01\fR or \fB.002\fR. The first part, \fB.part1.rar\fR or \fB.001\fR, unpacks the whole set.
+.IP \(bu 2
+files that are not archives, by extension
+.PP
+For everything else, it waits until the size stops changing for two seconds, then runs \fBunpack \-k ./NAME\fR inside the folder. The same file with the same size and time is only unpacked once, even when two events arrive for it.
+.PP
+\fBunpack\fR decides where the files go, by its usual rules. An archive with one top folder unpacks to that folder, and a loose one gets a folder named after the archive. When the name is taken, \fBunpack\fR picks the next free name such as \fBphotos\-1/\fR, so nothing is overwritten.
+.SH THE LOG
+.PP
+Each archive gets one line in \fB~/.local/state/toolbelt/autounpack.log\fR, with the time, the name and what happened:
+.PP
+.RS 4
+.nf
+2026-09-29 17:04  app-1.4.tgz  -> app-1.4/ (920B, 5 files, 0.0s)
+2026-09-29 17:04  evil.tar  refused, 1 unsafe path. Nothing was written.
+.fi
+.RE
+.PP
+\fBrefused\fR means \fBunpack\fR stopped at a safety check, and \fBfailed\fR means the archive or the tool failed. Both come with \fBunpack\fR's own message. When \fBnotify\-send\fR is installed, a refusal or failure also pops up a desktop notice, since nobody is watching the terminal.
+.SH THE SERVICE
+.PP
+\fBenable\fR writes \fB~/.config/systemd/user/autounpack.service\fR and runs \fBsystemctl \-\-user daemon\-reload\fR, then \fBenable\fR and \fBrestart\fR on it. The unit runs \fBautounpack run DIR\fR with any unpack options, and systemd restarts it if it stops. It starts at login, from \fBdefault.target\fR.
+.PP
+A user service runs only while you are logged in. To keep it running after logout, or on a machine you only reach over SSH, turn on lingering once with \fBloginctl enable\-linger $USER\fR.
+.PP
+The service writes nothing outside the watched folder, the log and the unit. \fBdisable\fR removes the unit, so nothing is left behind.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBunpack\fR on every run, after \fB\-k\fR. \fBenable\fR stores them in the service, and \fBstatus\fR shows them.
+.PP
+.RS 4
+.nf
+autounpack enable -- -d
+autounpack enable ~/Inbox -- --only '*.pdf'
+.fi
+.RE
+.PP
+\fB\-\-rm\fR is refused, since \fBautounpack\fR never deletes an archive. \fB\-k\fR is always there already.
+.SH NEEDS
+.PP
+A systemd user session for \fBenable\fR, \fBinotifywait\fR from inotify\-tools, and \fBunpack\fR from toolbelt with the tools for the formats you download. \fBnotify\-send\fR is optional and shows desktop notices for refusals and failures.
+.TP
+inotifywait
+apt: inotify\-tools. dnf: inotify\-tools. pacman: inotify\-tools. zypper: inotify\-tools. apk: inotify\-tools
+.TP
+systemctl
+apt: systemd. dnf: systemd. pacman: systemd. zypper: systemd. apk: none
+.TP
+notify\-send
+apt: libnotify\-bin. dnf: libnotify. pacman: libnotify. zypper: libnotify\-tools. apk: libnotify
+.PP
+Per distro:
+.IP \(bu 2
+\fBDebian, Ubuntu, Fedora, Arch and openSUSE.\fR systemd runs a user session for every desktop login, so \fBenable\fR works out of the box. On a server, turn on lingering first.
+.IP \(bu 2
+\fBAlpine, Void, Gentoo with OpenRC, and other systems without systemd.\fR \fBenable\fR exits 3 and names the init system. Run \fBautounpack run ~/Downloads\fR from your session's autostart instead, such as a line in \fB~/.xprofile\fR or your desktop's autostart settings.
+.IP \(bu 2
+\fBWSL.\fR systemd runs only when \fB/etc/wsl.conf\fR turns it on. Without it, use \fBautounpack run\fR in a terminal.
+.SH EXAMPLES
+.SS Turn it on
+.PP
+.RS 4
+.nf
+$ autounpack enable
+autounpack: enabled autounpack.service for your user
+autounpack: watching ~/Downloads. Archives stay after unpacking.
+.fi
+.RE
+.SS Check on it
+.PP
+.RS 4
+.nf
+$ autounpack
+autounpack: on, watching ~/Downloads
+autounpack: unpack options: -d
+autounpack: last run 2026-09-29 17:04, evil.tar
+.fi
+.RE
+.SS See what it did
+.PP
+\fBevil.tar\fR held a path that climbs out of the folder, \fB../evil.txt\fR, so \fBunpack\fR refused it and wrote nothing.
+.PP
+.RS 4
+.nf
+$ autounpack log
+2026-09-29 17:02  site.zip  -> site/ (60KB, 3 files, 0.0s)
+2026-09-29 17:04  app-1.4.tgz  -> app-1.4/ (920B, 5 files, 0.0s)
+2026-09-29 17:04  evil.tar  refused, 1 unsafe path. Nothing was written.
+.fi
+.RE
+.SS Try a folder in the terminal first
+.PP
+.RS 4
+.nf
+$ autounpack run ~/Downloads
+autounpack: watching ~/Downloads with ~/toolbelt/bin/unpack -k. Ctrl+C stops.
+2026-09-29 17:02  app-1.4.tgz  -> app-1.4/ (920B, 5 files, 0.0s)
+2026-09-29 17:02  site.zip  -> site/ (60KB, 3 files, 0.0s)
+.fi
+.RE
+.PP
+\fBbig.iso.part\fR landed in the same folder while the browser was still downloading, and \fBautounpack\fR left it alone.
+.SS Every step of enable
+.PP
+.RS 4
+.nf
+$ autounpack -v enable ~/Downloads -- -d
+autounpack: writing ~/.config/systemd/user/autounpack.service
++ systemctl --user daemon-reload
++ systemctl --user enable autounpack.service
+Created symlink ~/.config/systemd/user/default.target.wants/autounpack.service -> ~/.config/systemd/user/autounpack.service.
++ systemctl --user restart autounpack.service
+autounpack: enabled autounpack.service for your user
+autounpack: watching ~/Downloads. Archives stay after unpacking.
+.fi
+.RE
+.SS It never deletes
+.PP
+.RS 4
+.nf
+$ autounpack enable -- --rm
+autounpack: autounpack never deletes archives, so it does not pass --rm to unpack
+Try 'autounpack --help' for the options.
+.fi
+.RE
+.SS Turn it off
+.PP
+.RS 4
+.nf
+$ autounpack disable
+autounpack: off. Archives already unpacked stay where they are.
+$ autounpack
+autounpack: off
+autounpack: last run 2026-09-29 17:04, evil.tar
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB"needs a systemd user session, this machine runs openrc"\fR There is no systemd here. Start \fBautounpack run DIR\fR from your login or desktop autostart instead.
+.PP
+\fB"systemctl \-\-user cannot reach one"\fR You are logged in over SSH or from a script with no user session. Run \fBloginctl enable\-linger $USER\fR once, log in again, and repeat \fBenable\fR.
+.PP
+\fB"~/Inbox does not exist. Make it first, or name another folder"\fR \fBenable\fR only watches a folder that is there.
+.PP
+\fBstatus says "enabled for ~/Downloads, but the service is failed"\fR The watch stopped. Run \fBjournalctl \-\-user \-u autounpack.service\fR to see why. A missing \fBinotifywait\fR or a folder that was deleted are the usual causes.
+.PP
+\fBAn archive did not unpack.\fR Check \fBautounpack log\fR first. When it has no line for the file, the name was skipped as a partial download, a later part or not an archive. When the browser saved it straight to the final name without a rename, \fBautounpack\fR still sees the close, but only if the watch was running at the time.
+.PP
+\fBinotifywait says the upper limit on inotify watches is reached.\fR Raise \fBfs.inotify.max_user_watches\fR with sysctl. \fBautounpack\fR watches only one folder, so another program is using up the limit.
+.SH EXIT STATUS
+.TP
+0
+The command worked. A refused or failed archive during \fBrun\fR is logged, and the watch goes on.
+.TP
+1
+The folder does not exist, or systemctl failed to enable or start the service.
+.TP
+2
+Bad usage, including an unknown command and \fB\-\-rm\fR after \fB\-\-\fR.
+.TP
+3
+inotifywait or unpack is missing, or there is no systemd user session.
+.SH SEE ALSO
+.PP
+\fBunpack\fR, \fBsquash\fR, \fBinotifywait(1)\fR, \fBsystemctl(1)\fR, \fBsystemd.unit(5)\fR

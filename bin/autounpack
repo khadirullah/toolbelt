@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# autounpack: unpack archives as they land in ~/Downloads.
+set -uo pipefail
+TB_CMD=autounpack
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: autounpack [status]
+       autounpack enable [dir] [-- unpack options]
+       autounpack disable | log
+       autounpack run dir [-- unpack options]
+
+Unpack archives as they land in ~/Downloads.
+
+Commands:
+  status              on or off, the folder and the last run, the default
+  enable [DIR]        watch DIR, or ~/Downloads, from a systemd user service
+  disable             stop watching and remove the service
+  log                 what it unpacked, and what unpack refused
+  run DIR             watch DIR in this terminal until Ctrl+C
+
+Options:
+  -n, --lines N       log lines to show, default 20
+  -q, --quiet         only errors
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to unpack on every run. unpack always gets -k, so
+  autounpack never deletes an archive.
+
+Examples:
+  autounpack enable
+  autounpack enable ~/Inbox -- -d
+  autounpack log
+  autounpack run /tmp/drop
+
+Needs: systemd, inotifywait from inotify-tools, and unpack. See man autounpack.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool or no systemd user session.
+EOF
+}
+
+UNIT=autounpack.service
+
+unit_path() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT"; }
+log_path() { echo "$(tb_state_dir)/autounpack.log"; }
+
+# The folder to watch when none is named: XDG_DOWNLOAD_DIR, then ~/Downloads.
+default_dir() {
+    local d=${XDG_DOWNLOAD_DIR:-}
+    if [[ -z $d ]]; then
+        local dirs=${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs line
+        if [[ -f $dirs ]]; then
+            line=$(awk -F= '$1 == "XDG_DOWNLOAD_DIR" { print $2; exit }' "$dirs")
+            line=${line//\"/}
+            d=${line/\$HOME/$HOME}
+        fi
+    fi
+    echo "${d:-$HOME/Downloads}"
+}
+
+# A path with the home folder shown as ~.
+tilde() {
+    local p=$1
+    if [[ $p == "$HOME" || $p == "$HOME"/* ]]; then echo "~${p#"$HOME"}"; else echo "$p"; fi
+}
+
+# Quote one argument for a systemd unit line.
+unit_quote() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//%/%%}
+    s=${s//\$/\$\$}
+    printf '"%s"' "$s"
+}
+
+# The unpack to run: the one on PATH, or the one beside this command.
+find_unpack() {
+    if tb_has unpack; then
+        UNPACK=$(command -v unpack)
+    elif [[ -x $TB_ROOT/bin/unpack ]]; then
+        UNPACK=$TB_ROOT/bin/unpack
+    else
+        tb_die "$E_TOOL" "needs unpack from toolbelt, and it is not on PATH"
+    fi
+}
+
+# Refuse unpack options that would delete an archive.
+check_pass() {
+    local a
+    for a in ${TB_PASS[@]+"${TB_PASS[@]}"}; do
+        case $a in
+            --rm) tb_usage_error "autounpack never deletes archives, so it does not pass --rm to unpack" ;;
+            -k|--keep) ;;
+        esac
+    done
+}
+
+# Exit 3 unless systemctl can reach a systemd user session.
+need_systemd() {
+    local init
+    if ! tb_has systemctl; then
+        init=$(cat /proc/1/comm 2>/dev/null)
+        tb_die "$E_TOOL" "needs a systemd user session, this machine runs ${init:-another init}"
+    fi
+    if ! systemctl --user show-environment >/dev/null 2>&1; then
+        tb_die "$E_TOOL" "needs a systemd user session, and systemctl --user cannot reach one. Log in to a desktop session, or run: loginctl enable-linger $USER"
+    fi
+}
+
+# Run systemctl --user, shown with -v. Its own chatter, such as "Created
+# symlink", is hidden unless -v is on.
+sysctl_user() {
+    tb_show systemctl --user "$@"
+    if (( TB_VERBOSE )); then
+        systemctl --user "$@"
+    else
+        systemctl --user "$@" >/dev/null 2>&1
+    fi
+}
+
+# ---------------------------------------------------------------- commands
+
+do_enable() {
+    local dir=${ARGS[0]:-} unit a opts=""
+    need_systemd
+    tb_need inotifywait
+    find_unpack
+    check_pass
+    [[ -n $dir ]] || dir=$(default_dir)
+    [[ -d $dir ]] || tb_die "$E_FAIL" "$(tilde "$dir") does not exist. Make it first, or name another folder"
+    dir=$(cd -- "$dir" && pwd) || tb_die "$E_FAIL" "cannot enter $dir"
+    unit=$(unit_path)
+    mkdir -p -- "$(dirname -- "$unit")" || tb_die "$E_FAIL" "cannot make $(dirname -- "$unit")"
+
+    local exec
+    exec="$(unit_quote "$TB_ROOT/bin/autounpack") run $(unit_quote "$dir")"
+    if (( ${#TB_PASS[@]} )); then
+        exec+=" --"
+        for a in "${TB_PASS[@]}"; do exec+=" $(unit_quote "$a")"; done
+        opts=${TB_PASS[*]}
+    fi
+    tb_say "writing $(tilde "$unit")"
+    cat > "$unit" <<EOF || tb_die "$E_FAIL" "cannot write $unit"
+# Written by autounpack enable. Change it with autounpack enable or disable.
+# autounpack-dir: $dir
+# autounpack-options:${opts:+ $opts}
+[Unit]
+Description=toolbelt autounpack, unpack archives that land in $(tilde "$dir" | sed 's/%/%%/g')
+
+[Service]
+Type=simple
+ExecStart=$exec
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+    sysctl_user daemon-reload || tb_die "$E_FAIL" "systemctl --user daemon-reload failed"
+    sysctl_user enable "$UNIT" || tb_die "$E_FAIL" "systemctl --user enable $UNIT failed, see: systemctl --user status $UNIT"
+    sysctl_user restart "$UNIT" || tb_die "$E_FAIL" "the service did not start, see: journalctl --user -u $UNIT"
+    tb_info "$TB_CMD: enabled $UNIT for your user"
+    tb_info "$TB_CMD: watching $(tilde "$dir"). Archives stay after unpacking."
+}
+
+do_disable() {
+    local unit
+    unit=$(unit_path)
+    if [[ ! -f $unit ]]; then
+        tb_info "$TB_CMD: already off"
+        return 0
+    fi
+    need_systemd
+    sysctl_user disable --now "$UNIT" || tb_warn "systemctl --user disable $UNIT failed, removing the unit anyway"
+    rm -f -- "$unit"
+    sysctl_user daemon-reload || true
+    tb_info "$TB_CMD: off. Archives already unpacked stay where they are."
+}
+
+do_status() {
+    local unit dir opts state last
+    unit=$(unit_path)
+    tb_color_stdout
+    if [[ ! -f $unit ]]; then
+        echo "$TB_CMD: off"
+    else
+        dir=$(sed -n 's/^# autounpack-dir: //p' "$unit" | head -n 1)
+        opts=$(sed -n 's/^# autounpack-options: *//p' "$unit" | head -n 1)
+        state=unknown
+        if tb_has systemctl; then
+            state=$(systemctl --user is-active "$UNIT" 2>/dev/null)
+            state=${state:-unknown}
+        fi
+        if [[ $state == active ]]; then
+            echo "$TB_CMD: on, watching $(tilde "$dir")"
+        else
+            echo "$TB_CMD: enabled for $(tilde "$dir"), but the service is $state. See: journalctl --user -u $UNIT"
+        fi
+        [[ -n $opts ]] && echo "$TB_CMD: unpack options: $opts"
+    fi
+    if [[ -s $(log_path) ]]; then
+        last=$(tail -n 1 "$(log_path)")
+        echo "$TB_CMD: last run ${last%%  *}, $(awk -F'  ' '{ print $2 }' <<<"$last")"
+    fi
+    return 0
+}
+
+do_log() {
+    local log
+    log=$(log_path)
+    if [[ ! -s $log ]]; then
+        tb_info "$TB_CMD: nothing unpacked yet"
+        return 0
+    fi
+    tb_color_stdout
+    tail -n "$NLINES" -- "$log"
+}
+
+# ---------------------------------------------------------------- the watcher
+
+# True when a name is an archive autounpack should unpack. Temporary
+# download names and later parts of a multi-part set are not.
+wanted() {
+    local n=${1,,}
+    case $n in
+        .*|*.part|*.crdownload|*.download|*.partial|*.tmp|*.opdownload) return 1 ;;
+        *.part[0-9]*.rar)
+            [[ $n =~ \.part0*1\.rar$ ]] ;;
+        *.r[0-9][0-9]|*.z[0-9][0-9]) return 1 ;;
+        *.[0-9][0-9][0-9])
+            [[ $n == *.001 ]] ;;
+        *.tar|*.tar.*|*.tgz|*.tbz2|*.tbz|*.txz|*.tzst|*.tlz|*.zip|*.7z|*.rar) return 0 ;;
+        *.gz|*.bz2|*.xz|*.lzma|*.zst|*.lz4|*.lz|*.lzo|*.br|*.z) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The size of a file, or nothing when it is gone.
+size_of() { stat -c %s -- "$1" 2>/dev/null || wc -c < "$1" 2>/dev/null; }
+
+# Wait until a file stops growing. Returns 1 when it disappears.
+wait_settled() {
+    local f=$1 a b
+    a=$(size_of "$f") || return 1
+    while :; do
+        sleep "$SETTLE"
+        [[ -f $f ]] || return 1
+        b=$(size_of "$f") || return 1
+        [[ $a == "$b" ]] && return 0
+        a=$b
+    done
+}
+
+log_line() {
+    local line
+    line="$(date '+%Y-%m-%d %H:%M')  $1  $2"
+    printf '%s\n' "$line" >> "$LOG"
+    tb_info "$line"
+}
+
+notify() {
+    tb_has notify-send || return 0
+    notify-send -a autounpack "autounpack" "$1" >/dev/null 2>&1 || true
+}
+
+handle() {
+    local path=$1 name dir key out rc result msg
+    name=${path##*/}
+    dir=${path%/*}
+    [[ -f $path ]] || return 0
+    wanted "$name" || { tb_say "skipping $name"; return 0; }
+    tb_say "$name landed, waiting for it to finish"
+    wait_settled "$path" || { tb_say "$name went away"; return 0; }
+    key="$path:$(size_of "$path"):$(stat -c %Y -- "$path" 2>/dev/null)"
+    [[ -n ${SEEN[$key]:-} ]] && return 0
+    SEEN[$key]=1
+    local -a cmd=("$UNPACK" -k ${TB_PASS[@]+"${TB_PASS[@]}"} "./$name")
+    tb_show "${cmd[@]}"
+    out=$(cd -- "$dir" && "${cmd[@]}" </dev/null 2>&1)
+    rc=$?
+    if (( rc == 0 )); then
+        result=$(grep -- ' -> ' <<<"$out" | tail -n 1)
+        result=${result#*-> }
+        log_line "$name" "-> ${result:-unpacked}"
+    else
+        # unpack's last line says what it did, and may start with "refused"
+        # itself. "refused. Do this" has the reason on the line before.
+        local lines prev
+        lines=$(grep -v '^Try ' <<<"$out" | sed 's/^unpack: //')
+        msg=$(tail -n 1 <<<"$lines")
+        prev=$(tail -n 2 <<<"$lines" | head -n 1)
+        prev=${prev#"$name: "}
+        case $msg in
+            "refused, "*) msg=${msg#refused, } ;;
+            "refused. "*) msg="$prev. ${msg#refused. }" ;;
+        esac
+        if (( rc == 4 )); then result="refused, $msg"; else result="failed, $msg"; fi
+        log_line "$name" "$result"
+        notify "$name $result"
+    fi
+    return 0
+}
+
+do_run() {
+    local dir=${ARGS[0]:-}
+    [[ -n $dir ]] || tb_usage_error "run needs the folder to watch"
+    # The service starts with systemd's short PATH. Add toolbelt's own bin
+    # and ~/.local/bin, where make install puts unpack.
+    PATH=$PATH:$TB_ROOT/bin:$HOME/.local/bin
+    tb_need inotifywait
+    find_unpack
+    check_pass
+    [[ -d $dir ]] || tb_die "$E_FAIL" "$dir does not exist"
+    dir=$(cd -- "$dir" && pwd) || tb_die "$E_FAIL" "cannot enter $dir"
+    LOG=$(log_path)
+    SETTLE=${AUTOUNPACK_SETTLE:-2}
+    declare -gA SEEN=()
+    tb_info "$TB_CMD: watching $(tilde "$dir") with $(tilde "$UNPACK") -k${TB_PASS[*]:+ ${TB_PASS[*]}}. Ctrl+C stops."
+    local path
+    tb_show inotifywait -m -q -e close_write -e moved_to --format %w%f -- "$dir"
+    while IFS= read -r path; do
+        handle "$path"
+    done < <(inotifywait -m -q -e close_write -e moved_to --format '%w%f' -- "$dir")
+    return 0
+}
+
+main() {
+    case $CMD in
+        ""|status) (( ${#ARGS[@]} == 0 )) || tb_usage_error "status takes no folder"; do_status ;;
+        enable)    (( ${#ARGS[@]} <= 1 )) || tb_usage_error "enable takes one folder"; do_enable ;;
+        disable)   (( ${#ARGS[@]} == 0 )) || tb_usage_error "disable takes no folder"; do_disable ;;
+        log)       (( ${#ARGS[@]} == 0 )) || tb_usage_error "log takes no folder"; do_log ;;
+        run)       (( ${#ARGS[@]} == 1 )) || tb_usage_error "run takes one folder"; do_run ;;
+        *)         tb_usage_error "unknown command $CMD, use enable, disable, status, log or run" ;;
+    esac
+}
+
+CMD="" NLINES=20
+ARGS=()
+tb_expand "n" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -n|--lines) tb_optarg "$@"; NLINES=$2; shift
+                    [[ $NLINES =~ ^[0-9]+$ ]] || tb_usage_error "-n takes a number of lines" ;;
+        --)         shift; TB_PASS=("$@"); break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          if [[ -z $CMD ]]; then CMD=$1; else ARGS+=("$1"); fi ;;
+    esac
+    shift
+done
+main

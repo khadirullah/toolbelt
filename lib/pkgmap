@@ -71,6 +71,7 @@ fuse-archive   -                    -                    -                    - 
 ratarmount     -                    -                    -                    -                    -
 fusermount3    fuse3                fuse3                fuse3                fuse3                fuse3
 fusermount     fuse                 fuse                 fuse2                fuse                 fuse
+systemctl      systemd              systemd              systemd              systemd              -
 split          coreutils            coreutils            coreutils            coreutils            coreutils
 nproc          coreutils            coreutils            coreutils            coreutils            coreutils
 od             coreutils            coreutils            coreutils            coreutils            coreutils
@@ -84,6 +85,7 @@ unmkinitramfs  initramfs-tools-bin|initramfs-tools-core -                    -  
 unrar          unrar                -                    unrar                unrar                unrar
 df             coreutils            coreutils            coreutils            coreutils            coreutils
 awk            mawk                 gawk                 gawk                 gawk                 gawk
+journalctl     systemd              systemd              systemd              systemd              -
 sudo           sudo                 sudo                 sudo                 sudo                 sudo
 rpm            rpm                  rpm                  rpm-tools            rpm                  rpm
 getconf        libc-bin             glibc-common         glibc                glibc                musl-utils
