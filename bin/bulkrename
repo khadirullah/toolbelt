@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+# bulkrename: rename many files with a pattern or in your editor.
+set -uo pipefail
+TB_CMD=bulkrename
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+shopt -s extglob
+
+usage() {
+    cat <<'EOF'
+usage: bulkrename [options] 's/from/to/' file ...
+       bulkrename [options] -e|--lower|--upper|--spaces|--number file ...
+       bulkrename --undo
+
+Rename many files with a pattern or in your editor.
+
+How the new names are made:
+  -e, --edit          edit the names in $EDITOR
+  --lower             make names lower case
+  --upper             make names upper case
+  --spaces            turn each run of spaces into one -
+  --number            add a counter at the first # in the name, or in front
+  --start N           the first number, 1 by default
+  --width N           pad numbers to N digits, 2 or more by default
+
+Running:
+  -n, --dry-run       show the old and new names and stop
+  -y, --yes           rename without asking, the checks still refuse
+  --undo              put back the names from the last run
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Examples:
+  bulkrename 's/^IMG_/trip-/' IMG_*.jpg
+  bulkrename --lower --spaces *.PDF
+  bulkrename --number 's/.*\./scan-#./' *.png
+  bulkrename -e scan*.pdf
+  bulkrename --undo
+
+Needs: sed and mv. -e uses $VISUAL, $EDITOR or vi. See man bulkrename.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 names clash,
+      5 answered no.
+EOF
+}
+
+# The file that remembers the last run, for --undo.
+undo_file() {
+    local d
+    d=$(tb_state_dir) || return 1
+    echo "$d/bulkrename-undo"
+}
+
+# A path made absolute without following links in the last part.
+abs_path() {
+    local dir base
+    dir=$(dirname -- "$1")
+    base=$(basename -- "$1")
+    dir=$(cd -- "$dir" 2>/dev/null && pwd) || return 1
+    if [[ $dir == / ]]; then echo "/$base"; else echo "$dir/$base"; fi
+}
+
+# True when the text looks like a sed command such as s/a/b/ or y/ab/cd/.
+looks_like_sed() {
+    local d=${1:1:1} rest
+    [[ ${1:0:1} == [sy] && -n $d && $d != [[:alnum:][:space:]\\] ]] || return 1
+    rest=${1//[!"$d"]/}
+    (( ${#rest} >= 3 ))
+}
+
+# Run the sed expression over the names in OLD_BASE and fill NEW_BASE.
+apply_sed() {
+    local sandbox=() out line n=0
+    tb_need sed
+    # GNU sed can refuse the w, r and e commands, which write files or run
+    # programs. Use that when it is there.
+    if sed --sandbox -e p </dev/null >/dev/null 2>&1; then
+        sandbox=(--sandbox)
+    fi
+    if ! out=$(sed ${sandbox[@]+"${sandbox[@]}"} -E -e "$expr" </dev/null 2>&1); then
+        tb_usage_error "sed could not read the expression: ${out#sed: }"
+    fi
+    tb_show sed ${sandbox[@]+"${sandbox[@]}"} -E -e "$expr"
+    NEW_BASE=()
+    while IFS= read -r line; do
+        NEW_BASE+=("$line")
+        ((n++))
+    done < <(printf '%s\n' "${NEW_BASE_IN[@]}" | sed ${sandbox[@]+"${sandbox[@]}"} -E -e "$expr")
+    if (( n != ${#NEW_BASE_IN[@]} )); then
+        tb_die "$E_SAFE" "the expression turned ${#NEW_BASE_IN[@]} names into $n lines. Use an s or y command that keeps one name per line"
+    fi
+}
+
+# Open the names in the editor and read them back into NEW_BASE.
+edit_names() {
+    local tmp list line n=0 editor
+    tb_is_tty || tb_die "$E_SAFE" "-e needs a terminal for the editor"
+    tb_tmpdir tmp || tb_die 1 "could not make a temp folder"
+    list=$tmp/names.txt
+    printf '%s\n' "${NEW_BASE[@]}" > "$list" || tb_die 1 "could not write $list"
+    editor=${VISUAL:-${EDITOR:-vi}}
+    tb_say "opening ${#NEW_BASE[@]} names in $editor. Change the names, keep one per line and the same order"
+    tb_show_text "$editor $list"
+    # The editor setting may carry options, such as "code --wait". It reads
+    # the terminal, so a y piped in for the question stays for the question.
+    local rc
+    if { : </dev/tty; } 2>/dev/null; then
+        # shellcheck disable=SC2086
+        $editor "$list" </dev/tty
+        rc=$?
+    else
+        # shellcheck disable=SC2086
+        $editor "$list"
+        rc=$?
+    fi
+    (( rc == 0 )) || tb_die 1 "the editor $editor exited with $rc, nothing renamed"
+    local edited=()
+    while IFS= read -r line || [[ -n $line ]]; do
+        edited+=("$line")
+        ((n++))
+    done < "$list"
+    if (( n != ${#NEW_BASE[@]} )); then
+        tb_die "$E_SAFE" "the list had ${#NEW_BASE[@]} names and now has $n. Keep one name per line, nothing renamed"
+    fi
+    NEW_BASE=("${edited[@]}")
+}
+
+# Work out every new name from the options. Fills NEW_BASE from OLD_BASE.
+make_names() {
+    local i name width=$width_opt last num
+    NEW_BASE_IN=("${OLD_BASE[@]}")
+    NEW_BASE=("${OLD_BASE[@]}")
+    if [[ -n $expr ]]; then
+        apply_sed
+        NEW_BASE_IN=("${NEW_BASE[@]}")
+    fi
+    if (( to_spaces || to_lower || to_upper || numbering )); then
+        if [[ -z $width ]]; then
+            last=$(( start + ${#OLD_BASE[@]} - 1 ))
+            width=${#last}
+            (( width < 2 )) && width=2
+        fi
+        for i in "${!NEW_BASE[@]}"; do
+            name=${NEW_BASE[i]}
+            (( to_spaces )) && name=${name//+([[:space:]])/-}
+            (( to_lower )) && name=${name,,}
+            (( to_upper )) && name=${name^^}
+            if (( numbering )); then
+                printf -v num '%0*d' "$width" $(( start + i ))
+                if [[ $name == *"#"* ]]; then
+                    name=${name/\#/$num}
+                else
+                    name=$num-$name
+                fi
+            fi
+            NEW_BASE[i]=$name
+        done
+    fi
+    (( edit )) && edit_names
+    return 0
+}
+
+# Check the plan in SRC, DST and fill the move order. Prints every problem
+# and exits 4 when there is one. Sets MOVES (indexes that change) and
+# VIA_TEMP (indexes whose source is someone else's target).
+check_plan() {
+    local i j problems=0 name
+    declare -A by_src=() by_dst=()
+    MOVES=()
+    VIA_TEMP=()
+    for i in "${!SRC_ABS[@]}"; do
+        [[ ${SRC_ABS[i]} == "${DST_ABS[i]}" ]] && continue
+        MOVES+=("$i")
+        by_src[${SRC_ABS[i]}]=$i
+    done
+    for i in ${MOVES[@]+"${MOVES[@]}"}; do
+        name=${NEW_BASE[i]}
+        if [[ -z $name || $name == . || $name == .. ]]; then
+            tb_err "${SRC_SHOW[i]} would get an empty name, or . or .."
+            ((problems++))
+            continue
+        fi
+        if [[ $name == */* ]]; then
+            tb_err "${SRC_SHOW[i]} would become $name, and a name cannot hold a /"
+            ((problems++))
+            continue
+        fi
+        if [[ -n ${by_dst[${DST_ABS[i]}]:-} ]]; then
+            j=${by_dst[${DST_ABS[i]}]}
+            tb_err "${SRC_SHOW[j]} and ${SRC_SHOW[i]} would both become $name"
+            ((problems++))
+            continue
+        fi
+        by_dst[${DST_ABS[i]}]=$i
+        if [[ -e ${DST_ABS[i]} || -L ${DST_ABS[i]} ]]; then
+            if [[ -n ${by_src[${DST_ABS[i]}]:-} ]]; then
+                # The target is moving away too, as in a swap or a chain.
+                VIA_TEMP+=("${by_src[${DST_ABS[i]}]}")
+            elif [[ ${SRC_ABS[i]} -ef ${DST_ABS[i]} ]]; then
+                # The same file under another case, on a filesystem that
+                # ignores case.
+                VIA_TEMP+=("$i")
+            else
+                tb_err "${SRC_SHOW[i]} would become $name, which already exists"
+                ((problems++))
+            fi
+        fi
+    done
+    if (( problems )); then
+        tb_die "$E_SAFE" "refused, nothing renamed."
+    fi
+}
+
+# Print the old and new names side by side.
+show_plan() {
+    local i w=0 len
+    for i in "${MOVES[@]}"; do
+        len=${#SRC_SHOW[i]}
+        (( len > w )) && w=$len
+    done
+    (( w > 40 )) && w=40
+    for i in "${MOVES[@]}"; do
+        printf '%-*s -> %s\n' "$w" "${SRC_SHOW[i]}" "${NEW_BASE[i]}"
+    done
+    local same=$(( ${#SRC_ABS[@]} - ${#MOVES[@]} ))
+    (( same )) && tb_info "$(tb_plural "$same" "name stays" "names stay") the same."
+    return 0
+}
+
+# Move one path with mv -n, then check that it really moved.
+move() {
+    local from=$1 to=$2
+    if [[ -e $to || -L $to ]]; then
+        tb_err "$to appeared while renaming, it was left alone"
+        return 1
+    fi
+    tb_show mv -n -- "$from" "$to"
+    mv -n -- "$from" "$to" 2>/dev/null
+    [[ ( -e $to || -L $to ) && ! ( -e $from || -L $from ) ]]
+}
+
+# Rename everything in MOVES. Sources that are someone's target go to a
+# temp name in the same folder first, so swaps and chains never overwrite.
+# On a failure every move made so far is put back.
+run_plan() {
+    local i tmp done_from=() done_to=()
+    declare -A from=()
+    for i in "${MOVES[@]}"; do from[$i]=${SRC_ABS[i]}; done
+    for i in ${VIA_TEMP[@]+"${VIA_TEMP[@]}"}; do
+        tmp=$(tb_free_name "$(dirname -- "${SRC_ABS[i]}")/.bulkrename-$$-$i")
+        if ! move "${SRC_ABS[i]}" "$tmp"; then
+            tb_err "could not move ${SRC_SHOW[i]} to a temp name"
+            undo_moves
+            return 1
+        fi
+        done_from+=("${SRC_ABS[i]}")
+        done_to+=("$tmp")
+        from[$i]=$tmp
+    done
+    for i in "${MOVES[@]}"; do
+        if ! move "${from[$i]}" "${DST_ABS[i]}"; then
+            tb_err "could not rename ${SRC_SHOW[i]} to ${NEW_BASE[i]}"
+            undo_moves
+            return 1
+        fi
+        done_from+=("${from[$i]}")
+        done_to+=("${DST_ABS[i]}")
+    done
+    # Record the undo list: each pair is new name, then old name.
+    local uf
+    uf=$(undo_file) || { tb_warn "could not write the undo list"; return 0; }
+    {
+        for i in "${MOVES[@]}"; do
+            printf '%s\0%s\0' "${DST_ABS[i]}" "${SRC_ABS[i]}"
+        done
+    } > "$uf" || tb_warn "could not write the undo list to $uf"
+    return 0
+}
+
+# Put back every move run_plan made, newest first. Uses done_from and
+# done_to from run_plan.
+undo_moves() {
+    local k
+    for (( k = ${#done_to[@]} - 1; k >= 0; k-- )); do
+        tb_run mv -n -- "${done_to[k]}" "${done_from[k]}" 2>/dev/null \
+            || tb_err "could not put ${done_from[k]} back, it is at ${done_to[k]}"
+    done
+    (( ${#done_to[@]} )) && tb_err "put back the names changed so far"
+    return 0
+}
+
+# Fill SRC_ABS, SRC_SHOW and OLD_BASE from the files on the command line.
+load_files() {
+    local f abs
+    declare -A seen=()
+    for f in "${files[@]}"; do
+        [[ $f != / ]] && f=${f%%+(/)}
+        if [[ ! -e $f && ! -L $f ]]; then
+            tb_die 1 "$f: no such file or folder"
+        fi
+        if [[ $f == *$'\n'* ]]; then
+            tb_die "$E_SAFE" "a name holds a line break. Rename that one with mv"
+        fi
+        abs=$(abs_path "$f") || tb_die 1 "$f: could not read its folder"
+        [[ -n ${seen[$abs]:-} ]] && continue
+        seen[$abs]=1
+        SRC_ABS+=("$abs")
+        SRC_SHOW+=("$f")
+        OLD_BASE+=("$(basename -- "$f")")
+    done
+}
+
+# Fill DST_ABS from SRC_ABS and NEW_BASE.
+make_targets() {
+    local i
+    DST_ABS=()
+    for i in "${!SRC_ABS[@]}"; do
+        DST_ABS+=("$(dirname -- "${SRC_ABS[i]}")/${NEW_BASE[i]}")
+        [[ ${DST_ABS[i]} == //* ]] && DST_ABS[i]=${DST_ABS[i]#/}
+    done
+}
+
+# bulkrename --undo: read the last run and swap each pair.
+load_undo() {
+    local uf new old
+    uf=$(undo_file) || tb_die 1 "could not read the state folder"
+    [[ -s $uf ]] || tb_die 1 "nothing to undo, no run is recorded in $uf"
+    while IFS= read -r -d '' new && IFS= read -r -d '' old; do
+        if [[ ! -e $new && ! -L $new ]]; then
+            tb_warn "$new is gone, skipping it"
+            continue
+        fi
+        SRC_ABS+=("$new")
+        # Show paths under the current folder without the folder itself.
+        SRC_SHOW+=("${new#"$PWD"/}")
+        OLD_BASE+=("$(basename -- "$new")")
+        NEW_BASE+=("$(basename -- "$old")")
+    done < "$uf"
+    (( ${#SRC_ABS[@]} )) || tb_die 1 "nothing to undo, every renamed file is gone"
+}
+
+main() {
+    SRC_ABS=() SRC_SHOW=() OLD_BASE=() NEW_BASE=() DST_ABS=()
+    if (( undo )); then
+        (( ${#files[@]} )) && tb_usage_error "--undo takes no files"
+        [[ -n $expr ]] && tb_usage_error "--undo takes no expression"
+        load_undo
+    else
+        if [[ -z $expr ]] && (( ! edit && ! to_lower && ! to_upper && ! to_spaces && ! numbering )); then
+            (( ${#files[@]} )) || tb_usage_error "give a sed expression such as 's/old/new/' and the files"
+            expr=${files[0]}
+            files=("${files[@]:1}")
+        elif [[ -z $expr ]] && (( ${#files[@]} )) && [[ ! -e ${files[0]} ]] && looks_like_sed "${files[0]}"; then
+            expr=${files[0]}
+            files=("${files[@]:1}")
+        fi
+        (( ${#files[@]} )) || tb_usage_error "name the files to rename"
+        (( to_lower && to_upper )) && tb_usage_error "use --lower or --upper, not both"
+        load_files
+        make_names
+    fi
+    tb_need mv
+    make_targets
+    check_plan
+    if (( ${#MOVES[@]} == 0 )); then
+        tb_info "Nothing to rename, every name stays the same."
+        return 0
+    fi
+    tb_color_stdout
+    show_plan
+    if (( dry_run )); then
+        tb_info "Dry run, nothing renamed."
+        return 0
+    fi
+    tb_confirm "Rename $(tb_plural "${#MOVES[@]}" file)?"
+    run_plan || return 1
+    echo "$(tb_plural "${#MOVES[@]}" file) renamed."
+}
+
+expr=""
+edit=0
+to_lower=0
+to_upper=0
+to_spaces=0
+numbering=0
+start=1
+width_opt=""
+dry_run=0
+undo=0
+files=()
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -e|--edit)    edit=1 ;;
+        --lower)      to_lower=1 ;;
+        --upper)      to_upper=1 ;;
+        --spaces)     to_spaces=1 ;;
+        --number)     numbering=1 ;;
+        --start)      tb_optarg "$@"; start=$2; shift
+                      [[ $start =~ ^[0-9]+$ ]] || tb_usage_error "--start needs a whole number"
+                      start=$(( 10#$start ))
+                      numbering=1 ;;
+        --width)      tb_optarg "$@"; width_opt=$2; shift
+                      [[ $width_opt =~ ^[1-9]$ ]] || tb_usage_error "--width needs a number from 1 to 9"
+                      numbering=1 ;;
+        -n|--dry-run) dry_run=1 ;;
+        --undo)       undo=1 ;;
+        --)           shift; files+=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            files+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?
