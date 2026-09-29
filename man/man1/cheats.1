@@ -1,0 +1,190 @@
+.TH "CHEATS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+cheats \- short examples for a command, cached offline
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+cheats [options] command [topic] [-- curl options]
+cheats -l
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBcheats\fR prints a page of short, ready\-to\-copy examples for a command. It fetches the page from cheat.sh, a free service that gathers community cheat sheets, and keeps a copy on disk. The next time you ask for the same page, \fBcheats\fR prints the copy and never touches the network, so the pages you have looked at once work on a train or in a data centre with no internet.
+.PP
+.RS 4
+.nf
+# Create a gzip archive of a folder
+tar -czvf archive.tar.gz folder/
+
+# List what is inside an archive
+tar -tvf archive.tar.gz
+.fi
+.RE
+.PP
+A man page tells you every option. A cheat page shows the five things people do with a command. The two go well together.
+.PP
+A second word is a topic. \fBcheats kubectl logs\fR asks cheat.sh for the \fBlogs\fR page under \fBkubectl\fR. A topic of several words, such as \fBcheats git "undo commit"\fR, asks cheat.sh to search its answers for those words.
+.SS How it decides
+.IP \(bu 2
+When a copy is on disk and is less than 30 days old, \fBcheats\fR prints it and stops. The line \fBcheats: tar, cached 3d ago\fR on stderr tells you it came from the disk.
+.IP \(bu 2
+Otherwise it fetches the page from \fBhttps://cheat.sh/<command>/<topic>?T\fR. The \fB?T\fR asks for plain text with no colour codes.
+.IP \(bu 2
+When cheat.sh has no page, or cannot be reached, it tries the tldr pages on GitHub, first the \fBcommon\fR set, then \fBlinux\fR, then \fBosx\fR. For a topic it looks for the page \fB<command>\-<topic>.md\fR, the way tldr names subcommands. A topic of several words skips tldr, which has no search. \fBcheats\fR turns a tldr page into the same shape as a cheat.sh page, with \fB#\fR comment lines above each command.
+.IP \(bu 2
+It saves the page in \fB~/.cache/toolbelt/cheats\fR and prints it.
+.IP \(bu 2
+When both are unreachable and an old copy exists, it prints the old copy with a warning. An old page beats no page.
+.PP
+\fB\-u\fR skips step 1 and always fetches. \fB\-o\fR stops after step 1 and never uses the network.
+.SS Where the pages live
+.PP
+Pages go in \fB$XDG_CACHE_HOME/toolbelt/cheats\fR, which is \fB~/.cache/toolbelt/cheats\fR on most systems. Each page is one plain text file, named after the command and the topic joined with a hyphen: \fBtar\fR, \fBkubectl\-logs\fR, \fBgit\-undo\-commit\fR. You can read, \fBgrep\fR or delete them as you like. Deleting the folder loses nothing you cannot fetch again.
+.SS What it checks
+.PP
+A command name must be letters, digits, dots, plus signs, underscores and hyphens, and start with a letter or digit. A topic may also have spaces. Anything else, such as a slash, exits 2, so the name can never reach outside the cache folder or change the URL.
+.SH OPTIONS
+.TP
+\fB\-u\fR, \fB\-\-update\fR
+Fetch the page again, even when the copy on disk is fresh.
+.TP
+\fB\-o\fR, \fB\-\-offline\fR
+Use the copy on disk only, and never touch the network. An old copy is fine. No copy exits 1.
+.TP
+\fB\-l\fR, \fB\-\-list\fR
+List the cached pages, one per line, with their age.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the page.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the \fBcurl\fR line before each fetch, where the page was saved, and curl's own errors.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBcurl\fR, on every fetch. Use this for a proxy, or for a longer timeout on a slow link:
+.PP
+.RS 4
+.nf
+$ cheats tar -- --proxy http://proxy.example.com:3128
+$ cheats kubectl -- --max-time 60
+.fi
+.RE
+.PP
+\fBcurl\fR also reads \fBhttps_proxy\fR from the environment, so a proxy you set for your shell works with no options.
+.SH NEEDS
+.PP
+\fBcurl\fR to fetch a page. Pages already on disk need nothing.
+.TP
+Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine
+\fBcurl\fR
+.PP
+\fBcheats\fR connects to \fBcheat.sh\fR and \fBraw.githubusercontent.com\fR on port 443. A firewall that blocks them leaves you with the cache only.
+.SH EXAMPLES
+.SS A first look at tar
+.PP
+.RS 4
+.nf
+$ cheats tar
+# Create a gzip archive of a folder
+tar -czvf archive.tar.gz folder/
+
+# List what is inside an archive
+tar -tvf archive.tar.gz
+.fi
+.RE
+.SS The same page later, from the disk
+.PP
+.RS 4
+.nf
+$ cheats tar
+# Create a gzip archive of a folder
+tar -czvf archive.tar.gz folder/
+
+# List what is inside an archive
+tar -tvf archive.tar.gz
+cheats: tar, cached 3d ago
+.fi
+.RE
+.SS A topic, with the fetch shown
+.PP
+.RS 4
+.nf
+$ cheats -v kubectl logs
++ curl -fsSL --max-time 15 -o /tmp/.cheats-5y4ytW/page 'https://cheat.sh/kubectl/logs?T'
+# Logs of the previous container, after a crash
+kubectl logs -p pod-name
+# Follow the logs of every pod with a label
+kubectl logs -f -l app=api --all-containers
+cheats: saved /home/me/.cache/toolbelt/cheats/kubectl-logs, from cheat.sh
+.fi
+.RE
+.SS What is cached
+.PP
+.RS 4
+.nf
+$ cheats -l
+kubectl-logs                 2h ago
+tar                          3d ago
+.fi
+.RE
+.SS No network and no copy
+.PP
+.RS 4
+.nf
+$ cheats rsync
+cheats: no cached page for rsync, and cheat.sh is unreachable
+cheats: cached pages are listed by cheats -l
+.fi
+.RE
+.SS No network, but an old copy
+.PP
+.RS 4
+.nf
+$ cheats tar
+# Create a gzip archive of a folder
+tar -czvf archive.tar.gz folder/
+\&...
+cheats: could not refresh tar, showing the copy from 40d ago
+.fi
+.RE
+.SS Pages for later
+.PP
+Fetch the pages you expect to need while you still have a network:
+.PP
+.RS 4
+.nf
+$ for c in tar rsync ss journalctl kubectl; do cheats -q -u "$c" >/dev/null; done
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBcheats: no cached page for rsync, and cheat.sh is unreachable\fR : Neither cheat.sh nor GitHub answered, and there is no copy on disk. Check the network with \fBnetcheck\fR, or pass a proxy after \fB\-\-\fR. \fB\-v\fR shows curl's own error.
+.PP
+\fBcheats: no page for foo on cheat.sh or tldr\fR : Both answered, and neither has a page with that name. Check the spelling, or try the command without the topic.
+.PP
+\fBcheats: needs curl. Install it with: sudo apt install curl\fR : The page is not on disk, and \fBcurl\fR is missing to fetch it.
+.PP
+A page shows old options : Pages come from the community and some lag behind new releases. \fBcheats \-u\fR fetches the newest copy.
+.PP
+The page for a topic is a long answer instead of examples : For a topic that is not a known page, cheat.sh searches its answers and returns the best match. Try the command on its own first.
+.SH EXIT STATUS
+.TP
+0
+It printed a page, or the list.
+.TP
+1
+No page, from the disk or the network.
+.TP
+2
+Bad usage, such as no command, or \fB\-u\fR with \fB\-o\fR.
+.TP
+3
+\fBcurl\fR is missing and the page is not on disk.
+.SH SEE ALSO
+.PP
+\fBman(1)\fR, \fBcurl(1)\fR, https://cheat.sh, https://tldr.sh

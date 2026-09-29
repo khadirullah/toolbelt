@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# cheats: short examples for a command, cached offline.
+set -uo pipefail
+TB_CMD=cheats
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: cheats [options] command [topic] [-- curl options]
+       cheats -l
+
+Short examples for a command, cached offline.
+
+Options:
+  -u, --update        fetch the page again, even when the copy is fresh
+  -o, --offline       use the cache only, never the network
+  -l, --list          list the cached pages and their age
+  -q, --quiet         only the page
+  -v, --verbose       the curl line and where the page is saved
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to curl, such as --proxy.
+
+Examples:
+  cheats tar
+  cheats kubectl logs
+  cheats -o rsync
+  cheats tar -- --proxy http://proxy.example.com:3128
+
+Needs: curl to fetch. Cached pages need nothing. See man cheats.
+Exit: 0 ok, 1 no page, 2 bad usage, 3 missing curl.
+EOF
+}
+
+MAX_AGE=$(( 30 * 86400 ))
+CHEAT_URL=https://cheat.sh
+TLDR_URL=https://raw.githubusercontent.com/tldr-pages/tldr/main/pages
+
+# Seconds since a file changed.
+file_age() {
+    local m
+    m=$(stat -c %Y -- "$1" 2>/dev/null) || m=$(date -r "$1" +%s)
+    echo $(( $(date +%s) - m ))
+}
+
+# The cached pages, with their age, one per line.
+list_pages() {
+    local f n=0
+    for f in "$dir"/*; do
+        [[ -f $f && $f != *.tmp ]] || continue
+        printf '%-28s %s ago\n' "${f##*/}" "$(tb_age "$(file_age "$f")")"
+        (( n++ ))
+    done
+    (( n )) || tb_info "$TB_CMD: no cached pages yet in $dir"
+    return 0
+}
+
+# Fetch a URL into a file with curl. Returns curl's exit code.
+fetch() {
+    local url=$1 out=$2
+    local args=(-fsSL --max-time 15 ${TB_PASS[@]+"${TB_PASS[@]}"} -o "$out" "$url")
+    tb_show curl "${args[@]}"
+    curl "${args[@]}" 2>>"$work/curl.err"
+}
+
+# Turn a tldr page into the same shape as a cheat.sh page:
+# "- Say what:" becomes "# Say what", and "`cmd {{arg}}`" becomes "cmd arg".
+tldr_to_cheat() {
+    awk '
+        /^- / { sub(/^- /, "# "); sub(/:$/, ""); print; next }
+        /^`.*`$/ { s = substr($0, 2, length($0) - 2); gsub(/\{\{|\}\}/, "", s); print s; print ""; next }
+    ' "$1"
+}
+
+# Try cheat.sh, then tldr. Sets SOURCE and leaves the page in $work/page.
+# Returns 0 with a page, 1 when neither has one, 6 when both are unreachable.
+fetch_page() {
+    local rc path url first sub
+    path=$cmd${topic:+/${topic// /+}}
+    url="$CHEAT_URL/$path?T"
+    fetch "$url" "$work/page"
+    rc=$?
+    if (( rc == 0 )) && [[ -s $work/page ]]; then
+        first=$(head -n 1 "$work/page")
+        if [[ $first != "Unknown topic"* && $first != "Unknown cheat sheet"* ]]; then
+            SOURCE=cheat.sh
+            return 0
+        fi
+        rc=22
+    fi
+    local cheat_rc=$rc
+    # tldr keeps subcommands as git-log.md and has no free-text topics.
+    [[ $topic == *" "* ]] && { (( cheat_rc == 22 )) && return 1; return 6; }
+    for sub in common linux osx; do
+        url="$TLDR_URL/$sub/$name.md"
+        fetch "$url" "$work/tldr"
+        rc=$?
+        if (( rc == 0 )) && [[ -s $work/tldr ]]; then
+            tldr_to_cheat "$work/tldr" > "$work/page"
+            SOURCE=tldr
+            return 0
+        fi
+        (( rc == 22 )) || break
+    done
+    (( cheat_rc == 22 || rc == 22 )) && return 1
+    return 6
+}
+
+main() {
+    local page age rc
+    page=$dir/$name
+    if [[ -f $page ]]; then
+        age=$(file_age "$page")
+        if (( offline || (!update && age < MAX_AGE) )); then
+            cat -- "$page"
+            tb_info "$TB_CMD: $name, cached $(tb_age "$age") ago"
+            return 0
+        fi
+    elif (( offline )); then
+        tb_err "no cached page for $name"
+        tb_err "cached pages are listed by cheats -l"
+        return 1
+    fi
+
+    if ! tb_has curl; then
+        if [[ -f $page ]]; then
+            cat -- "$page"
+            tb_warn "showing the copy from $(tb_age "$age") ago, curl is missing so it cannot refresh"
+            return 0
+        fi
+        tb_need curl
+    fi
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    : > "$work/curl.err"
+    SOURCE=""
+    fetch_page
+    rc=$?
+    if (( rc == 0 )); then
+        mv -f -- "$work/page" "$page" || tb_die 1 "could not save the page in $dir"
+        cat -- "$page"
+        tb_say "saved $page, from $SOURCE"
+        return 0
+    fi
+    if [[ -f $page ]]; then
+        cat -- "$page"
+        tb_warn "could not refresh $name, showing the copy from $(tb_age "$age") ago"
+        return 0
+    fi
+    (( TB_VERBOSE )) && [[ -s $work/curl.err ]] && cat -- "$work/curl.err" >&2
+    if (( rc == 1 )); then
+        tb_err "no page for $name on cheat.sh or tldr"
+    else
+        tb_err "no cached page for $name, and cheat.sh is unreachable"
+        tb_err "cached pages are listed by cheats -l"
+    fi
+    return 1
+}
+
+update=0 offline=0 list=0 words=()
+tb_expand "" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -u|--update)  update=1 ;;
+        -o|--offline) offline=1 ;;
+        -l|--list)    list=1 ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            words+=("$1") ;;
+    esac
+    shift
+done
+
+(( update && offline )) && tb_usage_error "--update and --offline do not go together"
+dir=$(tb_cache_dir)/cheats
+mkdir -p "$dir" || tb_die 1 "could not make $dir"
+if (( list )); then
+    (( ${#words[@]} )) && tb_usage_error "--list takes no command"
+    list_pages
+    exit $?
+fi
+(( ${#words[@]} )) || tb_usage_error "name a command, such as cheats tar"
+cmd=${words[0]}
+topic="${words[*]:1}"
+[[ $cmd =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || tb_usage_error "$cmd is not a command name"
+[[ -z $topic || $topic =~ ^[A-Za-z0-9][A-Za-z0-9._+\ -]*$ ]] || tb_usage_error "$topic is not a topic, use letters, digits and spaces"
+name=$cmd${topic:+-${topic// /-}}
+main
+exit $?
