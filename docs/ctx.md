@@ -75,7 +75,9 @@ export CTX_PROD='prod|pci|^customer-'
 
 `ctx NAME` runs `kubectl config use-context NAME`. The name can be the full context name or any part of it that
 only one context has. `ctx prod` works for `arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks` when no other
-context has `prod` in it. When two or more match, `ctx` lists them and changes nothing.
+context has `prod` in it. When two or more match, `ctx` lists them and changes nothing. When the name you gave
+is not the full name, the line ends with `matched from` and what you typed, so a match you did not mean shows at
+once.
 
 `ctx -` switches back to the context you had before the last switch, like `cd -`. `ctx` keeps that name in
 `~/.local/state/toolbelt/ctx-previous`.
@@ -183,7 +185,7 @@ $ ctx -l
 $ ctx -
 switched to kind-kind, namespace shop
 $ ctx mini -n kube-system
-switched to minikube, namespace kube-system
+switched to minikube, namespace kube-system, matched from mini
 ```
 
 ### What it reads

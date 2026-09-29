@@ -289,7 +289,7 @@ list_contexts() {
 
 # Switch the kube context, the namespace, or both.
 switch() {
-    local want=$target all=() matches=() c cur prev_file
+    local want=$target all=() matches=() c cur prev_file from=""
     tb_need kubectl
     prev_file=$(tb_state_dir)/ctx-previous
     cur=$(kubectl config current-context 2>/dev/null)
@@ -309,6 +309,7 @@ switch() {
             local m=${matches[*]}
             tb_die 1 "$want matches ${#matches[@]} contexts: ${m// /, }. Give more of the name"
         fi
+        [[ ${matches[0]} != "$want" && $target != - ]] && from=", matched from $want"
         want=${matches[0]}
         if [[ $want != "$cur" ]]; then
             tb_run kubectl config use-context "$want" >/dev/null || tb_die 1 "kubectl could not switch to $want"
@@ -321,7 +322,7 @@ switch() {
             tb_die 1 "kubectl could not set the namespace"
     fi
     read_kube
-    echo "switched to $KUBE_CTX, namespace $KUBE_NS"
+    echo "switched to $KUBE_CTX, namespace $KUBE_NS$from"
     if is_prod "$KUBE_CTX" || is_prod "$KUBE_NS"; then
         tb_warn "! $KUBE_CTX looks like production"
     fi

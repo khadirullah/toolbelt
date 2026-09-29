@@ -1,4 +1,4 @@
-.TH "CTX" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "CTX" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 ctx \- where your commands will land, on one screen
 .SH SYNOPSIS
@@ -84,7 +84,7 @@ export CTX_PROD='prod|pci|^customer-'
 .RE
 .SH SWITCHING CONTEXTS
 .PP
-\fBctx NAME\fR runs \fBkubectl config use\-context NAME\fR. The name can be the full context name or any part of it that only one context has. \fBctx prod\fR works for \fBarn:aws:eks:ap\-south\-1:123456789012:cluster/prod\-eks\fR when no other context has \fBprod\fR in it. When two or more match, \fBctx\fR lists them and changes nothing.
+\fBctx NAME\fR runs \fBkubectl config use\-context NAME\fR. The name can be the full context name or any part of it that only one context has. \fBctx prod\fR works for \fBarn:aws:eks:ap\-south\-1:123456789012:cluster/prod\-eks\fR when no other context has \fBprod\fR in it. When two or more match, \fBctx\fR lists them and changes nothing. When the name you gave is not the full name, the line ends with \fBmatched from\fR and what you typed, so a match you did not mean shows at once.
 .PP
 \fBctx \-\fR switches back to the context you had before the last switch, like \fBcd \-\fR. \fBctx\fR keeps that name in \fB~/.local/state/toolbelt/ctx\-previous\fR.
 .PP
@@ -191,7 +191,7 @@ $ ctx -l
 $ ctx -
 switched to kind-kind, namespace shop
 $ ctx mini -n kube-system
-switched to minikube, namespace kube-system
+switched to minikube, namespace kube-system, matched from mini
 .fi
 .RE
 .SS What it reads

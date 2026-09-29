@@ -166,13 +166,15 @@ EOF
     tb_needs kubectl
     run ctx prod-eks
     [ "$status" -eq 0 ]
-    [ "${lines[0]}" = "switched to arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks, namespace payments" ]
+    [ "${lines[0]}" = "switched to arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks, namespace payments, matched from prod-eks" ]
     [[ ${lines[1]} == "ctx: ! arn:aws:eks:"*" looks like production" ]]
     [ "$(kubectl config current-context)" = "arn:aws:eks:ap-south-1:123456789012:cluster/prod-eks" ]
     run ctx -
     [ "$status" -eq 0 ]
     [ "$output" = "switched to kind-kind, namespace shop" ]
     [ "$(kubectl config current-context)" = kind-kind ]
+    run ctx kind-delivery
+    [ "$output" = "switched to kind-delivery, namespace delivery" ]
 }
 
 @test "switch refuses an unknown or unclear name" {
