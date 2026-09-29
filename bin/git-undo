@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# git-undo: take back the last commit and keep its changes.
+set -uo pipefail
+TB_CMD=git-undo
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: git undo [--hard] [options]
+
+Take back the last commit and keep its changes.
+
+Options:
+  --hard              drop the commit's changes too
+  -y, --yes           do not ask
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each git command before it runs
+  -h, --help          this help
+
+It refuses a commit that is already on the upstream or any remote branch.
+Use git revert for those.
+
+Examples:
+  git undo
+  git undo --hard
+  git undo -y
+
+Needs: git 2.30 or newer. See man git-undo.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 no git, 4 refused, 5 answered no.
+EOF
+}
+
+# The path of a file inside .git, such as MERGE_HEAD.
+git_path() { git rev-parse --git-path "$1" 2>/dev/null; }
+
+# Stop when a merge, rebase, cherry-pick or revert is half done.
+check_busy() {
+    local what="" p
+    if [[ -d $(git_path rebase-merge) || -d $(git_path rebase-apply) ]]; then what="a rebase"
+    elif p=$(git_path MERGE_HEAD) && [[ -f $p ]]; then what="a merge"
+    elif p=$(git_path CHERRY_PICK_HEAD) && [[ -f $p ]]; then what="a cherry-pick"
+    elif p=$(git_path REVERT_HEAD) && [[ -f $p ]]; then what="a revert"
+    fi
+    [[ -z $what ]] || tb_die "$E_SAFE" "refused, $what is in progress. Finish it or abort it first"
+}
+
+# The remote branch that already has HEAD, upstream first. Empty when none.
+pushed_on() {
+    local up ref
+    if up=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) &&
+        git merge-base --is-ancestor HEAD '@{upstream}' 2>/dev/null; then
+        echo "$up"
+        return 0
+    fi
+    tb_show git for-each-ref --contains HEAD '--format=%(refname:short)' refs/remotes
+    ref=$(git for-each-ref --contains HEAD --format='%(refname:short)' refs/remotes 2>/dev/null |
+        grep -v '/HEAD$' | head -n 1)
+    [[ -n $ref ]] && echo "$ref"
+    return 0
+}
+
+main() {
+    local head short subject where parent n
+    tb_need git
+    git rev-parse --git-dir >/dev/null 2>&1 || tb_die 1 "not inside a git repository"
+    head=$(git rev-parse --verify -q HEAD) || tb_die 1 "no commits yet, nothing to undo"
+    check_busy
+    short=$(git rev-parse --short HEAD)
+    subject=$(git log -1 --format=%s HEAD)
+    tb_say "last commit is $short \"$subject\""
+
+    where=$(pushed_on)
+    if [[ -n $where ]]; then
+        tb_err "refused, $short is already on $where"
+        tb_info "use git revert $short to undo a pushed commit"
+        exit "$E_SAFE"
+    fi
+
+    parent=$(git rev-parse --verify -q 'HEAD^') ||
+        tb_die 1 "$short is the first commit, there is nothing before it to go back to"
+    n=$(git rev-list --count --parents -n 1 HEAD | awk '{ print NF - 1 }')
+    (( n > 1 )) && tb_info "$short is a merge commit, git undo goes back to its first parent"
+
+    if (( hard )); then
+        tb_info "This drops commit $short \"$subject\" and its changes:"
+        (( TB_QUIET )) || git --no-pager show --stat --format= HEAD >&2
+        tb_confirm "Drop $short and its changes?"
+        # --keep leaves uncommitted work alone and stops if it would be lost.
+        tb_run git reset -q --keep "$parent" ||
+            tb_die 1 "git reset stopped, a file you changed is also in $short. Nothing was dropped"
+        echo "dropped $short \"$subject\""
+        tb_info "to bring it back, run git reset --keep $short"
+    else
+        tb_info "This takes back commit $short \"$subject\". Its changes stay staged, nothing is lost."
+        tb_confirm "Undo $short?"
+        tb_run git reset -q --soft "$parent" || tb_die 1 "git reset failed, nothing was undone"
+        echo "undid $short \"$subject\""
+        tb_info "the changes are staged, nothing is lost"
+        tb_info "to redo the commit, run git reset --soft $short"
+    fi
+    tb_say "was $head"
+}
+
+hard=0
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --hard) hard=1 ;;
+        -*)     tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)      tb_usage_error "git undo takes no arguments, it always undoes the last commit" ;;
+    esac
+    shift
+done
+
+main
+exit $?

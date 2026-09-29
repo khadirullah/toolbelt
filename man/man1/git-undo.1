@@ -1,0 +1,200 @@
+.TH "GIT-UNDO" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+git\-undo \- take back the last commit and keep its changes
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+git undo [--hard] [options]
+git-undo [--hard] [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBgit undo\fR moves your branch back one commit. The files stay as they are and the changes from that commit sit in the staging area, so a \fBgit commit\fR puts them back as a new commit. Use it when you committed too early, wrote the wrong message, or committed to the wrong branch.
+.PP
+\fBgit undo \-\-hard\fR drops the commit and its changes. It shows the files the commit touched.
+.PP
+Both forms say which commit they will take back and what happens to its changes, then ask. The default answer is no. \fB\-y\fR skips the question.
+.PP
+Both forms print the commit they took away, with the command that brings it back. Git also keeps the old commit in the reflog for 30 days or more, so \fBgit reflog\fR finds it later too.
+.PP
+\fBgit undo\fR never rewrites a commit that someone else may already have. It refuses when the commit is already on the branch's upstream, or on any remote branch you have fetched. For those, \fBgit revert\fR makes a new commit that reverses the old one, which is safe to push.
+.PP
+Under the hood \fBgit undo\fR is \fBgit reset \-\-soft HEAD^\fR, and \fBgit undo \-\-hard\fR is \fBgit reset \-\-keep HEAD^\fR. It is a script named \fBgit\-undo\fR in toolbelt's \fBbin\fR folder. Git runs any program named \fBgit\-NAME\fR on your PATH as \fBgit NAME\fR, so it works like a built\-in subcommand.
+.SH OPTIONS
+.TP
+\fB\-\-hard\fR
+Drop the commit's changes too.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Do not ask.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step and each git command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fBgit undo\fR takes no other arguments. It always undoes the last commit. Run it twice to undo two.
+.SH HELP AND THE MAN PAGE
+.PP
+\fBgit undo \-h\fR and \fBgit\-undo \-\-help\fR print the help. \fBgit undo \-\-help\fR is different, because git turns it into \fBgit help undo\fR and opens the man page \fBgit\-undo(1)\fR. toolbelt installs that page, built from this document. When you run toolbelt from a clone without installing it, the man page is not on the MANPATH and git says \fBNo manual entry for git\-undo\fR. Use \fBgit undo \-h\fR then.
+.SH SAFETY CHECKS
+.IP \(bu 2
+The commit is on the upstream branch, or on any remote\-tracking branch such as \fBorigin/main\fR. \fBgit undo\fR refuses with exit 4 and suggests \fBgit revert\fR. Run \fBgit fetch\fR first when you are not sure your remote\-tracking branches are current.
+.IP \(bu 2
+A merge, rebase, cherry\-pick or revert is half done. \fBgit undo\fR refuses with exit 4. Finish it or abort it first, such as \fBgit rebase \-\-abort\fR.
+.IP \(bu 2
+The first commit of a repository has no parent to go back to. \fBgit undo\fR stops with exit 1.
+.IP \(bu 2
+It asks before it changes anything, with or without \fB\-\-hard\fR. With no terminal to ask in, as in a script, it refuses with exit 4 unless you pass \fB\-y\fR. A no exits 5.
+.IP \(bu 2
+\fB\-\-hard\fR uses \fBgit reset \-\-keep\fR, not \fBgit reset \-\-hard\fR. Uncommitted changes in other files survive. When you have uncommitted changes in a file the commit also touched, git stops and nothing is dropped.
+.IP \(bu 2
+A merge commit goes back to its first parent, the branch you merged into. \fBgit undo\fR says so.
+.SH PASS\-THROUGH
+.PP
+None. \fBgit undo\fR runs one fixed \fBgit reset\fR command, and \fB\-v\fR prints it.
+.SH NEEDS
+.PP
+git 2.30 or newer, from the \fBgit\fR package on every distro.
+.SH EXAMPLES
+.SS Undo the last commit
+.PP
+.RS 4
+.nf
+$ git undo
+This takes back commit cc9caf3 "ctx: add a --prod option". Its changes stay staged, nothing is lost.
+Undo cc9caf3? [y/N] y
+undid cc9caf3 "ctx: add a --prod option"
+the changes are staged, nothing is lost
+to redo the commit, run git reset --soft cc9caf3
+.fi
+.RE
+.PP
+\fBgit status\fR now shows \fBctx.sh\fR as staged. Edit it more and commit again, or switch to another branch and commit it there.
+.SS Answer no
+.PP
+.RS 4
+.nf
+$ git undo
+This takes back commit cc9caf3 "ctx: add a --prod option". Its changes stay staged, nothing is lost.
+Undo cc9caf3? [y/N] n
+Nothing changed.
+$ echo $?
+5
+.fi
+.RE
+.SS Without the question
+.PP
+.RS 4
+.nf
+$ git undo -y
+This takes back commit cc9caf3 "ctx: add a --prod option". Its changes stay staged, nothing is lost.
+undid cc9caf3 "ctx: add a --prod option"
+the changes are staged, nothing is lost
+to redo the commit, run git reset --soft cc9caf3
+.fi
+.RE
+.SS In a script
+.PP
+.RS 4
+.nf
+$ git undo </dev/null
+This takes back commit cc9caf3 "ctx: add a --prod option". Its changes stay staged, nothing is lost.
+git-undo: not asking without a terminal, pass --yes to go ahead
+$ echo $?
+4
+.fi
+.RE
+.SS Drop a commit and its changes
+.PP
+.RS 4
+.nf
+$ git undo --hard
+This drops commit cc9caf3 "ctx: add a --prod option" and its changes:
+ ctx.sh | 1 +
+ 1 file changed, 1 insertion(+)
+Drop cc9caf3 and its changes? [y/N] y
+dropped cc9caf3 "ctx: add a --prod option"
+to bring it back, run git reset --keep cc9caf3
+.fi
+.RE
+.SS A commit that is already pushed
+.PP
+.RS 4
+.nf
+$ git undo
+git-undo: refused, cc9caf3 is already on origin/main
+use git revert cc9caf3 to undo a pushed commit
+$ echo $?
+4
+.fi
+.RE
+.SS See the git commands
+.PP
+.RS 4
+.nf
+$ git undo -v -y
+git-undo: last commit is cc9caf3 "ctx: add a --prod option"
++ git for-each-ref --contains HEAD '--format=%(refname:short)' refs/remotes
+This takes back commit cc9caf3 "ctx: add a --prod option". Its changes stay staged, nothing is lost.
++ git reset -q --soft deb177294adbfc06dcf105a28db1470ea232e66c
+undid cc9caf3 "ctx: add a --prod option"
+the changes are staged, nothing is lost
+to redo the commit, run git reset --soft cc9caf3
+git-undo: was cc9caf3789350cf0e13eb6de2f605836f61b1988
+.fi
+.RE
+.SS Take back a wip commit
+.PP
+.RS 4
+.nf
+$ git wip
+saved 1 changed and 1 new files as 085bd00 "wip" on main
+git undo brings them back
+$ git undo -q -y
+undid 085bd00 "wip"
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBgit\-undo: refused, 3f2a9c1 is already on origin/main\fR : Someone may have pulled that commit. Rewriting it forces them to repair their clone. Run \fBgit revert 3f2a9c1\fR and push the new commit. When the remote branch is yours alone, such as a feature branch nobody else uses, you can still run \fBgit reset \-\-soft HEAD^\fR yourself and push with \fBgit push \-\-force\-with\-lease\fR.
+.PP
+\fBgit\-undo: refused, a rebase is in progress. Finish it or abort it first\fR : Run \fBgit status\fR to see where the rebase stopped, then \fBgit rebase \-\-continue\fR or \fBgit rebase \-\-abort\fR.
+.PP
+\fBgit\-undo: git reset stopped, a file you changed is also in 3f2a9c1. Nothing was dropped\fR : \fB\-\-hard\fR would have lost your uncommitted edits. Commit them, stash them with \fBgit stash\fR, or run \fBgit undo\fR without \fB\-\-hard\fR.
+.PP
+\fBgit\-undo: 3f2a9c1 is the first commit, there is nothing before it to go back to\fR : To start the history over, run \fBgit update\-ref \-d HEAD\fR. Your files stay staged.
+.PP
+\fBNo manual entry for git\-undo\fR : You ran \fBgit undo \-\-help\fR without an installed man page. Use \fBgit undo \-h\fR, or run \fBmake man\fR and install toolbelt.
+.PP
+\fBgit\-undo: not asking without a terminal, pass \-\-yes to go ahead\fR : \fBgit undo\fR ran in a script, a pipe or a cron job. Add \fB\-y\fR when the script really should undo the commit.
+.PP
+I undid the wrong commit : Run the command \fBgit undo\fR printed, such as \fBgit reset \-\-soft cc9caf3\fR. When that output is gone, \fBgit reflog\fR lists every commit your branch pointed at.
+.SH EXIT STATUS
+.TP
+0
+The commit is undone.
+.TP
+1
+Not a repository, no commits, the first commit, or git failed.
+.TP
+2
+Bad usage, such as an argument.
+.TP
+3
+git is not installed.
+.TP
+4
+Refused. The commit is already pushed, an operation is in progress, or there was no terminal to ask in.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBgit\-wip\fR, \fBgit\-sync\fR, \fBgit\-reset(1)\fR, \fBgit\-revert(1)\fR, \fBgit\-reflog(1)\fR
