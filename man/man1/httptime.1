@@ -1,0 +1,212 @@
+.TH "HTTPTIME" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+httptime \- where the time goes in one HTTP request
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+httptime [options] URL [-- curl options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+"The site is slow" can mean the name lookup is slow, the network is slow, the TLS handshake is slow or the server is slow. \fBhttptime\fR sends one request with curl and splits its time into those parts, one line each, with a bar so the big one stands out.
+.PP
+.RS 4
+.nf
+https://example.com/  200, HTTP/2, 713 bytes
+
+dns           11 ms  █████████████
+connect       11 ms  ██████████████
+tls           15 ms  ███████████████████
+first byte    16 ms  ████████████████████
+download     0.1 ms  █
+total         54 ms
+.fi
+.RE
+.PP
+The first line has the URL, the HTTP status code, the protocol version and the size of the body.
+.SH THE STEPS
+.PP
+curl measures five moments during a request, each counted from the start: when the name resolved, when the TCP connection opened, when TLS finished, when the first byte of the answer came, and when the last byte came. Those are running totals, which are hard to read. \fBhttptime\fR subtracts each from the next, so every line is one step and the lines add up to the total.
+.TP
+\fBdns\fR
+What happens: The name turns into an IP address.. A long time here means: A slow or far DNS server. 0 ms means the answer was cached.
+.TP
+\fBconnect\fR
+What happens: The TCP handshake with the server. It takes one round trip.. A long time here means: The network is slow, or the server is far away.
+.TP
+\fBtls\fR
+What happens: The TLS handshake, for \fBhttps://\fR only. One or two more round trips.. A long time here means: Same as connect, or an overloaded server.
+.TP
+\fBfirst byte\fR
+What happens: The server gets the request and works out the answer.. A long time here means: The server or the app behind it is slow.
+.TP
+\fBdownload\fR
+What happens: The body arrives.. A long time here means: A big body, or a slow line.
+.PP
+The rule of thumb: when \fBconnect\fR is long, the network is the problem. When \fBfirst byte\fR is long and \fBconnect\fR is short, the server is.
+.PP
+For a plain \fBhttp://\fR URL there is no TLS, so the \fBtls\fR line is left out.
+.PP
+Times below 10 ms show one decimal, such as \fB2.1 ms\fR. The bars are scaled so the longest step fills 20 blocks.
+.SH SEVERAL REQUESTS
+.PP
+\fB\-n 5\fR sends five requests one after the other and shows the fastest, the median and the slowest for each step. The median is the middle value, so one slow request does not pull it up the way it would an average.
+.PP
+.RS 4
+.nf
+https://example.com/health  5 runs, all 200
+
+               MIN   MEDIAN      MAX
+dns           0 ms     0 ms    11 ms
+connect      24 ms    25 ms    31 ms
+tls          30 ms    32 ms    44 ms
+first byte   41 ms    47 ms   210 ms
+total        98 ms   106 ms   296 ms
+.fi
+.RE
+.PP
+The first request is often the slowest. It pays for the DNS lookup, and caches on the server are cold. When the codes differ between runs, the first line lists each, such as \fB200 x4, 503 x1\fR.
+.PP
+Each request opens a new connection, so every run includes the handshakes.
+.SH REDIRECTS
+.PP
+By default curl does not follow redirects, so \fBhttptime\fR times the redirect answer itself, often a \fB301\fR with a tiny body. With \fB\-L\fR curl follows them, and \fBhttptime\fR adds a \fBredirects\fR line with the time spent on every hop before the last one. The step lines below it then describe the last request only. When a line shows 0 ms after a redirect, curl reused the connection from the hop before.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-count N\fR
+Send N requests, 1 to 100, and show min, median and max.
+.TP
+\fB\-L\fR, \fB\-\-follow\fR
+Follow redirects, and show the time they took on a line of their own.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the total, such as \fB168 ms\fR. With \fB\-n\fR, the median total.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show the curl command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+A URL without \fBhttp://\fR or \fBhttps://\fR gets \fBhttps://\fR in front.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to curl, before the URL. Use them for the method, headers, a body or a client certificate:
+.PP
+.RS 4
+.nf
+$ httptime https://example.com/api -- -X POST -H 'Content-Type: application/json' -d '{}'
+$ httptime https://internal.example.com/ -- --cacert ca.pem
+$ httptime https://example.com/ -- --http1.1
+$ httptime https://example.com/ -- --resolve example.com:443:203.0.113.10
+.fi
+.RE
+.PP
+The last one sends the request to a server you name, skipping DNS, which is handy for testing one server behind a load balancer.
+.SH NEEDS
+.PP
+\fBcurl\fR, from the \fBcurl\fR package on every distro. Any curl from the last ten years works.
+.SH EXAMPLES
+.SS One request
+.PP
+.RS 4
+.nf
+$ httptime https://example.com/
+https://example.com/  200, HTTP/2, 713 bytes
+
+dns           11 ms  █████████████
+connect       11 ms  ██████████████
+tls           15 ms  ███████████████████
+first byte    16 ms  ████████████████████
+download     0.1 ms  █
+total         54 ms
+.fi
+.RE
+.SS A local server over plain HTTP
+.PP
+.RS 4
+.nf
+$ httptime http://127.0.0.1:8000/
+http://127.0.0.1:8000/  200, HTTP/1.0, 220 bytes
+
+dns          0.0 ms  █
+connect      1.9 ms  ████████████████████
+first byte   0.7 ms  ███████
+download     0.0 ms  █
+total        2.7 ms
+.fi
+.RE
+.SS Five runs
+.PP
+.RS 4
+.nf
+$ httptime -n 5 http://127.0.0.1:8000/sub/a.txt
+http://127.0.0.1:8000/sub/a.txt  5 runs, all 200
+
+               MIN   MEDIAN      MAX
+dns         0.0 ms   0.0 ms   0.0 ms
+connect     0.1 ms   0.1 ms   0.2 ms
+first byte  0.3 ms   0.5 ms   1.8 ms
+total       0.5 ms   0.6 ms   1.9 ms
+.fi
+.RE
+.SS Follow a redirect
+.PP
+.RS 4
+.nf
+$ httptime -L http://127.0.0.1:8000/sub
+http://127.0.0.1:8000/sub  200, HTTP/1.0, 230 bytes, 1 redirect
+
+redirects    0.7 ms  ████████████████████
+dns          0.0 ms
+connect      0.0 ms
+first byte   0.4 ms  ███████████
+download     0.1 ms  ██
+total        1.1 ms
+.fi
+.RE
+.SS Only the number, for a script
+.PP
+.RS 4
+.nf
+$ httptime -q https://example.com/
+54 ms
+.fi
+.RE
+.SS A server that is down
+.PP
+.RS 4
+.nf
+$ httptime http://127.0.0.1:1/
+httptime: could not connect to 127.0.0.1:1 (curl exit 7)
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBcould not resolve HOST (curl exit 6)\fR : The name does not exist or DNS does not work. Try \fBgetent hosts HOST\fR, or run \fBnetcheck\fR.
+.PP
+\fBthe certificate of HOST is not trusted\fR : The server uses a self\-signed certificate, or a proxy replaces it. Pass \fB\-\- \-\-cacert ca.pem\fR, or \fB\-\- \-\-insecure\fR to time it anyway.
+.PP
+\fBdns\fR is always 0 ms : The answer came from a cache, in systemd\-resolved, nscd or the browser\-like cache of your DNS server. Only the first lookup after the cache expires shows the real time.
+.PP
+\fBfirst byte\fR jumps between runs : The server does different work each time, such as a cache miss or a garbage collection pause. Use \fB\-n 20\fR and look at the median rather than one run.
+.PP
+An HTTP error such as 500 : \fBhttptime\fR still exits 0, because the timing is valid. Check the code on the first line in scripts.
+.SH EXIT STATUS
+.TP
+0
+The request finished, whatever the HTTP code.
+.TP
+1
+curl failed. The message has the reason and curl's exit code.
+.TP
+2
+Bad usage, such as no URL or a count outside 1 to 100.
+.TP
+3
+curl is missing.
+.SH SEE ALSO
+.PP
+\fBnetcheck\fR, \fBwaitfor\fR, \fBspeed\fR, \fBcurl(1)\fR

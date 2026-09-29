@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# httptime: where the time goes in one HTTP request.
+set -uo pipefail
+TB_CMD=httptime
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: httptime [options] URL [-- curl options]
+
+Where the time goes in one HTTP request.
+
+Options:
+  -n, --count N       send N requests and show min, median and max
+  -L, --follow        follow redirects, and show the time they took
+  -q, --quiet         only the total, such as "168 ms"
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to curl, for a method, headers or a certificate.
+
+Examples:
+  httptime https://example.com/
+  httptime -n 5 https://example.com/health
+  httptime https://example.com/api -- -X POST -d '{}'
+
+Needs: curl. See man httptime.
+Exit: 0 ok, even for an HTTP error code, 1 curl failed, 2 bad usage,
+      3 missing tool.
+EOF
+}
+
+FMT='%{http_code} %{http_version} %{size_download} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{num_redirects} %{time_redirect}\n'
+STEPS=(dns connect tls "first byte" download)
+
+# Milliseconds as "12 ms", or "2.1 ms" below 10.
+fmt_ms() {
+    awk -v m="$1" 'BEGIN { if (m < 10) printf "%.1f ms", m; else printf "%d ms", m + 0.5 }'
+}
+
+# The reason curl failed, from its exit code.
+curl_reason() {
+    local rc=$1 h=$2
+    case $rc in
+        3) echo "the URL is malformed" ;;
+        6) echo "could not resolve $h" ;;
+        7) echo "could not connect to $h" ;;
+        28) echo "no answer from $h in time" ;;
+        35) echo "the TLS handshake with $h failed" ;;
+        47) echo "too many redirects" ;;
+        51|60) echo "the certificate of $h is not trusted, pass -- --insecure to skip the check" ;;
+        52) echo "$h closed the connection without an answer" ;;
+        56) echo "the connection to $h broke" ;;
+        *) echo "the request to $h failed" ;;
+    esac
+}
+
+# One request. Prints the step times in ms, as
+# "code version bytes redirects dns connect tls firstbyte download total redirect".
+one_request() {
+    local out rc code ver bytes nl co ap st to nr rd
+    out=$(curl -s -o /dev/null -w "$FMT" "${follow[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$url" 2>/dev/null)
+    rc=$?
+    if (( rc != 0 )); then
+        tb_err "$(curl_reason "$rc" "$host") (curl exit $rc)"
+        return 1
+    fi
+    read -r code ver bytes nl co ap st to nr rd <<<"$out"
+    # curl gives running totals from the start. Take each step as the gap
+    # between two of them, so the steps add up to the total.
+    awk -v c="$code" -v v="$ver" -v b="$bytes" -v nl="$nl" -v co="$co" -v ap="$ap" -v st="$st" \
+        -v to="$to" -v nr="$nr" -v rd="$rd" '
+        function pos(x) { return x < 0 ? 0 : x }
+        BEGIN {
+            if (nr > 0) { nl = pos(nl - rd); co = pos(co - rd); if (ap > 0) ap = pos(ap - rd); st = pos(st - rd) }
+            dns = nl; con = pos(co - nl); tls = ap > 0 ? pos(ap - co) : 0
+            base = ap > 0 ? ap : co
+            fb = pos(st - base); dl = pos(to - rd - st)
+            printf "%s %s %s %s %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n", c, v, b, nr,
+                dns * 1000, con * 1000, tls * 1000, fb * 1000, dl * 1000, to * 1000, rd * 1000
+        }'
+}
+
+# A bar of up to 20 blocks for a value against the largest.
+bar() {
+    awk -v v="$1" -v max="$2" 'BEGIN {
+        n = max > 0 ? int(v / max * 20 + 0.5) : 0
+        if (n == 0 && v > 0) n = 1
+        for (i = 0; i < n; i++) printf "\342\226\210"
+    }'
+}
+
+show_one() {
+    local line code ver bytes nr vals i max=0 v b label proto tls_used=1
+    tb_show curl -s -o /dev/null -w "$FMT" "${follow[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$url"
+    line=$(one_request) || return 1
+    read -r code ver bytes nr vals <<<"$line"
+    local t
+    read -r -a t <<<"$vals"
+    if (( TB_QUIET )); then
+        fmt_ms "${t[5]}"
+        echo
+        return 0
+    fi
+    proto="HTTP/$ver"
+    [[ $ver == 1 ]] && proto="HTTP/1.0"
+    [[ $ver == 0 ]] && proto="no HTTP answer"
+    [[ $url == https://* ]] || tls_used=0
+    printf '%s  %s, %s, %s bytes' "$url" "$code" "$proto" "$(tb_commas "$bytes")"
+    (( nr > 0 )) && printf ', %s' "$(tb_plural "$nr" redirect)"
+    printf '\n\n'
+    for i in 0 1 2 3 4 6; do
+        max=$(awk -v a="$max" -v b="${t[i]}" 'BEGIN { print (b > a ? b : a) }')
+    done
+    if (( nr > 0 )); then
+        printf '%-11s%8s  %s\n' redirects "$(fmt_ms "${t[6]}")" "$(bar "${t[6]}" "$max")"
+    fi
+    for i in 0 1 2 3 4; do
+        label=${STEPS[i]}
+        (( i == 2 && ! tls_used )) && continue
+        v=${t[i]}
+        b=$(bar "$v" "$max")
+        printf '%-11s%8s%s\n' "$label" "$(fmt_ms "$v")" "${b:+  $b}"
+    done
+    printf '%-11s%8s\n' total "$(fmt_ms "${t[5]}")"
+}
+
+# Min, median and max of the numbers on stdin.
+stats() {
+    sort -g | awk '{ a[NR] = $1 } END {
+        med = NR % 2 ? a[(NR + 1) / 2] : (a[NR / 2] + a[NR / 2 + 1]) / 2
+        print a[1], med, a[NR]
+    }'
+}
+
+show_many() {
+    local i line all="" codes col label mn md mx tls_used=1
+    tb_show curl -s -o /dev/null -w "$FMT" "${follow[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$url"
+    for ((i = 1; i <= count; i++)); do
+        tb_line "httptime: request $i of $count"
+        line=$(one_request) || { tb_line_end; return 1; }
+        all+="$line"$'\n'
+    done
+    tb_line_end
+    if (( TB_QUIET )); then
+        read -r _ md _ < <(awk 'NF { print $10 }' <<<"$all" | stats)
+        fmt_ms "$md"
+        echo
+        return 0
+    fi
+    codes=$(awk 'NF { print $1 }' <<<"$all" | sort | uniq -c | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }')
+    if [[ $codes =~ ^([0-9]+)\ x[0-9]+$ ]]; then
+        codes="all ${BASH_REMATCH[1]}"
+    fi
+    printf '%s  %s runs, %s\n\n' "$url" "$count" "$codes"
+    printf '%-11s%7s %8s %8s\n' "" MIN MEDIAN MAX
+    [[ $url == https://* ]] || tls_used=0
+    for col in 0 1 2 3 4 5; do
+        (( col == 2 && ! tls_used )) && continue
+        (( col == 4 )) && continue
+        label=${STEPS[col]:-total}
+        read -r mn md mx < <(awk -v f=$(( col + 5 )) 'NF { print $f }' <<<"$all" | stats)
+        printf '%-11s%7s %8s %8s\n' "$label" "$(fmt_ms "$mn")" "$(fmt_ms "$md")" "$(fmt_ms "$mx")"
+    done
+}
+
+main() {
+    tb_need curl
+    host=${url#*://}
+    host=${host%%/*}
+    host=${host##*@}
+    if (( count > 1 )); then
+        show_many
+    else
+        show_one
+    fi
+}
+
+url=""
+count=1
+follow=()
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--count)  tb_optarg "$@"; count=$2; shift ;;
+        -L|--follow) follow=(-L) ;;
+        --)          shift; TB_PASS=("$@"); break ;;
+        -*)          tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            [[ -z $url ]] || tb_usage_error "name one URL, got $url and $1"
+            url=$1
+            ;;
+    esac
+    shift
+done
+[[ -n $url ]] || tb_usage_error "name a URL to time"
+[[ $url == *://* ]] || url=https://$url
+[[ $count =~ ^[0-9]+$ ]] && (( count >= 1 && count <= 100 )) || tb_usage_error "--count needs a number from 1 to 100, got $count"
+
+main
+exit $?
