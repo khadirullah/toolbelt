@@ -1,0 +1,189 @@
+.TH "GIT-PRUNE-MERGED" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+git\-prune\-merged \- delete local branches already merged into main
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+git prune-merged [--into branch] [options]
+git-prune-merged [--into branch] [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Every feature branch you merged stays on your machine until you delete it. After a few months \fBgit branch\fR lists fifty of them, and the few that still matter are hard to find.
+.PP
+\fBgit prune\-merged\fR finds the local branches whose last commit is already part of \fBmain\fR, lists them, and asks before it deletes them. After the delete it prints each branch with its commit hash, so you can bring any of them back with \fBgit branch NAME SHA\fR.
+.PP
+The base is \fBmain\fR, or \fBmaster\fR when there is no \fBmain\fR. \fB\-\-into\fR picks another, such as \fBdevelop\fR, or a remote branch such as \fBorigin/main\fR.
+.PP
+It only touches local branches. Remote branches, tags and commits stay as they are. A deleted branch's commits stay in the repository too, which is why the printed hash brings the branch back.
+.PP
+It is a script named \fBgit\-prune\-merged\fR in toolbelt's \fBbin\fR folder. Git runs any program named \fBgit\-NAME\fR on your PATH as \fBgit NAME\fR.
+.SH OPTIONS
+.TP
+\fB\-\-into BRANCH\fR
+The branch the others were merged into. \fBmain\fR, else \fBmaster\fR, by default.
+.TP
+\fB\-n\fR, \fB\-\-dry\-run\fR
+List the branches and delete nothing.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Do not ask.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the result lines. It still asks, unless you pass \fB\-y\fR.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step and each git command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH HOW IT DECIDES
+.PP
+A branch counts as merged when its last commit is reachable from the base, which is what \fBgit branch \-\-merged main\fR shows. \fBgit prune\-merged\fR reads that list with \fBgit for\-each\-ref \-\-merged\fR.
+.PP
+It keeps these branches even when they are merged:
+.IP \(bu 2
+the base itself, and \fBmain\fR and \fBmaster\fR
+.IP \(bu 2
+the branch you are on
+.IP \(bu 2
+a branch checked out in another worktree, since git will not delete it
+.IP \(bu 2
+with \fB\-\-into origin/main\fR, the local twin \fBmain\fR
+.SS Squash and rebase merges
+.PP
+GitHub and GitLab can merge a pull request as a squash or a rebase. Both write new commits on \fBmain\fR, so the branch's own commits never become part of \fBmain\fR, and \fBgit prune\-merged\fR does not see the branch as merged. Delete those by hand with \fBgit branch \-D NAME\fR once you are sure the pull request went in.
+.SS Your local main may be behind
+.PP
+The check uses your local \fBmain\fR. A pull request merged on the server is not in your local \fBmain\fR until you pull. Run \fBgit sync\fR on \fBmain\fR first, or use \fB\-\-into origin/main\fR after a \fBgit fetch\fR.
+.SH HELP AND THE MAN PAGE
+.PP
+\fBgit prune\-merged \-h\fR and \fBgit\-prune\-merged \-\-help\fR print the help. \fBgit prune\-merged \-\-help\fR makes git open the man page \fBgit\-prune\-merged(1)\fR, which toolbelt installs from this document.
+.SH SAFETY CHECKS
+.IP \(bu 2
+It asks before it deletes anything. The default answer is no, and a no exits 5.
+.IP \(bu 2
+With no terminal to ask in, as in a script or a cron job, it refuses with exit 4 unless you pass \fB\-y\fR.
+.IP \(bu 2
+It deletes with \fBgit branch \-D\fR only after its own merged check. The branches it keeps, listed above, are never on the list.
+.IP \(bu 2
+It prints every deleted branch with its commit hash. \fBgit branch NAME SHA\fR brings one back. The commits stay in the repository until \fBgit gc\fR removes unreachable ones, after 2 weeks by default.
+.SH PASS\-THROUGH
+.PP
+None. \fBgit prune\-merged\fR runs \fBgit for\-each\-ref\fR to find the branches and \fBgit branch \-D\fR for each one, and \fB\-v\fR prints them.
+.SH NEEDS
+.PP
+git 2.30 or newer, from the \fBgit\fR package on every distro.
+.SH EXAMPLES
+.SS Clean up after a sprint
+.PP
+.RS 4
+.nf
+$ git prune-merged
+merged into main, safe to delete
+  docs/readme-install  last commit 5 weeks ago
+  feat/kres-table      last commit 2 weeks ago
+  fix/probe-timeout    last commit 3 days ago
+Delete 3 local branches? [y/N] y
+deleted 3 branches. To bring one back, run git branch NAME SHA
+  docs/readme-install  d37364b
+  feat/kres-table      2f80b1e
+  fix/probe-timeout    c6bafb7
+.fi
+.RE
+.SS Bring one back
+.PP
+.RS 4
+.nf
+$ git branch docs/readme-install d37364b
+.fi
+.RE
+.SS Look first
+.PP
+.RS 4
+.nf
+$ git prune-merged -n
+merged into main, safe to delete
+  docs/readme-install  last commit 5 weeks ago
+  feat/kres-table      last commit 2 weeks ago
+  fix/probe-timeout    last commit 3 days ago
+would delete 3 branches, nothing changed
+.fi
+.RE
+.SS Nothing to delete
+.PP
+.RS 4
+.nf
+$ git prune-merged
+no branches merged into main, nothing to delete
+.fi
+.RE
+.SS In a script
+.PP
+.RS 4
+.nf
+$ git prune-merged </dev/null
+merged into main, safe to delete
+  docs/readme-install  last commit 5 weeks ago
+git-prune-merged: not asking without a terminal, pass --yes to go ahead
+$ echo $?
+4
+.fi
+.RE
+.SS See the git commands
+.PP
+.RS 4
+.nf
+$ git prune-merged -v -y
++ git for-each-ref --merged=main '--format=%(refname:short)%09%(objectname:short)%09%(committerdate:relative)' refs/heads/
+git-prune-merged: keeping main
+merged into main, safe to delete
+  docs/readme-install  last commit 5 weeks ago
++ git branch -q -D -- docs/readme-install
+deleted 1 branch. To bring one back, run git branch NAME SHA
+  docs/readme-install  d37364b
+.fi
+.RE
+.SS Against the remote main
+.PP
+.RS 4
+.nf
+$ git fetch
+$ git prune-merged --into origin/main
+.fi
+.RE
+.PP
+This catches branches merged on the server before your local \fBmain\fR has them.
+.SH TROUBLESHOOTING
+.PP
+\fBgit\-prune\-merged: no main or master branch here. Name the base with \-\-into, such as \-\-into develop\fR : Your default branch has another name. Pass it with \fB\-\-into\fR.
+.PP
+\fBgit\-prune\-merged: no branch named trunk. List them with: git branch \-a\fR : The name after \fB\-\-into\fR is not a branch here. Remote branches need the remote in front, such as \fBorigin/trunk\fR.
+.PP
+A branch I merged on GitHub is not on the list : It was squash merged or rebase merged, or your local \fBmain\fR is behind. See "How it decides".
+.PP
+\fBgit\-prune\-merged: could not delete NAME\fR : git refused the delete, and its own message above says why. The other branches were still deleted, and the exit code is 1.
+.SH EXIT STATUS
+.TP
+0
+It worked, or there was nothing to delete.
+.TP
+1
+Not a repository, no base branch, or a delete failed.
+.TP
+2
+Bad usage, such as a branch name without \fB\-\-into\fR.
+.TP
+3
+git is not installed.
+.TP
+4
+Refused, because there was no terminal to ask in and no \fB\-y\fR.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBgit\-recent\fR, \fBgit\-sync\fR, \fBgit\-branch(1)\fR, \fBgit\-for\-each\-ref(1)\fR

@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# git-prune-merged: delete local branches already merged into main.
+set -uo pipefail
+TB_CMD=git-prune-merged
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: git prune-merged [--into branch] [options]
+
+Delete local branches already merged into main.
+
+Options:
+  --into BRANCH       the branch they were merged into, main or master
+                      by default, a remote branch such as origin/main works
+  -n, --dry-run       list the branches and delete nothing
+  -y, --yes           do not ask
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each git command before it runs
+  -h, --help          this help
+
+It never deletes the branch you are on, the base branch, main, master,
+or a branch checked out in another worktree. It prints each deleted
+branch with its commit, so git branch NAME SHA brings one back.
+
+Examples:
+  git prune-merged
+  git prune-merged --into origin/main
+  git prune-merged -n
+
+Needs: git 2.30 or newer. See man git-prune-merged.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 no git, 4 refused, 5 answered no.
+EOF
+}
+
+# The base branch: --into, else main, else master.
+pick_base() {
+    if [[ -n $into ]]; then
+        git rev-parse --verify -q "$into^{commit}" >/dev/null ||
+            tb_die 1 "no branch named $into. List them with: git branch -a"
+        base=$into
+        return 0
+    fi
+    local b
+    for b in main master; do
+        if git show-ref --verify -q "refs/heads/$b"; then
+            base=$b
+            return 0
+        fi
+    done
+    tb_die 1 "no main or master branch here. Name the base with --into, such as --into develop"
+}
+
+main() {
+    local current rows name sha when w=0 keep=() names=() shas=() whens=() i busy b failed=0 done_n=0
+    tb_need git
+    git rev-parse --git-dir >/dev/null 2>&1 || tb_die 1 "not inside a git repository"
+    git rev-parse --verify -q HEAD >/dev/null || tb_die 1 "no commits yet, so there are no branches to prune"
+    pick_base
+    current=$(git symbolic-ref -q --short HEAD) || current=""
+
+    # Branches checked out in any worktree, including this one.
+    busy=$(git worktree list --porcelain 2>/dev/null | awk '/^branch refs\/heads\// { sub(/^branch refs\/heads\//, ""); print }')
+    keep=(main master "$base")
+    git show-ref --verify -q "refs/remotes/$base" && keep+=("${base#*/}")
+    [[ -n $current ]] && keep+=("$current")
+
+    tb_show git for-each-ref "--merged=$base" '--format=%(refname:short)%09%(objectname:short)%09%(committerdate:relative)' refs/heads/
+    rows=$(git for-each-ref "--merged=$base" \
+        --format='%(refname:short)%09%(objectname:short)%09%(committerdate:relative)' refs/heads/) ||
+        tb_die 1 "git for-each-ref failed"
+    while IFS=$'\t' read -r name sha when; do
+        [[ -n $name ]] || continue
+        for b in "${keep[@]}"; do
+            [[ $name == "$b" ]] && { tb_say "keeping $name"; continue 2; }
+        done
+        if grep -qxF -- "$name" <<<"$busy"; then
+            tb_say "keeping $name, it is checked out in another worktree"
+            continue
+        fi
+        names+=("$name")
+        shas+=("$sha")
+        whens+=("$when")
+        (( ${#name} > w )) && w=${#name}
+    done <<<"$rows"
+
+    if (( ${#names[@]} == 0 )); then
+        echo "no branches merged into $base, nothing to delete"
+        return 0
+    fi
+
+    if (( ! TB_QUIET || dry )); then
+        {
+            echo "merged into $base, safe to delete"
+            for i in "${!names[@]}"; do
+                printf '  %-*s  last commit %s\n' "$w" "${names[i]}" "${whens[i]}"
+            done
+        } >&2
+    fi
+    if (( dry )); then
+        echo "would delete $(tb_plural "${#names[@]}" branch branches), nothing changed"
+        return 0
+    fi
+    tb_confirm "Delete $(tb_plural "${#names[@]}" "local branch" "local branches")?"
+
+    local gone=()
+    for i in "${!names[@]}"; do
+        if tb_run git branch -q -D -- "${names[i]}"; then
+            gone+=("$i")
+            ((done_n++))
+        else
+            tb_err "could not delete ${names[i]}"
+            failed=1
+        fi
+    done
+    if (( done_n )); then
+        echo "deleted $(tb_plural "$done_n" branch branches). To bring one back, run git branch NAME SHA"
+        for i in "${gone[@]}"; do
+            printf '  %-*s  %s\n' "$w" "${names[i]}" "${shas[i]}"
+        done
+    fi
+    return "$failed"
+}
+
+into=""
+dry=0
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --into)       tb_optarg "$@"; into=$2; shift ;;
+        -n|--dry-run) dry=1 ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            tb_usage_error "unexpected argument $1, name the base with --into $1" ;;
+    esac
+    shift
+done
+
+main
+exit $?
