@@ -96,8 +96,9 @@ Every move runs as `mv -n`, which never overwrites. After each move, `bulkrename
 When a move fails halfway, it moves the files it already renamed back and exits 1.
 
 The sed expression runs with `sed --sandbox` when your sed has it, which GNU sed does. The sandbox refuses the `w`,
-`r` and `e` commands, so an expression cannot write files or run programs. BusyBox sed has no sandbox. On Alpine,
-check the expression with `-n` first.
+`r` and `e` commands, so an expression cannot write files or run programs. BusyBox sed, on Alpine, has no sandbox.
+There `bulkrename` runs only `s` and `y` commands, split by `;`, with the `g`, `p`, `i`, `I`, `m`, `M` or number
+flags. Anything else exits 2 before sed runs.
 
 The question needs a terminal. In a script, pass `-y`. Without a terminal and without `-y`, `bulkrename` exits 4.
 

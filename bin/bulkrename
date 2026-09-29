@@ -68,6 +68,39 @@ looks_like_sed() {
     (( ${#rest} >= 3 ))
 }
 
+# True when the expression is only s and y commands, split by ; or newlines,
+# with flags that cannot write a file or run a program. For a sed without
+# --sandbox, such as BusyBox sed on Alpine.
+only_s_and_y() {
+    local e=$1 cmd d c i found flags
+    while :; do
+        e=${e#"${e%%[![:space:];]*}"}
+        [[ -z $e ]] && return 0
+        cmd=${e:0:1} d=${e:1:1}
+        [[ $cmd == [sy] && -n $d && $d != [[:space:]\\] ]] || return 1
+        # Step past the two parts, skipping escaped characters.
+        i=2 found=0
+        while (( found < 2 )); do
+            (( i < ${#e} )) || return 1
+            c=${e:i:1}
+            if [[ $c == \\ ]]; then
+                (( i += 2 ))
+                continue
+            fi
+            [[ $c == "$d" ]] && (( found++ ))
+            (( i++ ))
+        done
+        e=${e:i}
+        flags=${e%%[;$'\n']*}
+        e=${e:${#flags}}
+        if [[ $cmd == s ]]; then
+            [[ $flags =~ ^[gpiImM0-9]*[[:space:]]*$ ]] || return 1
+        else
+            [[ $flags =~ ^[[:space:]]*$ ]] || return 1
+        fi
+    done
+}
+
 # Run the sed expression over the names in OLD_BASE and fill NEW_BASE.
 apply_sed() {
     local sandbox=() out line n=0
@@ -76,6 +109,8 @@ apply_sed() {
     # programs. Use that when it is there.
     if sed --sandbox -e p </dev/null >/dev/null 2>&1; then
         sandbox=(--sandbox)
+    elif ! only_s_and_y "$expr"; then
+        tb_usage_error "this sed has no --sandbox, so only s and y commands with the g, p, i, m or number flags run"
     fi
     if ! out=$(sed ${sandbox[@]+"${sandbox[@]}"} -E -e "$expr" </dev/null 2>&1); then
         tb_usage_error "sed could not read the expression: ${out#sed: }"

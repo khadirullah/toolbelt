@@ -20,7 +20,7 @@ setup() {
     run bulkrename 's/a/b/'
     [ "$status" -eq 2 ]
     [[ $output == *"name the files"* ]]
-    run bulkrename 's/(/' IMG_4410.jpg
+    run bulkrename 's/(/x/' IMG_4410.jpg
     [ "$status" -eq 2 ]
     [[ $output == *"sed could not read the expression"* ]]
     run bulkrename --lower --upper IMG_4410.jpg
@@ -162,6 +162,22 @@ SH
     run bulkrename -y 's/IMG/x/w written.txt' IMG_4410.jpg
     [ "$status" -eq 2 ]
     [ ! -e written.txt ]
+}
+
+@test "without --sandbox only s and y commands run" {
+    local real
+    real=$(type -P sed)
+    tb_stub sed "[ \"\$1\" = --sandbox ] && exit 1; exec $real \"\$@\""
+    run bulkrename -y 's/IMG/x/w written.txt' IMG_4410.jpg
+    [ "$status" -eq 2 ]
+    [[ $output == *"this sed has no --sandbox, so only s and y commands"* ]]
+    [ ! -e written.txt ]
+    run bulkrename -y '1e touch ran' IMG_4410.jpg
+    [ "$status" -eq 2 ]
+    [ ! -e ran ]
+    run bulkrename -y 's/IMG_/pic-/g; y/j/J/' IMG_4410.jpg
+    [ "$status" -eq 0 ]
+    [ -e pic-4410.Jpg ]
 }
 
 @test "files in a subfolder stay in that folder" {

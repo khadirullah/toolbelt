@@ -1,4 +1,4 @@
-.TH "BULKRENAME" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "BULKRENAME" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 bulkrename \- rename many files with a pattern or in your editor
 .SH SYNOPSIS
@@ -103,7 +103,7 @@ Some renames depend on each other. Swapping \fBa.txt\fR and \fBb.txt\fR, or turn
 .PP
 Every move runs as \fBmv \-n\fR, which never overwrites. After each move, \fBbulkrename\fR checks that the file really moved. When a move fails halfway, it moves the files it already renamed back and exits 1.
 .PP
-The sed expression runs with \fBsed \-\-sandbox\fR when your sed has it, which GNU sed does. The sandbox refuses the \fBw\fR, \fBr\fR and \fBe\fR commands, so an expression cannot write files or run programs. BusyBox sed has no sandbox. On Alpine, check the expression with \fB\-n\fR first.
+The sed expression runs with \fBsed \-\-sandbox\fR when your sed has it, which GNU sed does. The sandbox refuses the \fBw\fR, \fBr\fR and \fBe\fR commands, so an expression cannot write files or run programs. BusyBox sed, on Alpine, has no sandbox. There \fBbulkrename\fR runs only \fBs\fR and \fBy\fR commands, split by \fB;\fR, with the \fBg\fR, \fBp\fR, \fBi\fR, \fBI\fR, \fBm\fR, \fBM\fR or number flags. Anything else exits 2 before sed runs.
 .PP
 The question needs a terminal. In a script, pass \fB\-y\fR. Without a terminal and without \fB\-y\fR, \fBbulkrename\fR exits 4.
 .SH THE UNDO LIST
