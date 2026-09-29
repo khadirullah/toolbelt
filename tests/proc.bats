@@ -23,8 +23,15 @@ needs_real_sleep() {
     head -c 4 tbproc-sleeper | grep -q ELF || skip "sleep is a script here"
 }
 
+# BusyBox, as on Alpine, picks the applet by name, so a renamed copy of its
+# sleep does not sleep.
+needs_sleeper() {
+    ./tbproc-sleeper 0 2>/dev/null || skip "sleep is a BusyBox applet here"
+}
+
 # Start a sleeper and store its pid in $pid.
 start() {
+    needs_sleeper
     ./tbproc-sleeper 60 "$@" >/dev/null 2>&1 3>&- &
     pid=$!
     PIDS+=("$pid")
@@ -100,6 +107,7 @@ start() {
 
 @test "-f lists open files and counts deleted ones" {
     needs_real_sleep
+    needs_sleeper
     printf 'notes\n' > notes.txt
     ./tbproc-sleeper 60 >/dev/null 2>&1 3<notes.txt &
     pid=$!
