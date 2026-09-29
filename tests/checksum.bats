@@ -64,6 +64,8 @@ setup() {
     [ "$output" = "$(sha1sum < a.txt | cut -d' ' -f1)  a.txt" ]
     run checksum -a sha512 a.txt
     [ "$output" = "$(sha512sum < a.txt | cut -d' ' -f1)  a.txt" ]
+    # BusyBox, on Alpine, has no b2sum.
+    command -v b2sum >/dev/null || return 0
     run checksum --algo=b2 a.txt
     [ "$output" = "$(b2sum < a.txt | cut -d' ' -f1)  a.txt" ]
 }
@@ -79,6 +81,7 @@ setup() {
 }
 
 @test "a 128 digit hash tries sha512, then b2" {
+    tb_needs b2sum
     run checksum -v a.txt "$(b2sum < a.txt | cut -d' ' -f1)"
     [ "$status" -eq 0 ]
     [[ $output == *"no match with sha512, trying b2"* ]]
@@ -125,7 +128,8 @@ setup() {
 @test "-c reads names relative to the SUMS file and BSD lines" {
     mkdir dl
     cp a.txt dl/
-    (cd dl && sha512sum --tag a.txt > Fedora-CHECKSUM)
+    # The BSD line sha512sum --tag writes. BusyBox sha512sum has no --tag.
+    printf 'SHA512 (a.txt) = %s\n' "$(sha512sum < a.txt | cut -d' ' -f1)" > dl/Fedora-CHECKSUM
     run checksum -c dl/Fedora-CHECKSUM
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "OK       a.txt" ]
