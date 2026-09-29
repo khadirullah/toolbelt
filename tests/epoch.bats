@@ -71,6 +71,8 @@ setup() {
     [ "$output" = 1790672400 ]
     run epoch -u 2026-09-29 09:00
     [ "$output" = 1790672400 ]
+    # BusyBox date, on Alpine, reads neither form below. docs/epoch.md says so.
+    [[ $(readlink -f "$(type -P date)") == */busybox ]] && return 0
     run epoch 2026-09-29T09:00:00Z
     [ "$output" = 1790672400 ]
     run epoch --ms "2026-09-29 14:30:00.250"
