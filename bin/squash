@@ -463,8 +463,18 @@ stage_source() {
 stage_meter() { if (( USE_PV )); then pv -s "$SRC_BYTES"; else cat; fi; }
 stage_comp() { if (( ${#COMP[@]} )); then "${COMP[@]}"; else cat; fi; }
 stage_sink() {
-    if (( SPLIT_BYTES )); then
+    local f n=0
+    if (( SPLIT_BYTES )) && split --version >/dev/null 2>&1; then
         split -b "$SPLIT_BYTES" -a 3 --numeric-suffixes=1 - "$WORK/$OUT_BASE."
+    elif (( SPLIT_BYTES )); then
+        # BusyBox split names the parts aaa, aab and so on. Number them after.
+        mkdir -- "$WORK/.parts" && split -b "$SPLIT_BYTES" -a 3 - "$WORK/.parts/p." || return 1
+        for f in "$WORK/.parts"/p.*; do
+            [[ -e $f ]] || continue
+            (( n++ ))
+            mv -- "$f" "$(printf '%s.%03d' "$WORK/$OUT_BASE" "$n")" || return 1
+        done
+        rmdir -- "$WORK/.parts"
     else
         cat > "$WORK/$OUT_BASE"
     fi
