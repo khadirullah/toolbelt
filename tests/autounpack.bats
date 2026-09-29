@@ -82,7 +82,7 @@ events() {
     [ "$status" -eq 2 ]
     [[ $output == *"autounpack never deletes archives"* ]]
     [ ! -e "$UNIT" ]
-    ! grep -q " enable" "$CALLS"
+    not grep -q " enable" "$CALLS"
 }
 
 @test "run refuses --rm too" {

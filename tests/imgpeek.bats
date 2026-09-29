@@ -197,7 +197,7 @@ SH
     [ "$status" -eq 0 ]
     grep -q '^podman pull nginx:1.27$' "$CALLS"
     grep -q '^podman save ' "$CALLS"
-    ! grep -q '^docker' "$CALLS"
+    not grep -q '^docker' "$CALLS"
 }
 
 @test "docker is used when podman is missing" {
@@ -283,7 +283,7 @@ SH
     tb_stub dive 'echo "dive $*" >> "$CALLS"'
     run imgpeek -l nginx:1.27
     [[ $output == *"dive nginx:1.27 browses the files of each layer"* ]]
-    ! grep -q '^dive' "$CALLS"
+    not grep -q '^dive' "$CALLS"
 }
 
 @test "--find shows which layer added, changed or deleted a file" {

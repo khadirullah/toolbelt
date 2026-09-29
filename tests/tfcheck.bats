@@ -94,7 +94,7 @@ no_linters() { tb_without tflint trivy tofu; }
     [ "${lines[2]}" = "tflint    skip  not installed, see toolbelt doctor" ]
     [ "${lines[3]}" = "trivy     skip  not installed, see toolbelt doctor" ]
     [ "${lines[4]}" = "all 2 checks passed, 2 skipped" ]
-    ! grep -q ' init' "$CALLS"
+    not grep -q ' init' "$CALLS"
 }
 
 @test "fmt lists the files that need formatting and exits 1" {
@@ -106,7 +106,7 @@ no_linters() { tb_without tflint trivy tofu; }
     [ "${lines[1]}" = "          main.tf" ]
     [ "${lines[3]}" = "          tfcheck --fix rewrites them" ]
     [ "${lines[-1]}" = "1 of 2 checks failed, 2 skipped" ]
-    ! grep -q 'fmt -list=true -no-color$' "$CALLS"
+    not grep -q 'fmt -list=true -no-color$' "$CALLS"
 }
 
 @test "--fix lets fmt rewrite the files" {
@@ -134,7 +134,7 @@ no_linters() { tb_without tflint trivy tofu; }
     run tfcheck infra
     [ "$status" -eq 0 ]
     [ "${lines[1]}" = "validate  skip  needs terraform init first, see man tfcheck" ]
-    ! grep -q ' init' "$CALLS"
+    not grep -q ' init' "$CALLS"
 }
 
 @test "options after -- go to terraform validate" {
@@ -228,5 +228,5 @@ JSON'
     before=$(cat infra/main.tf)
     run tfcheck infra
     [ "$(cat infra/main.tf)" = "$before" ]
-    ! grep -q 'fmt -list=true -no-color$' "$CALLS"
+    not grep -q 'fmt -list=true -no-color$' "$CALLS"
 }

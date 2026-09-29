@@ -74,7 +74,7 @@ esac'
     run speed -d -s 1
     [ "$status" -eq 0 ]
     [ "${lines[1]}" = "download  0.9 Mbit/s, 1.0 MB in 8.5s" ]
-    ! grep -q __up "$BATS_TEST_TMPDIR/curl.args"
+    not grep -q __up "$BATS_TEST_TMPDIR/curl.args"
     run speed -q -s 1
     [ "$output" = "0.9 0.4" ]
     run speed -q -u -s 1

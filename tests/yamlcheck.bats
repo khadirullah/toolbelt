@@ -166,7 +166,7 @@ printf "%s\n" "${KC:-$none}"'
     [[ $output == *"deploy/cm.yaml  pass"* ]]
     [ "${lines[-1]}" = "3 files, 2 pass, 1 fail" ]
     grep -q '^kubeconform -output json -verbose -ignore-missing-schemas -cache .*/toolbelt/kubeconform deploy/cm.yaml' "$CALLS"
-    ! grep -q 'kubernetes-version' "$CALLS"
+    not grep -q 'kubernetes-version' "$CALLS"
 }
 
 @test "-k leaves out files that are not valid YAML" {
@@ -177,7 +177,7 @@ printf "%s\n" "${KC:-$none}"'
     run yamlcheck -k values.yaml deploy/cm.yaml
     [ "$status" -eq 1 ]
     grep -q ' deploy/cm.yaml$' "$CALLS"
-    ! grep -q 'values.yaml' "$CALLS"
+    not grep -q 'values.yaml' "$CALLS"
 }
 
 @test "--kube-version picks the schema, and the cluster's version is the default" {

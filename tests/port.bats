@@ -132,7 +132,7 @@ start_server() {
     [ "$status" -eq 0 ]
     [[ ${lines[-1]} == "stopped after "*". $PORT/tcp is free." ]]
     sleep 0.2
-    ! kill -0 "$SERVER_PID" 2>/dev/null
+    not kill -0 "$SERVER_PID" 2>/dev/null
 }
 
 @test "--kill asks first, and a no leaves it running" {
@@ -145,7 +145,7 @@ start_server() {
     run bash -c "echo y | port -k $PORT"
     [ "$status" -eq 0 ]
     sleep 0.2
-    ! kill -0 "$SERVER_PID" 2>/dev/null
+    not kill -0 "$SERVER_PID" 2>/dev/null
 }
 
 @test "--kill without a terminal or --yes refuses" {

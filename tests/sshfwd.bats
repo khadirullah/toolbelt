@@ -116,7 +116,7 @@ spare_port() {
     run sshfwd --stop 1
     [ "$status" -eq 0 ]
     [ "$output" = "closed tunnel 1, localhost:$p to db.example.com:$p" ]
-    ! kill -0 "$master" 2>/dev/null
+    not kill -0 "$master" 2>/dev/null
     run sshfwd --stop 1
     [ "$status" -eq 1 ]
     [[ $output == *"no tunnel 1"* ]]

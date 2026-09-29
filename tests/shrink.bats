@@ -137,7 +137,7 @@ setup() {
     [ "$status" -eq 0 ]
     [[ $output == "shot.png -> shot-small-1.png (100KB -> 30KB, 55% wide, "* ]]
     [ "$(cat shot-small.png)" = "mine" ]
-    ! grep -q -- -quality "$BATS_TEST_TMPDIR/magick.log"
+    not grep -q -- -quality "$BATS_TEST_TMPDIR/magick.log"
 }
 
 @test "convert works when magick is missing, and -w caps the width" {

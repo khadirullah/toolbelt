@@ -60,3 +60,13 @@ tb_tty() { export TB_TEST_TTY=1; }
 
 # Files in the trash, one name per line.
 tb_trash_list() { ls -1 "$XDG_DATA_HOME/Trash/files" 2>/dev/null; }
+
+# Fail when the command succeeds. A plain "! cmd" never fails a bats test,
+# since set -e ignores a negated command.
+not() {
+    if "$@"; then
+        echo "expected to fail: $*" >&2
+        return 1
+    fi
+    return 0
+}

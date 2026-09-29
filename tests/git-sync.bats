@@ -122,7 +122,7 @@ theirs() { (cd "$W/theirs" && "$@") >/dev/null 2>&1; }
     [ "$(tail -n 1 mine.txt)" = "dirty" ]
     [ -f new.txt ]
     [ -z "$(git stash list)" ]
-    ! git rev-parse -q --verify origin/old-feature
+    not git rev-parse -q --verify origin/old-feature
 }
 
 @test "a rebase conflict is undone and exits 1" {

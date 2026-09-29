@@ -84,7 +84,7 @@ esac'
     [[ ${lines[7]} == "thumbnails "*"  rm -r ~/.cache/thumbnails/*" ]]
     [[ ${lines[8]} == "total "*"  nothing changed. Run cleanup --clean to choose." ]]
     [[ $output == *"largest folders in $HOME"* ]]
-    ! grep -qE "vacuum|apt-get|prune" "$CALLS"
+    not grep -qE "vacuum|apt-get|prune" "$CALLS"
     [ -e "$XDG_DATA_HOME/Trash/files/old.txt" ]
     [ -e "$HOME/.cache/thumbnails/normal/a.png" ]
     [ -e "$TB_ROOTFS/var/cache/apt/archives/curl.deb" ]
@@ -101,7 +101,7 @@ esac'
     run cleanup --clean </dev/null
     [ "$status" -eq 4 ]
     [ "$output" = "cleanup: not asking without a terminal, pass --yes to go ahead" ]
-    ! grep -qE "vacuum|apt-get|prune" "$CALLS"
+    not grep -qE "vacuum|apt-get|prune" "$CALLS"
     [ -e "$XDG_DATA_HOME/Trash/files/old.txt" ]
 }
 
@@ -134,7 +134,7 @@ esac'
     [ "$status" -eq 5 ]
     [[ $output == *"journal     1.5GB Shrink the journal to 200M? [y/N]"* ]]
     [[ $output == *"Nothing changed."* ]]
-    ! grep -qE "vacuum|apt-get|prune" "$CALLS"
+    not grep -qE "vacuum|apt-get|prune" "$CALLS"
     [ -e "$XDG_DATA_HOME/Trash/files/old.txt" ]
     [ -e "$HOME/.cache/thumbnails/normal/a.png" ]
 }
@@ -145,7 +145,7 @@ esac'
     [ "$status" -eq 0 ]
     [ -z "$(ls -A "$XDG_DATA_HOME/Trash/files")" ]
     [ -e "$HOME/.cache/thumbnails/normal/a.png" ]
-    ! grep -qE "vacuum|apt-get|prune" "$CALLS"
+    not grep -qE "vacuum|apt-get|prune" "$CALLS"
     [[ $output == *"cleanup: freed "*" of "*". / now has "* ]]
 }
 
@@ -171,7 +171,7 @@ esac'
     [[ $output == *"skipped, the running kernel 6.8.0-host is not installed here"* ]]
     run cleanup --clean --yes --only kernels
     [ "$status" -eq 0 ]
-    ! grep -q purge "$CALLS"
+    not grep -q purge "$CALLS"
 }
 
 @test "pacman keeps one kernel and cleans its cache with paccache" {

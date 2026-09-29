@@ -159,7 +159,7 @@ printf "Sep 29 10:02:11 box sshd[48210]: Accepted publickey for khadir\nSep 29 1
     run svc enable syncthing --user -- --now
     [ "$status" -eq 0 ]
     grep -qx "systemctl --user enable --now syncthing.service" "$CALLS"
-    ! grep -q "^sudo" "$CALLS"
+    not grep -q "^sudo" "$CALLS"
     [ "$output" = "syncthing.service enabled, it starts at boot" ]
 }
 
@@ -175,11 +175,11 @@ printf "Sep 29 10:02:11 box sshd[48210]: Accepted publickey for khadir\nSep 29 1
     export SSH_CONNECTION="192.168.1.31 51522 192.168.1.24 22"
     run svc stop sshd </dev/null
     [ "$status" -eq 4 ]
-    ! grep -q " stop " "$CALLS"
+    not grep -q " stop " "$CALLS"
     tb_tty
     run bash -c 'echo n | svc stop sshd'
     [ "$status" -eq 5 ]
-    ! grep -q " stop " "$CALLS"
+    not grep -q " stop " "$CALLS"
     run svc -y stop sshd
     [ "$status" -eq 0 ]
     grep -qx "systemctl stop sshd.service" "$CALLS"

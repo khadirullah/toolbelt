@@ -116,8 +116,8 @@ newrepo() {
     [ "$status" -eq 0 ]
     [[ $output == *"deleted 2 branches. To bring one back, run git branch NAME SHA"* ]]
     [[ $output == *"  fix/probe-timeout  $sha"* ]]
-    ! git rev-parse -q --verify fix/probe-timeout
-    ! git rev-parse -q --verify feat/kres-table
+    not git rev-parse -q --verify fix/probe-timeout
+    not git rev-parse -q --verify feat/kres-table
     git rev-parse -q --verify feat/unmerged
     git rev-parse -q --verify develop
     git branch fix/probe-timeout "$sha"
@@ -136,7 +136,7 @@ newrepo() {
     git rev-parse -q --verify master
     git rev-parse -q --verify fix/probe-timeout
     git rev-parse -q --verify feat/kres-table
-    ! git rev-parse -q --verify feat/in-develop
+    not git rev-parse -q --verify feat/in-develop
     git worktree remove ../wt
 }
 
@@ -150,7 +150,7 @@ newrepo() {
     [ "$status" -eq 0 ]
     git rev-parse -q --verify develop
     git rev-parse -q --verify main
-    ! git rev-parse -q --verify feat/in-develop
+    not git rev-parse -q --verify feat/in-develop
 }
 
 @test "nothing merged says so and exits 0" {

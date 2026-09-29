@@ -117,7 +117,7 @@ SH
     [ "${lines[0]}" = "NODE         STATUS  ROLE           AGE  VERSION" ]
     [[ ${lines[1]} == "k8s-master   Ready   control-plane  "*"  v1.35.2" ]]
     [ "${lines[2]}" = "all conditions normal" ]
-    ! grep -q "get events" "$CALLS"
+    not grep -q "get events" "$CALLS"
 }
 
 @test "a NotReady, cordoned node shows the kubelet message" {

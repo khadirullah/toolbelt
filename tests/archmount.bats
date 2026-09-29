@@ -194,7 +194,7 @@ mv "$TB_TEST_MOUNTS.new" "$TB_TEST_MOUNTS"'
     fusermount3 -u "$PWD/logs"
     run archmount --list
     [[ $output != *"logs.zip"* ]]
-    ! grep -q logs.zip "$XDG_STATE_HOME/toolbelt/archmount.mounts"
+    not grep -q logs.zip "$XDG_STATE_HOME/toolbelt/archmount.mounts"
 }
 
 @test "--list includes archive mounts made by hand" {

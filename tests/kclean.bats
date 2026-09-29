@@ -100,7 +100,7 @@ SH
     [ "$(wc -l < "$BATS_TEST_TMPDIR/deleted")" -eq 1 ]
     grep -q "^delete pod -n shop --ignore-not-found report-28790640-7xk2p" "$BATS_TEST_TMPDIR/deleted"
     grep -q "api-5b8c9d7f6-mk4tn" "$BATS_TEST_TMPDIR/deleted"
-    ! grep -q "web-6d4cf56db6" "$BATS_TEST_TMPDIR/deleted"
+    not grep -q "web-6d4cf56db6" "$BATS_TEST_TMPDIR/deleted"
 }
 
 @test "answering no deletes nothing and exits 5" {
@@ -165,7 +165,7 @@ SH
     [ "$status" -eq 0 ]
     [[ $output == *"dry run, 9 pods would be deleted"* ]]
     grep -q -- "--dry-run=client" "$BATS_TEST_TMPDIR/deleted"
-    ! grep -q "get pods .*--dry-run" "$CALLS"
+    not grep -q "get pods .*--dry-run" "$CALLS"
 }
 
 @test "-v lists every name" {

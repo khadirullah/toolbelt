@@ -136,7 +136,7 @@ print(s.getsockname()[1], flush=True); time.sleep(10)' > "$BATS_TEST_TMPDIR/port
     [ "$status" -eq 1 ]
     [[ $output == *"kfwd: port $port is used by python3 (pid $lpid)"* || $output == *"kfwd: port $port is in use"* ]]
     [[ $output == *"leave out --local"* ]]
-    ! grep -q port-forward "$CALLS"
+    not grep -q port-forward "$CALLS"
 }
 
 @test "forwards to a spare port, prints the URL, stops cleanly" {
@@ -151,7 +151,7 @@ print(s.getsockname()[1], flush=True); time.sleep(10)' > "$BATS_TEST_TMPDIR/port
     grep -Eq "port-forward svc/grafana [0-9]+:80 -n monitoring" "$CALLS"
     local child
     child=$(cat "$BATS_TEST_TMPDIR/pf-pids")
-    ! kill -0 "$child" 2>/dev/null
+    not kill -0 "$child" 2>/dev/null
 }
 
 @test "-q prints only the URL and --port picks by name" {
@@ -176,7 +176,7 @@ print(s.getsockname()[1], flush=True); time.sleep(10)' > "$BATS_TEST_TMPDIR/port
     grep -q -- "--address 127.0.0.1" "$CALLS"
     local child
     for child in $(cat "$BATS_TEST_TMPDIR/pf-pids"); do
-        ! kill -0 "$child" 2>/dev/null
+        not kill -0 "$child" 2>/dev/null
     done
 }
 

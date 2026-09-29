@@ -147,7 +147,7 @@ SH
 @test "--lines 0 skips the logs" {
     run kwhy --lines 0
     [ "$status" -eq 1 ]
-    ! grep -q "kubectl logs" "$CALLS"
+    not grep -q "kubectl logs" "$CALLS"
     [[ $output == *"  exit   1, "*" ago"* ]]
 }
 
