@@ -158,6 +158,7 @@ terraform      -                    -                    terraform            - 
 tofu           -                    opentofu             opentofu             opentofu             opentofu
 tflint         -                    -                    tflint               -                    -
 trivy          -                    trivy                trivy                trivy                -
+kubeconform    -                    -                    kubeconform          kubeconform          -
 kubectl        kubectl              -                    kubectl              kubernetes-client    kubectl
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils

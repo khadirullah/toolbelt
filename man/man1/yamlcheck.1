@@ -1,0 +1,177 @@
+.TH "YAMLCHECK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+yamlcheck \- lint YAML and check Kubernetes manifests
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+yamlcheck [-k] [--kube-version V] [--strict] [file | dir ...] [-- yamllint options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+YAML fails in quiet ways. A tab where spaces belong, a key written twice, or a port number in quotes all look fine in an editor. Some of them only show up when \fBkubectl apply\fR rejects the manifest, and a duplicate key never shows up at all, because the parser keeps the last value and drops the first without a word.
+.PP
+\fByamlcheck\fR checks every YAML file you name, and every \fB.yaml\fR and \fB.yml\fR file under a folder you name. With no argument it checks the current folder. It skips \fB.git\fR folders. Each file gets a line with \fBpass\fR, or its name followed by one line per finding with the line and column, the level and the message. The last line counts the files, such as \fB3 files, 1 pass, 2 fail\fR.
+.PP
+It runs up to three checks on each file.
+.IP \(bu 2
+yamllint, when it is installed, for syntax and style. Its settings come from \fB.yamllint\fR, \fB.yamllint.yaml\fR or \fB.yamllint.yml\fR in the current folder, or yamllint's defaults.
+.IP \(bu 2
+A check in python3 that always runs. It finds tabs in the indentation, duplicate keys and syntax errors, so those fail even when a yamllint config turns its own rules off, and even when yamllint is not installed.
+.IP \(bu 2
+With \fB\-k\fR, kubeconform, which checks each Kubernetes object against the schema for your cluster's version.
+.PP
+A finding that yamllint and python3 both report on the same line shows once. Two yamllint messages get plainer words. \fBfound character '\et' that cannot start any token\fR becomes \fBtab character, YAML allows spaces only\fR, and \fBduplication of key "image" in mapping\fR becomes \fBduplicate key "image"\fR.
+.PP
+\fByamlcheck\fR only reads. It never changes a file and never talks to the cluster, except to ask its version when \fB\-k\fR needs one.
+.SH OPTIONS
+.TP
+\fB\-k\fR, \fB\-\-kube\fR
+Check Kubernetes manifests against the schema too. Needs kubeconform.
+.TP
+\fB\-\-kube\-version V\fR
+The Kubernetes version of the schema, such as \fB1.31\fR or \fB1.31.4\fR. Works with \fB\-k\fR.
+.TP
+\fB\-\-strict\fR
+Treat warnings as failures, so a file with only warnings fails.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the summary line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH ERRORS AND WARNINGS
+.PP
+yamllint gives each rule a level, \fBerror\fR or \fBwarning\fR, and \fByamlcheck\fR shows it as \fBerror\fR or \fBwarn\fR. A file fails when it has an error. Warnings are shown and do not fail the file, unless you pass \fB\-\-strict\fR. Tabs, duplicate keys, syntax errors and schema errors are always errors.
+.SH KUBERNETES SCHEMAS
+.PP
+With \fB\-k\fR, files that passed the YAML checks go to kubeconform. A file with a syntax error is left out, since kubeconform could not read it either.
+.PP
+The schema version comes from \fB\-\-kube\-version\fR when you give it. Otherwise \fByamlcheck\fR runs \fBkubectl version \-o json \-\-request\-timeout=3s\fR and uses the server's version, so the manifest is checked against the cluster you are about to apply it to. When no cluster answers in 3 seconds, or kubectl is missing, kubeconform uses its newest schema. \fB\-v\fR says which one it picked.
+.PP
+kubeconform downloads schemas from GitHub the first time and keeps them in \fB~/.cache/toolbelt/kubeconform\fR, so later runs work offline for the same version.
+.PP
+Custom resources, such as a cert\-manager \fBCertificate\fR, have no schema in the standard set. They get a note, \fBschema  skip   no schema for Certificate site\fR, and do not fail. A YAML file that is not a Kubernetes object at all, such as a Helm \fBvalues.yaml\fR, gets \fBnot a Kubernetes manifest, schema check skipped\fR. An object whose schema kubeconform could not download, as on a machine with no network, gets the same skip note as a custom resource.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to yamllint. Use them to pick a config or turn a rule off for one run.
+.PP
+.RS 4
+.nf
+$ yamlcheck deploy/ -- -c .yamllint.yaml
+$ yamlcheck values.yaml -- -d "{extends: default, rules: {line-length: disable}}"
+.fi
+.RE
+.PP
+Options after \fB\-\-\fR need yamllint, so they exit 3 when it is missing.
+.SH PER\-DISTRO NOTES
+.PP
+yamllint : Debian, Ubuntu, Fedora, Arch, openSUSE and Alpine all package it as \fByamllint\fR.
+.PP
+kubeconform : Arch and openSUSE Tumbleweed have \fBkubeconform\fR. On Debian, Ubuntu, Fedora and Alpine, download the release from github.com/yannh/kubeconform/releases and put the binary in \fB~/.local/bin\fR.
+.PP
+python3 without PyYAML : The duplicate key and syntax checks need the \fByaml\fR module, from \fBpython3\-yaml\fR on Debian and Ubuntu, \fBpython3\-pyyaml\fR on Fedora and \fBpython\-yaml\fR on Arch. Without it and without yamllint, \fByamlcheck\fR only finds tabs and says so.
+.SH NEEDS
+.PP
+\fByamllint\fR, or \fBpython3\fR for the tab, duplicate key and syntax checks alone. Both is best. \fBkubeconform\fR for \fB\-k\fR, and \fBkubectl\fR to learn the cluster's version, which is optional.
+.SH EXAMPLES
+.SS A folder of manifests, with the schema
+.PP
+.RS 4
+.nf
+$ yamlcheck -k deploy/
+deploy/api.yaml
+  12:3    error  wrong indentation: expected 4 but found 2 (indentation)
+  27:81   warn   line too long (96 > 80 characters) (line-length)
+deploy/cm.yaml  pass
+deploy/svc.yaml
+  schema  error  Service web, spec.ports[0].port: expected integer, but got string
+3 files, 1 pass, 2 fail
+.fi
+.RE
+.PP
+The quotes around \fB"8080"\fR make it a string, and a Service port must be a number.
+.SS A key written twice
+.PP
+.RS 4
+.nf
+$ yamlcheck values.yaml
+values.yaml
+  5:1     error  duplicate key "image"
+1 file, 1 fail
+.fi
+.RE
+.PP
+Helm would have used the second \fBimage\fR and dropped the first without a word.
+.SS Without yamllint
+.PP
+.RS 4
+.nf
+$ yamlcheck values.yaml chart.yaml
+yamlcheck: yamllint is missing, so only syntax, tabs and duplicate keys were checked. Install it with: sudo apt install yamllint
+values.yaml
+  5:1     error  duplicate key "image"
+chart.yaml
+  3:1     error  tab character, YAML allows spaces only
+2 files, 2 fail
+.fi
+.RE
+.SS Warnings fail with \-\-strict
+.PP
+.RS 4
+.nf
+$ yamlcheck --strict deploy/cm.yaml
+deploy/cm.yaml
+  1:1     warn   missing document start "---" (document-start)
+1 file, 1 fail
+.fi
+.RE
+.PP
+Without \fB\-\-strict\fR the same file passes and the warning still shows.
+.SS Check against the cluster you deploy to
+.PP
+.RS 4
+.nf
+$ yamlcheck -q -k --kube-version 1.30 deploy/
+3 files, 3 pass
+.fi
+.RE
+.SS No kubeconform
+.PP
+.RS 4
+.nf
+$ yamlcheck -k deploy/
+yamlcheck: needs kubeconform for -k. Install it from https://github.com/yannh/kubeconform/releases
+$ echo $?
+3
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fByamlcheck: needs yamllint\fR : Neither yamllint nor python3 is installed, or you passed options after \fB\-\-\fR without yamllint. Install yamllint.
+.PP
+\fByamlcheck: yamllint: ...\fR : yamllint refused its config or an option after \fB\-\-\fR. The rest of the line is yamllint's own message.
+.PP
+\fByamlcheck: no .yaml or .yml files in DIR\fR : The folder and its subfolders hold no files with those endings. Name other files directly, such as \fByamlcheck Chart.lock\fR.
+.PP
+\fByamlcheck: kubeconform gave no result\fR : kubeconform crashed or could not download a schema, often because the machine is offline and the version is not in the cache yet. Run the kubeconform line from \fB\-v\fR by hand to see why.
+.SH EXIT STATUS
+.TP
+0
+Every file passed.
+.TP
+1
+A file failed, a path does not exist, or a folder has no YAML files.
+.TP
+2
+Bad usage, such as \fB\-\-kube\-version\fR without \fB\-k\fR.
+.TP
+3
+No yamllint and no python3, or no kubeconform for \fB\-k\fR.
+.SH SEE ALSO
+.PP
+\fBtfcheck\fR, \fBkyaml\fR, \fByamllint(1)\fR, \fBkubectl(1)\fR

@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# yamlcheck: lint YAML and check Kubernetes manifests.
+set -uo pipefail
+TB_CMD=yamlcheck
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: yamlcheck [-k] [--kube-version V] [--strict] [file | dir ...]
+                 [-- yamllint options]
+
+Lint YAML and check Kubernetes manifests.
+
+Options:
+  -k, --kube          check Kubernetes manifests against the schema too
+  --kube-version V    the schema version, such as 1.31, the cluster's own
+                      version by default when it answers
+  --strict            treat warnings as failures
+  -q, --quiet         only the summary line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to yamllint.
+
+Examples:
+  yamlcheck values.yaml
+  yamlcheck -k deploy/
+  yamlcheck -k --kube-version 1.31 deploy/
+  yamlcheck deploy/ -- -c .yamllint.yaml
+
+Needs: yamllint, or python3 for syntax, tabs and duplicate keys.
+       kubeconform for -k. See man yamlcheck.
+Exit: 0 ok, 1 a file failed, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# The python3 check that runs on every file, with or without yamllint.
+# Prints "noyaml" first when python3 has no yaml module, then one line per
+# finding: file<TAB>line<TAB>col<TAB>level<TAB>message.
+PY_CHECK='
+import sys
+try:
+    import yaml
+    have = True
+except Exception:
+    have = False
+    print("noyaml")
+
+def out(path, line, col, level, msg):
+    print("%s\t%d\t%d\t%s\t%s" % (path, line, col, level, " ".join(msg.split())))
+
+def walk(path, root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, yaml.MappingNode):
+            seen = set()
+            for k, v in node.value:
+                if isinstance(k, yaml.ScalarNode) and k.value != "<<":
+                    if k.value in seen:
+                        m = k.start_mark
+                        out(path, m.line + 1, m.column + 1, "error", "duplicate key \"%s\"" % k.value)
+                    seen.add(k.value)
+                stack.append(v)
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+
+for path in sys.argv[1:]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except UnicodeDecodeError:
+        out(path, 1, 1, "error", "not UTF-8 text")
+        continue
+    except OSError as e:
+        out(path, 1, 1, "error", "cannot read it, %s" % e.strerror)
+        continue
+    tabs = set()
+    for n, line in enumerate(text.splitlines(), 1):
+        rest = line.lstrip(" ")
+        if rest.startswith("\t"):
+            out(path, n, len(line) - len(rest) + 1, "error", "tab character, YAML allows spaces only")
+            tabs.add(n)
+    if not have:
+        continue
+    try:
+        for doc in yaml.compose_all(text, Loader=yaml.SafeLoader):
+            if doc is not None:
+                walk(path, doc)
+    except yaml.YAMLError as e:
+        m = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
+        line, col = (m.line + 1, m.column + 1) if m else (1, 1)
+        if line in tabs:
+            continue
+        what = getattr(e, "problem", None) or str(e).splitlines()[0]
+        out(path, line, col, "error", "syntax error, " + what)
+'
+
+# Read kubeconform -output json -verbose on stdin. One line per resource
+# that is not valid: file<TAB>status<TAB>text.
+PY_KUBE='
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("-\tbad\tkubeconform gave no result"); sys.exit(0)
+
+def dotted(p):
+    out = ""
+    for part in p.strip("/").split("/"):
+        out += "[%s]" % part if part.isdigit() else ("." if out else "") + part
+    return out
+
+for r in d.get("resources") or []:
+    st = r.get("status", "")
+    if st == "statusValid" or st == "statusEmpty":
+        continue
+    what = " ".join(x for x in (r.get("kind", ""), r.get("name", "")) if x)
+    msg = " ".join((r.get("msg") or "").split())
+    if st == "statusSkipped":
+        print("%s\tskip\tno schema for %s" % (r.get("filename", "-"), what or "this resource"))
+    elif "missing \x27kind\x27" in msg or "missing \x27apiVersion\x27" in msg:
+        print("%s\tnotkube\tnot a Kubernetes manifest" % r.get("filename", "-"))
+    elif r.get("validationErrors"):
+        for v in r["validationErrors"]:
+            print("%s\terror\t%s, %s: %s" % (r.get("filename", "-"), what, dotted(v.get("path", "")), v.get("msg", "")))
+    else:
+        print("%s\terror\t%s%s" % (r.get("filename", "-"), what + ", " if what else "", msg))
+'
+
+declare -A FOUND=()     # file -> finding lines, "L:C<TAB>level<TAB>message\n"
+declare -A NOTES=()     # file -> schema notes that do not fail it
+FILES=()
+
+# True when a file already has an error on a line.
+error_on() {
+    local where level rest
+    while IFS=$'\t' read -r where level rest; do
+        [[ ${where%%:*} == "$2" && $level == error ]] && return 0
+    done <<<"${FOUND[$1]:-}"
+    return 1
+}
+
+add_finding() { FOUND[$1]+="$2"$'\t'"$3"$'\t'"$4"$'\n'; }
+
+# Every YAML file under the arguments, in a stable order.
+collect() {
+    local a f
+    for a in "${targets[@]}"; do
+        if [[ -d $a ]]; then
+            a=${a%/}
+            [[ -n $a ]] || a=/
+            local n=${#FILES[@]}
+            while IFS= read -r f; do
+                [[ $a == . ]] && f=${f#./}
+                FILES+=("$f")
+            done < <(find "$a" -name .git -prune -o -type f \( -name '*.yaml' -o -name '*.yml' \) -print | LC_ALL=C sort)
+            (( ${#FILES[@]} > n )) || tb_die 1 "no .yaml or .yml files in $a"
+        elif [[ -f $a ]]; then
+            FILES+=("$a")
+        else
+            tb_die 1 "$a: no such file or folder"
+        fi
+    done
+}
+
+# Friendlier words for the yamllint messages people meet most.
+reword() {
+    local m=$1
+    case $m in
+        *"found character '\\t'"*|*"found character '\t'"*) m="tab character, YAML allows spaces only" ;;
+        "duplication of key "*" in mapping (key-duplicates)")
+            m=${m#duplication of key }
+            m="duplicate key ${m% in mapping (key-duplicates)}" ;;
+    esac
+    printf '%s\n' "$m"
+}
+
+run_yamllint() {
+    local out line re file ln col level msg
+    tb_show yamllint -f parsable ${TB_PASS[@]+"${TB_PASS[@]}"} "${FILES[@]}"
+    out=$(yamllint -f parsable ${TB_PASS[@]+"${TB_PASS[@]}"} "${FILES[@]}" 2>&1)
+    re='^(.+):([0-9]+):([0-9]+): \[(error|warning)\] (.*)$'
+    while IFS= read -r line; do
+        [[ -z $line ]] && continue
+        if [[ $line =~ $re ]]; then
+            file=${BASH_REMATCH[1]} ln=${BASH_REMATCH[2]} col=${BASH_REMATCH[3]}
+            level=${BASH_REMATCH[4]} msg=${BASH_REMATCH[5]}
+            [[ $level == warning ]] && level=warn
+            add_finding "$file" "$ln:$col" "$level" "$(reword "$msg")"
+        else
+            # A bad config or option. yamllint says why.
+            tb_die 1 "yamllint: $line"
+        fi
+    done <<<"$out"
+}
+
+run_python() {
+    local line file ln col level msg
+    tb_show_text "python3 -c '<tabs, duplicate keys and syntax>' ${FILES[*]}"
+    while IFS= read -r line; do
+        if [[ $line == noyaml ]]; then
+            NOYAML=1
+            continue
+        fi
+        IFS=$'\t' read -r file ln col level msg <<<"$line"
+        # yamllint may have seen the same line already.
+        (( have_yamllint )) && error_on "$file" "$ln" && continue
+        add_finding "$file" "$ln:$col" "$level" "$msg"
+    done < <(python3 -c "$PY_CHECK" "${FILES[@]}")
+}
+
+# The cluster's version, such as 1.31.4, when kubectl reaches it.
+cluster_version() {
+    tb_has kubectl || return 1
+    local json v
+    tb_show kubectl version -o json --request-timeout=3s
+    json=$(kubectl version -o json --request-timeout=3s 2>/dev/null)
+    v=$(printf '%s\n' "$json" | python3 -c '
+import json, sys
+try:
+    s = json.load(sys.stdin).get("serverVersion") or {}
+    v = s.get("gitVersion", "")
+    print(v.lstrip("v").split("+")[0].split("-")[0])
+except Exception:
+    pass
+' 2>/dev/null)
+    [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    echo "$v"
+}
+
+run_kubeconform() {
+    local ok=() f args=() cache line file st text v
+    for f in "${FILES[@]}"; do
+        [[ ${FOUND[$f]:-} == *$'\t'error$'\t'* ]] || ok+=("$f")
+    done
+    (( ${#ok[@]} )) || return 0
+    if [[ -n $kube_version ]]; then
+        v=$kube_version
+    elif v=$(cluster_version); then
+        tb_say "the cluster runs Kubernetes $v"
+    else
+        v=""
+        tb_say "no cluster answered, checking against the newest schema"
+    fi
+    [[ $v =~ ^[0-9]+\.[0-9]+$ ]] && v+=.0
+    cache=$(tb_cache_dir)/kubeconform
+    mkdir -p "$cache"
+    args=(-output json -verbose -ignore-missing-schemas -cache "$cache")
+    [[ -n $v ]] && args+=(-kubernetes-version "$v")
+    tb_show kubeconform "${args[@]}" "${ok[@]}"
+    while IFS=$'\t' read -r file st text; do
+        case $st in
+            error)   add_finding "$file" schema error "$text" ;;
+            skip)    NOTES[$file]+="$text"$'\n' ;;
+            notkube) NOTES[$file]+="$text, schema check skipped"$'\n' ;;
+            bad)     tb_die 1 "kubeconform gave no result. Run it by hand to see why: kubeconform ${ok[0]}" ;;
+        esac
+    done < <(kubeconform "${args[@]}" "${ok[@]}" 2>/dev/null | python3 -c "$PY_KUBE")
+}
+
+report() {
+    local f pass=0 fail=0 lines line where level msg failed note
+    for f in "${FILES[@]}"; do
+        lines=${FOUND[$f]:-}
+        failed=0
+        [[ $lines == *$'\t'error$'\t'* ]] && failed=1
+        (( strict )) && [[ $lines == *$'\t'warn$'\t'* ]] && failed=1
+        if (( failed )); then ((fail++)); else ((pass++)); fi
+        (( TB_QUIET )) && continue
+        if [[ -z $lines && -z ${NOTES[$f]:-} ]]; then
+            printf '%s  pass\n' "$f"
+            continue
+        fi
+        if [[ -z $lines ]]; then
+            printf '%s  pass\n' "$f"
+        else
+            printf '%s\n' "$f"
+            # Findings in line order, schema lines last.
+            while IFS=$'\t' read -r where level msg; do
+                [[ -z $where ]] && continue
+                printf '  %-8s%-5s  %s\n' "$where" "$level" "$msg"
+            done < <(printf '%s' "$lines" | grep -v '^schema' | LC_ALL=C sort -t: -k1,1n -k2,2n
+                     printf '%s' "$lines" | grep '^schema')
+        fi
+        while IFS= read -r note; do
+            [[ -n $note ]] && printf '  %-8s%-5s  %s\n' schema skip "$note"
+        done <<<"${NOTES[$f]:-}"
+    done
+    local summary
+    summary=$(tb_plural "${#FILES[@]}" file)
+    (( pass )) && summary+=", $pass pass"
+    (( fail )) && summary+=", $fail fail"
+    echo "$summary"
+    (( fail == 0 ))
+}
+
+main() {
+    (( ${#targets[@]} )) || targets=(.)
+    if [[ -n $kube_version ]] && (( ! kube )); then
+        tb_usage_error "--kube-version works with -k"
+    fi
+    [[ -z $kube_version || $kube_version =~ ^v?[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] ||
+        tb_usage_error "--kube-version takes a version such as 1.31, not $kube_version"
+    kube_version=${kube_version#v}
+    have_yamllint=0
+    tb_has yamllint && have_yamllint=1
+    if (( ${#TB_PASS[@]} )); then
+        tb_need yamllint
+    fi
+    (( have_yamllint )) || tb_has python3 || tb_need yamllint
+    if (( kube )) && ! tb_has kubeconform; then
+        local line
+        if line=$(tb_install_line kubeconform); then
+            tb_die "$E_TOOL" "needs kubeconform for -k. Install it with: $line"
+        fi
+        tb_die "$E_TOOL" "needs kubeconform for -k. Install it from https://github.com/yannh/kubeconform/releases"
+    fi
+    (( kube )) && tb_need python3
+    collect
+    tb_say "checking $(tb_plural "${#FILES[@]}" file)"
+    NOYAML=0
+    (( have_yamllint )) && run_yamllint
+    tb_has python3 && run_python
+    if (( ! have_yamllint )); then
+        if (( NOYAML )); then
+            tb_warn "python3 has no yaml module and yamllint is missing, so only tabs were checked. Install yamllint"
+        else
+            tb_hint yamllint "yamllint is missing, so only syntax, tabs and duplicate keys were checked"
+        fi
+    fi
+    (( kube )) && run_kubeconform
+    report
+}
+
+kube=0
+kube_version=""
+strict=0
+targets=()
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -k|--kube)      kube=1 ;;
+        --kube-version) tb_optarg "$@"; kube_version=$2; shift ;;
+        --strict)       strict=1 ;;
+        --)             shift; TB_PASS=("$@"); break ;;
+        -*)             tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)              targets+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?
