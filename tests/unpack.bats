@@ -467,6 +467,18 @@ esac"
 
 # ---------------------------------------------------------------- multi-part sets
 
+# Numbered parts, as GNU split -d writes. BusyBox split has no -d.
+# Usage: split_numbered BYTES FILE DIGITS FIRST
+split_numbered() {
+    local size k=0 part
+    size=$(wc -c < "$2")
+    while (( k * $1 < size )); do
+        printf -v part '%s.%0*d' "$2" "$3" "$(( $4 + k ))"
+        dd if="$2" of="$part" bs="$1" skip="$k" count=1 2>/dev/null
+        k=$(( k + 1 ))
+    done
+}
+
 @test "a .aa set, started from any part" {
     tar -czf backup.tar.gz backup && rm -rf backup
     split -b 1k backup.tar.gz backup.tar.gz.
@@ -480,7 +492,7 @@ esac"
 @test "a .001 set" {
     head -c 4096 /dev/urandom > backup/rand
     tar -cf backup.tar backup && rm -rf backup
-    split -b 3k -d -a 3 --numeric-suffixes=1 backup.tar backup.tar.
+    split_numbered 3072 backup.tar 3 1
     rm backup.tar
     run unpack -k backup.tar.001
     [ "$status" -eq 0 ]
@@ -489,7 +501,7 @@ esac"
 
 @test "a .00 set" {
     tar -czf backup.tar.gz backup && rm -rf backup
-    split -b 1k -d backup.tar.gz backup.tar.gz.
+    split_numbered 1024 backup.tar.gz 2 0
     rm backup.tar.gz
     run unpack -k backup.tar.gz.00
     [ "$status" -eq 0 ]
@@ -511,7 +523,7 @@ esac"
     command -v zip >/dev/null || skip "zip is not installed"
     head -c 4096 /dev/urandom > backup/rand
     zip -q -r backup.zip backup && rm -rf backup
-    split -b 2k -d -a 3 --numeric-suffixes=1 backup.zip backup.zip.
+    split_numbered 2048 backup.zip 3 1
     rm backup.zip
     run unpack -k backup.zip.001
     [ "$status" -eq 0 ]
@@ -536,7 +548,7 @@ esac"
 
 @test "a missing middle part is named" {
     tar -czf backup.tar.gz backup && rm -rf backup
-    split -b 500 -d -a 3 --numeric-suffixes=1 backup.tar.gz backup.tar.gz.
+    split_numbered 500 backup.tar.gz 3 1
     rm backup.tar.gz backup.tar.gz.002
     run unpack backup.tar.gz.001
     [ "$status" -eq 1 ]
