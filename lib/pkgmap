@@ -161,7 +161,7 @@ trivy          -                    trivy                trivy                tr
 kubeconform    -                    -                    kubeconform          kubeconform          -
 skopeo         skopeo               skopeo               skopeo               skopeo               skopeo
 dive           -                    -                    dive                 dive                 -
-kubectl        kubectl              -                    kubectl              kubernetes-client    kubectl
+kubectl        -                    -                    kubectl              kubernetes-client    kubectl
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
 xdg-open       xdg-utils            xdg-utils            xdg-utils            xdg-utils            xdg-utils
