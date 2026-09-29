@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# kres: compare node requests with real usage.
+set -uo pipefail
+TB_CMD=kres
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: kres [--sort cpu|mem] [-- kubectl options]
+       kres --pods NODE [--sort cpu|mem] [-- kubectl options]
+
+Compare node requests with real usage.
+
+Options:
+  --pods NODE         list the pods on one node, with requests and usage
+  --sort cpu|mem      sort by requests of that kind, highest first
+  -q, --quiet         only the table
+  -v, --verbose       every step, and each kubectl command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to every kubectl call, such as --context.
+
+Examples:
+  kres
+  kres --sort mem
+  kres --pods k8s-worker-2
+  kres -- --context kubernetes-admin@kubernetes
+
+Needs: kubectl and jq. metrics-server in the cluster for the usage
+       columns. See man kres.
+Exit: 0 ok, also when a node is flagged, 1 kubectl failed, 2 bad usage,
+      3 missing tool.
+EOF
+}
+
+read -r -d '' UNITS_JQ <<'JQ'
+def cpu_m: if . == null then 0 else tostring as $s |
+    if ($s | endswith("m")) then ($s[:-1] | tonumber)
+    elif ($s | endswith("u")) then ($s[:-1] | tonumber / 1000)
+    elif ($s | endswith("n")) then ($s[:-1] | tonumber / 1000000)
+    else ($s | tonumber * 1000) end end;
+def mem_b: if . == null then 0 else tostring as $s |
+    ({"Ki":1024,"Mi":1048576,"Gi":1073741824,"Ti":1099511627776,"Pi":1125899906842624,
+      "k":1000,"K":1000,"M":1000000,"G":1000000000,"T":1000000000000}) as $u |
+    ($s | capture("^(?<n>[0-9.eE+-]+)(?<u>[A-Za-z]*)$")) as $m |
+    ($m.n | tonumber) * ($u[$m.u] // 1) end;
+JQ
+
+# name, allocatable cpu in millicores, allocatable memory in bytes.
+NODES_JQ="$UNITS_JQ"'
+.items[] | [.metadata.name, (.status.allocatable.cpu | cpu_m), (.status.allocatable.memory | mem_b)]
+| map(tostring) | join("\t")'
+
+# node, namespace, name, cpu request, memory request. A pod asks for the
+# larger of its containers together and its biggest init container, plus
+# its overhead, the same sum the scheduler uses.
+PODS_JQ="$UNITS_JQ"'
+def req(f): ([.spec.containers[] | .resources.requests[f] | if f == "cpu" then cpu_m else mem_b end] | add // 0) as $run |
+    ([.spec.initContainers[]? | .resources.requests[f] | if f == "cpu" then cpu_m else mem_b end] | max // 0) as $init |
+    ([$run, $init] | max) + (.spec.overhead[f] // null | if f == "cpu" then cpu_m else mem_b end);
+.items[] | select(.spec.nodeName != null) |
+[.spec.nodeName, .metadata.namespace, .metadata.name, req("cpu"), req("memory")]
+| map(tostring) | join("\t")'
+
+# awk helpers for units and text.
+read -r -d '' AWK_UNITS <<'AWK'
+function cpu_m(s) {
+    if (s ~ /m$/) return substr(s, 1, length(s) - 1) + 0
+    if (s ~ /n$/) return substr(s, 1, length(s) - 1) / 1000000
+    if (s ~ /u$/) return substr(s, 1, length(s) - 1) / 1000
+    return s * 1000
+}
+function mem_b(s,    n, u) {
+    n = s + 0; u = s; sub(/^[0-9.]+/, "", u)
+    if (u == "Ki") return n * 1024
+    if (u == "Mi") return n * 1048576
+    if (u == "Gi") return n * 1073741824
+    if (u == "Ti") return n * 1099511627776
+    if (u == "k" || u == "K") return n * 1000
+    if (u == "M") return n * 1000000
+    if (u == "G") return n * 1000000000
+    return n
+}
+function cpu_t(m) {
+    if (m < 1000) return sprintf("%dm", m + 0.5)
+    if (m < 10000) return sprintf("%.1f", m / 1000)
+    return sprintf("%d", m / 1000 + 0.5)
+}
+function mem_t(b) {
+    if (b < 1073741824) return sprintf("%dMi", b / 1048576 + 0.5)
+    if (b < 10737418240) return sprintf("%.1fGi", b / 1073741824)
+    return sprintf("%dGi", b / 1073741824 + 0.5)
+}
+function pct(a, b) { return b > 0 ? sprintf("%d%%", a * 100 / b + 0.5) : "-" }
+AWK
+
+node_view() {
+    local n
+    n=$(grep -c . "$TMP/nodes.tsv")
+    (( TB_QUIET )) || echo "context ${KCTX:-none}, $(tb_plural "$n" node)"
+    awk -F '\t' -v sort="$sort" -v quiet="$TB_QUIET" "$AWK_UNITS"'
+        FILENAME == ARGV[1] { order[++nn] = $1; acpu[$1] = $2; amem[$1] = $3; next }
+        FILENAME == ARGV[2] { rcpu[$1] += $4; rmem[$1] += $5; next }
+        FILENAME == ARGV[3] { split($0, f, " "); ucpu[f[1]] = cpu_m(f[2]); umem[f[1]] = mem_b(f[4]); has[f[1]] = 1; next }
+        END {
+            w = 4
+            for (i = 1; i <= nn; i++) if (length(order[i]) > w) w = length(order[i])
+            w += 2
+            # Sort by the share of requests, highest first, when asked.
+            for (i = 1; i <= nn; i++) {
+                k = order[i]
+                key[i] = (sort == "cpu") ? (acpu[k] ? rcpu[k] / acpu[k] : 0) : (sort == "mem") ? (amem[k] ? rmem[k] / amem[k] : 0) : -i
+            }
+            for (i = 2; i <= nn; i++)
+                for (j = i; j > 1 && key[j] > key[j - 1]; j--) {
+                    t = key[j]; key[j] = key[j - 1]; key[j - 1] = t
+                    t = order[j]; order[j] = order[j - 1]; order[j - 1] = t
+                }
+            printf "%-" w "s%-22s%s\n", "", "CPU", "MEMORY"
+            printf "%-" w "s%-11s%-11s%-12s%s\n", "NODE", "requests", "used", "requests", "used"
+            for (i = 1; i <= nn; i++) {
+                k = order[i]
+                uc = has[k] ? cpu_t(ucpu[k]) " " pct(ucpu[k], acpu[k]) : "-"
+                um = has[k] ? mem_t(umem[k]) " " pct(umem[k], amem[k]) : "-"
+                printf "%-" w "s%-11s%-11s%-12s%s\n", k, cpu_t(rcpu[k]) " " pct(rcpu[k], acpu[k]), uc,
+                    mem_t(rmem[k]) " " pct(rmem[k], amem[k]), um
+            }
+            if (quiet) exit
+            for (i = 1; i <= nn; i++) {
+                k = order[i]
+                if (acpu[k] && rcpu[k] / acpu[k] >= 0.9)
+                    printf "! %s has %s of its cpu requested, new pods\n  asking for more than %s will stay Pending there\n",
+                        k, pct(rcpu[k], acpu[k]), cpu_t(acpu[k] > rcpu[k] ? acpu[k] - rcpu[k] : 0)
+                if (amem[k] && rmem[k] / amem[k] >= 0.9)
+                    printf "! %s has %s of its memory requested, new pods\n  asking for more than %s will stay Pending there\n",
+                        k, pct(rmem[k], amem[k]), mem_t(amem[k] > rmem[k] ? amem[k] - rmem[k] : 0)
+            }
+        }' "$TMP/nodes.tsv" "$TMP/req.tsv" "$TMP/top.txt"
+}
+
+pod_view() {
+    local n
+    n=$(grep -c . "$TMP/req.tsv")
+    (( TB_QUIET )) || echo "context ${KCTX:-none}, node $node, $(tb_plural "$n" pod)"
+    awk -F '\t' -v sort="$sort" -v quiet="$TB_QUIET" "$AWK_UNITS"'
+        FILENAME == ARGV[1] { k = $2 "/" $3; order[++nn] = k; short[k] = $3; rcpu[k] = $4; rmem[k] = $5; next }
+        FILENAME == ARGV[2] { split($0, f, " "); k = f[1] "/" f[2]; ucpu[k] = cpu_m(f[3]); umem[k] = mem_b(f[4]); has[k] = 1; next }
+        END {
+            w = 3
+            for (i = 1; i <= nn; i++) if (length(order[i]) > w) w = length(order[i])
+            w += 2
+            for (i = 1; i <= nn; i++) {
+                k = order[i]
+                key[i] = (sort == "cpu") ? rcpu[k] : (sort == "mem") ? rmem[k] : -i
+            }
+            for (i = 2; i <= nn; i++)
+                for (j = i; j > 1 && key[j] > key[j - 1]; j--) {
+                    t = key[j]; key[j] = key[j - 1]; key[j - 1] = t
+                    t = order[j]; order[j] = order[j - 1]; order[j - 1] = t
+                }
+            printf "%-" w "s%-9s%-7s%-9s%s\n", "POD", "CPU req", "used", "MEM req", "used"
+            for (i = 1; i <= nn; i++) {
+                k = order[i]
+                printf "%-" w "s%-9s%-7s%-9s%s\n", k, rcpu[k] ? cpu_t(rcpu[k]) : "-", has[k] ? cpu_t(ucpu[k]) : "-",
+                    rmem[k] ? mem_t(rmem[k]) : "-", has[k] ? mem_t(umem[k]) : "-"
+            }
+            if (quiet) exit
+            for (i = 1; i <= nn; i++) {
+                k = order[i]
+                if (has[k] && rmem[k] > 0 && umem[k] > 2 * rmem[k])
+                    printf "! %s uses %s against a %s memory request\n", short[k], mem_t(umem[k]), mem_t(rmem[k])
+                if (has[k] && rcpu[k] > 0 && ucpu[k] > 2 * rcpu[k])
+                    printf "! %s uses %s cpu against a %s request\n", short[k], cpu_t(ucpu[k]), cpu_t(rcpu[k])
+            }
+        }' "$TMP/req.tsv" "$TMP/top.txt"
+}
+
+main() {
+    local sel="status.phase!=Succeeded,status.phase!=Failed" names
+    tb_need kubectl jq
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    kube_to "$TMP/nodes.json" get nodes -o json || kube_fail
+    jq -r "$NODES_JQ" "$TMP/nodes.json" > "$TMP/nodes.tsv" || tb_die 1 "kubectl gave output jq cannot read"
+    [[ -s $TMP/nodes.tsv ]] || tb_die 1 "the cluster has no nodes"
+    if [[ -n $node ]]; then
+        if ! cut -f1 "$TMP/nodes.tsv" | grep -qxF -- "$node"; then
+            mapfile -t names < <(cut -f1 "$TMP/nodes.tsv")
+            tb_die 1 "no node $node. Nodes are $(join_and "${names[@]}")"
+        fi
+        sel+=",spec.nodeName=$node"
+    fi
+    kube_to "$TMP/pods.json" get pods -A --field-selector "$sel" -o json || kube_fail
+    jq -r "$PODS_JQ" "$TMP/pods.json" > "$TMP/req.tsv" || tb_die 1 "kubectl gave output jq cannot read"
+
+    local top_ok=1
+    if [[ -n $node ]]; then
+        kube_to "$TMP/top.txt" top pods -A --no-headers || top_ok=0
+    else
+        kube_to "$TMP/top.txt" top nodes --no-headers || top_ok=0
+    fi
+    if (( ! top_ok )); then
+        tb_say "kubectl top failed: $(grep -m1 . "$TMP/kerr")"
+        : > "$TMP/top.txt"
+    fi
+    if [[ -n $node ]]; then pod_view; else node_view; fi
+    if (( ! top_ok )) && (( ! TB_QUIET )); then
+        if grep -qi 'metrics api not available\|metrics.k8s.io\|could not find the requested resource' "$TMP/kerr"; then
+            tb_info "$TB_CMD: no metrics API, usage columns are empty."
+            tb_info "$TB_CMD: install metrics-server to fill them."
+        else
+            tb_info "$TB_CMD: kubectl top failed, usage columns are empty: $(grep -m1 . "$TMP/kerr")"
+        fi
+    fi
+    return 0
+}
+
+node=""
+sort=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --pods) tb_optarg "$@"; node=$2; shift ;;
+        --sort) tb_optarg "$@"
+                case $2 in
+                    cpu|mem) sort=$2 ;;
+                    memory) sort=mem ;;
+                    *) tb_usage_error "--sort takes cpu or mem, not $2" ;;
+                esac
+                shift ;;
+        --)     shift; TB_PASS=("$@"); break ;;
+        -*)     tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)      tb_usage_error "kres takes no arguments, use --pods NODE for one node" ;;
+    esac
+    shift
+done
+
+main
+exit $?
