@@ -123,6 +123,8 @@ mode() { stat -c %a "$1"; }
 @test "system folders and home are refused with exit 4" {
     # -n, so a broken check could never change a real system folder.
     for p in / /etc /usr /bin /boot /etc/ /usr/bin; do
+        # Containers often have no /boot.
+        [ -e "$p" ] || continue
         run fixperms -n "$p"
         [ "$status" -eq 4 ]
         [[ $output == *"system folder"* ]]
