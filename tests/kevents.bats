@@ -41,6 +41,7 @@ echo "kubectl $*" >> "$CALLS"
 case " $* " in
     *" config view "*) printf 'kind-kind\tshop' ;;
     *" --watch-only "*)
+        [[ -n ${HANG:-} ]] && { echo $$ > "$FX/watch.pid"; exec sleep 30; }
         jq -c '{type: "ADDED", object: .items[0]}' "$FX/events.json"
         jq -c '.items[1]' "$FX/events.json" ;;
     *" get events "*)
@@ -133,6 +134,18 @@ SH
     [[ $output == *"following warnings in namespace shop, Ctrl+C stops"* ]]
     [[ ${lines[-2]} == *"  Warning  pod/api-1  BackOff x14" ]]
     grep -q -- "get events -n shop --field-selector type=Warning --watch-only -o json" "$CALLS"
+}
+
+@test "stopping -f stops the kubectl watch too" {
+    HANG=1 kevents -q -f >/dev/null 2>&1 3>&- &
+    local pid=$! i
+    for i in $(seq 50); do [ -s "$FX/watch.pid" ] && break; sleep 0.1; done
+    [ -s "$FX/watch.pid" ]
+    kill -TERM "$pid"
+    for i in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$pid" 2>/dev/null; then echo "kevents still running"; false; fi
+    wait "$pid"
+    if kill -0 "$(cat "$FX/watch.pid")" 2>/dev/null; then echo "kubectl still running"; false; fi
 }
 
 @test "an unreachable kind cluster gets a hint" {

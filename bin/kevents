@@ -161,17 +161,28 @@ main() {
     (( all )) && target="in every namespace"
     [[ -n $obj ]] && target="for $obj"
     tb_info "following $what $target, Ctrl+C stops"
-    trap 'exit 0' INT TERM
+    # Both sides run in the background so a signal reaches the trap at once.
+    # The trap stops kubectl, which a plain kill would leave running, then
+    # lets the printer finish before the temp folder goes.
+    mkfifo "$TMP/watch" || tb_die 1 "cannot make a pipe in $TMP"
+    WATCH="" SHOWN=""
+    trap '[[ -n $WATCH ]] && kill "$WATCH" 2>/dev/null; [[ -n $SHOWN ]] && wait "$SHOWN"; exit 0' INT TERM HUP
     local started rc
     while :; do
         started=$(date +%s)
         tb_show kubectl "${get[@]}" --watch-only -o json ${TB_PASS[@]+"${TB_PASS[@]}"}
-        kubectl "${get[@]}" --watch-only -o json ${TB_PASS[@]+"${TB_PASS[@]}"} 2>"$TMP/kerr" |
-            jq --unbuffered -r --arg today "$today" --argjson all "$all" --argjson warn "$warnings" "$FMT_JQ"'
-                (if has("object") and has("type") then .object else . end)
-                | select($warn == 0 or .type == "Warning") | fmt($today; $all == 1)' |
-            print_events
-        rc=${PIPESTATUS[0]}
+        kubectl "${get[@]}" --watch-only -o json ${TB_PASS[@]+"${TB_PASS[@]}"} >"$TMP/watch" 2>"$TMP/kerr" &
+        WATCH=$!
+        jq --unbuffered -r --arg today "$today" --argjson all "$all" --argjson warn "$warnings" "$FMT_JQ"'
+            (if has("object") and has("type") then .object else . end)
+            | select($warn == 0 or .type == "Warning") | fmt($today; $all == 1)' <"$TMP/watch" |
+            print_events &
+        SHOWN=$!
+        wait "$WATCH"
+        rc=$?
+        WATCH=""
+        wait "$SHOWN"
+        SHOWN=""
         (( rc == 0 )) || kube_fail
         # The API server closes a watch after 30 to 60 minutes. Start a new
         # one then, but stop when kubectl ended right away.
