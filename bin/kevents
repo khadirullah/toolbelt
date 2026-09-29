@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# kevents: show recent events in time order, newest last.
+set -uo pipefail
+TB_CMD=kevents
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: kevents [-n NAMESPACE | -A] [-w] [--since TIME] [-f] [OBJECT]
+               [-- kubectl options]
+
+Show recent events in time order, newest last.
+
+Options:
+  -n, --namespace NS  one namespace, the context's own by default
+  -A, --all-namespaces
+                      every namespace
+  -w, --warnings      warnings only
+  --since TIME        events newer than 10m, 1h, 2d and so on, 1h by
+                      default, or all
+  -f, --follow        keep printing new events as they arrive
+  -q, --quiet         no summary line
+  -v, --verbose       every step, and each kubectl command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to kubectl get events, such as --context.
+
+Examples:
+  kevents -n shop --since 15m
+  kevents -n shop pod/api-5b8c9d7f6-mk4tn
+  kevents -A -w -f
+  kevents -- --context kind-kind
+
+Needs: kubectl and jq. See man kevents.
+Exit: 0 ok, also with no events, 1 kubectl failed, 2 bad usage,
+      3 missing tool.
+EOF
+}
+
+# One event as fields split by \x1f: time, type, object, reason, count,
+# message. $all adds the namespace to the object.
+read -r -d '' FMT_JQ <<'JQ'
+def epoch: if . == null or . == "" then null else sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 end;
+def t: ([.lastTimestamp, .series.lastObservedTime, .eventTime, .metadata.creationTimestamp]
+    | map(select(. != null and . != "") | epoch) | max) // 0;
+def short: {"Pod": "pod", "Deployment": "deploy", "ReplicaSet": "rs", "Service": "svc", "Node": "node",
+    "StatefulSet": "sts", "DaemonSet": "ds", "Job": "job", "CronJob": "cronjob",
+    "PersistentVolumeClaim": "pvc", "PersistentVolume": "pv", "HorizontalPodAutoscaler": "hpa",
+    "Ingress": "ingress", "ConfigMap": "cm", "Secret": "secret", "Namespace": "ns",
+    "ServiceAccount": "sa", "Endpoints": "ep"}[.] // ascii_downcase;
+def fmt($today; $all):
+    t as $t |
+    ($t | strflocaltime("%Y-%m-%d")) as $day |
+    [ (if $day == $today then ($t | strflocaltime("%H:%M:%S")) else ($t | strflocaltime("%b %d %H:%M")) end),
+      (.type // "Normal"),
+      ((if $all and .involvedObject.namespace then .involvedObject.namespace + "/" else "" end) +
+        ((.involvedObject.kind // "object") | short) + "/" + (.involvedObject.name // "?")),
+      (.reason // ""),
+      ((.series.count // .count // 1) | tostring),
+      (.message // .note // "" | gsub("[\t\n\r\u001f]+"; " ") | gsub("^ +| +$"; ""))
+    ] | join("\u001f");
+JQ
+
+# kubectl kinds and short names as the Kind that events use.
+kind_of() {
+    case ${1,,} in
+        po|pod|pods) echo Pod ;;
+        deploy|deployment|deployments) echo Deployment ;;
+        rs|replicaset|replicasets) echo ReplicaSet ;;
+        svc|service|services) echo Service ;;
+        no|node|nodes) echo Node ;;
+        sts|statefulset|statefulsets) echo StatefulSet ;;
+        ds|daemonset|daemonsets) echo DaemonSet ;;
+        job|jobs) echo Job ;;
+        cj|cronjob|cronjobs) echo CronJob ;;
+        pvc|persistentvolumeclaim|persistentvolumeclaims) echo PersistentVolumeClaim ;;
+        pv|persistentvolume|persistentvolumes) echo PersistentVolume ;;
+        hpa|horizontalpodautoscaler|horizontalpodautoscalers) echo HorizontalPodAutoscaler ;;
+        ing|ingress|ingresses) echo Ingress ;;
+        cm|configmap|configmaps) echo ConfigMap ;;
+        secret|secrets) echo Secret ;;
+        ns|namespace|namespaces) echo Namespace ;;
+        sa|serviceaccount|serviceaccounts) echo ServiceAccount ;;
+        ep|endpoints) echo Endpoints ;;
+        *) echo "${1^}" ;;
+    esac
+}
+
+# Print events from fields on stdin, two lines each. Counts go to $TMP/count.
+print_events() {
+    local f pad n=0 w=0 type
+    tb_color_stdout
+    while IFS=$'\x1f' read -r -a f; do
+        (( ${#f[@]} >= 4 )) || continue
+        ((n++))
+        [[ ${f[1]} == Warning ]] && ((w++))
+        pad=$(printf '%*s' "$(( ${#f[0]} + 2 ))" "")
+        type=$(printf '%-7s' "${f[1]}")
+        [[ ${f[1]} == Warning ]] && type="$C_YEL$type$C_OFF"
+        local reason=${f[3]}
+        [[ ${f[4]:-1} =~ ^[0-9]+$ ]] && (( ${f[4]:-1} > 1 )) && reason+=" x${f[4]}"
+        printf '%s  %s  %s  %s\n' "${f[0]}" "$type" "${f[2]}" "$reason"
+        [[ -n ${f[5]:-} ]] && printf '%s%s\n' "$pad" "${f[5]}"
+    done
+    echo "$n $w" > "$TMP/count"
+}
+
+main() {
+    local get=(get events) sel="" scope cut=0 today n w
+    tb_need kubectl jq
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    [[ -n $ns ]] || ns=$KNS
+    if (( all )); then
+        get+=(-A)
+        scope="every namespace"
+    else
+        get+=(-n "$ns")
+        scope="$ns"
+    fi
+    if [[ -n $obj ]]; then
+        if [[ $obj == */* ]]; then
+            sel="involvedObject.kind=$(kind_of "${obj%%/*}"),involvedObject.name=${obj#*/}"
+        else
+            sel="involvedObject.name=$obj"
+        fi
+    fi
+    (( warnings )) && sel+="${sel:+,}type=Warning"
+    [[ -n $sel ]] && get+=(--field-selector "$sel")
+    (( since_s > 0 )) && cut=$(( $(date +%s) - since_s ))
+    today=$(date +%F)
+
+    kube_to "$TMP/events" "${get[@]}" -o json || kube_fail
+    jq -r --arg today "$today" --argjson all "$all" --argjson cut "$cut" --argjson warn "$warnings" "$FMT_JQ"'
+        [.items[]? | select(t >= $cut and ($warn == 0 or .type == "Warning"))] | sort_by(t) | .[]
+        | fmt($today; $all == 1)' "$TMP/events" \
+        > "$TMP/lines" || tb_die 1 "kubectl gave output jq cannot read"
+    print_events < "$TMP/lines"
+    read -r n w < "$TMP/count"
+
+    local what=events
+    (( warnings )) && what=warnings
+    local span="in the last $since"
+    [[ $since == all ]] && span="kept by the cluster"
+    if (( n == 0 )); then
+        if [[ -n $obj ]]; then
+            tb_info "$TB_CMD: no $what for $obj $span"
+        else
+            tb_info "$TB_CMD: no $what in $scope $span"
+        fi
+    elif (( ! TB_QUIET )); then
+        echo "$(tb_plural "$n" event), $(tb_plural "$w" warning)"
+    fi
+    (( follow )) || return 0
+
+    local target="in namespace $ns"
+    (( all )) && target="in every namespace"
+    [[ -n $obj ]] && target="for $obj"
+    tb_info "following $what $target, Ctrl+C stops"
+    trap 'exit 0' INT TERM
+    local started rc
+    while :; do
+        started=$(date +%s)
+        tb_show kubectl "${get[@]}" --watch-only -o json ${TB_PASS[@]+"${TB_PASS[@]}"}
+        kubectl "${get[@]}" --watch-only -o json ${TB_PASS[@]+"${TB_PASS[@]}"} 2>"$TMP/kerr" |
+            jq --unbuffered -r --arg today "$today" --argjson all "$all" --argjson warn "$warnings" "$FMT_JQ"'
+                (if has("object") and has("type") then .object else . end)
+                | select($warn == 0 or .type == "Warning") | fmt($today; $all == 1)' |
+            print_events
+        rc=${PIPESTATUS[0]}
+        (( rc == 0 )) || kube_fail
+        # The API server closes a watch after 30 to 60 minutes. Start a new
+        # one then, but stop when kubectl ended right away.
+        (( $(date +%s) - started >= 60 )) || return 0
+        today=$(date +%F)
+        tb_say "the watch ended, starting a new one"
+    done
+}
+
+ns=""
+all=0
+warnings=0
+follow=0
+since=1h
+since_s=3600
+obj=""
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--namespace)      tb_optarg "$@"; ns=$2; shift ;;
+        -A|--all-namespaces) all=1 ;;
+        -w|--warnings)       warnings=1 ;;
+        -f|--follow)         follow=1 ;;
+        --since)             tb_optarg "$@"
+                             if [[ $2 == all ]]; then
+                                 since=all since_s=0
+                             elif [[ $2 =~ ^([0-9]+)(s|m|min|h|d)$ ]]; then
+                                 since=$2
+                                 case ${BASH_REMATCH[2]} in
+                                     s) since_s=${BASH_REMATCH[1]} ;;
+                                     m|min) since_s=$(( BASH_REMATCH[1] * 60 )) ;;
+                                     h) since_s=$(( BASH_REMATCH[1] * 3600 )) ;;
+                                     d) since_s=$(( BASH_REMATCH[1] * 86400 )) ;;
+                                 esac
+                             else
+                                 tb_usage_error "--since takes a time such as 10m, 1h or 2d, or all"
+                             fi
+                             shift ;;
+        --)                  shift; TB_PASS=("$@"); break ;;
+        -*)                  tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            [[ -z $obj ]] || tb_usage_error "one object at a time, not $obj and $1"
+            obj=$1 ;;
+    esac
+    shift
+done
+if (( all )) && [[ -n $ns ]]; then
+    tb_usage_error "use -n or -A, not both"
+fi
+
+main
+exit $?
