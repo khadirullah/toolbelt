@@ -1,0 +1,217 @@
+.TH "AGAIN" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+again \- run a command again until it works
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+again [options] [--] command [args]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBagain\fR runs a command. If the command fails, \fBagain\fR waits and runs it again. It stops at the first try that exits 0, or after the last try. Use it for a download that drops, a service that is still starting, or an API that rate limits you.
+.PP
+The first wait is 1 second. Each wait after that doubles, so the waits go 1, 2, 4, 8 and 16 seconds. No single wait is longer than 60 seconds. With the defaults, \fBagain\fR makes 5 tries and waits 15 seconds in all.
+.PP
+After each failed try, \fBagain\fR prints one line on stderr with the try number, the exit code and the next wait:
+.PP
+.RS 4
+.nf
+again: try 2 of 5 failed, exit 7, next in 2s
+.fi
+.RE
+.PP
+When a try works after one or more failures, it says how long the whole run took. When the first try works, \fBagain\fR prints nothing of its own, so you can put it in front of a command in a script and the output stays the same.
+.PP
+After the last try, \fBagain\fR exits with the command's own exit code. A script that checks for \fBcurl\fR exit 22 still sees 22.
+.PP
+The command's output passes through untouched. \fBagain\fR never reads it, never hides it and never changes it.
+.SS Where the command starts
+.PP
+The command starts at the first word that is not an option of \fBagain\fR, or right after \fB\-\-\fR. Everything from there on belongs to the command, so its own options never mix with those of \fBagain\fR:
+.PP
+.RS 4
+.nf
+$ again -n 3 curl -fsS -d @body.json https://example.com/api
+.fi
+.RE
+.PP
+Here \fB\-n 3\fR goes to \fBagain\fR, and \fB\-fsS\fR and \fB\-d\fR go to \fBcurl\fR. Use \fB\-\-\fR when the command name itself starts with a dash, or when you want the line to read clearly in a script.
+.SS What it can run
+.PP
+\fBagain\fR runs programs and scripts found on your \fBPATH\fR, and the builtins of bash. It cannot run your shell's aliases or functions, because it runs in its own process. For a pipeline or a shell loop, hand the whole thing to \fBsh \-c\fR:
+.PP
+.RS 4
+.nf
+$ again -- sh -c 'kubectl get pod api-0 | grep -q Running'
+.fi
+.RE
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-times N\fR
+Tries in total, counting the first. 5 by default. 1 means a single try, with no retry.
+.TP
+\fB\-d\fR, \fB\-\-delay SECS\fR
+The first wait, in whole seconds. 1 by default. 0 retries at once.
+.TP
+\fB\-\-max\-delay SECS\fR
+The longest single wait. 60 by default. A doubling wait stops growing here.
+.TP
+\fB\-\-fixed\fR
+Wait the same time between every try, the value of \fB\-\-delay\fR, with no doubling.
+.TP
+\fB\-\-on CODE\fR
+Try again only when the command exits with this code. Repeat it for more codes. Any other failing code stops \fBagain\fR at once.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print none of the try lines. The command's own output and the final "gave up" line still show.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the command line before each try, as \fB+ curl \-fsS https://example.com/health\fR.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH HOW THE WAITS GROW
+.PP
+With \fB\-d 10 \-\-max\-delay 30\fR the waits go 10, 20, 30, 30, 30. With \fB\-\-fixed \-d 5\fR every wait is 5 seconds.
+.TP
+5
+First wait (\fB\-d\fR): 1. Waits: 1 2 4 8. Longest total wait: 15s
+.TP
+10
+First wait (\fB\-d\fR): 1. Waits: 1 2 4 8 16 32 60 60 60. Longest total wait: 243s
+.TP
+10
+First wait (\fB\-d\fR): 5, with \fB\-\-fixed\fR. Waits: 5 each, 9 times. Longest total wait: 45s
+.TP
+3
+First wait (\fB\-d\fR): 0. Waits: 0 0. Longest total wait: 0s
+.PP
+The waits are whole seconds. The total time also counts how long each try itself took.
+.SH PICKING WHICH FAILURES TO RETRY
+.PP
+Some failures are worth a retry and some are not. A timeout may pass on the next try. A wrong password will not. \fB\-\-on\fR tells \fBagain\fR which exit codes mean "try again". Any other exit code ends the run at once, with that code:
+.PP
+.RS 4
+.nf
+$ again --on 6 --on 7 --on 28 -- curl -fsS https://example.com/health
+.fi
+.RE
+.PP
+For \fBcurl\fR, 6 means the name did not resolve, 7 that the connection failed and 28 a timeout. A 404, exit 22 with \fB\-f\fR, stops at once, because asking again will not fix it.
+.PP
+\fBrsync\fR uses 23 and 24 for partial transfers and 30 and 35 for timeouts. \fBssh\fR uses 255 for a connection error.
+.SH STOPPING IT
+.PP
+Ctrl+C stops \fBagain\fR and the command it is running. It exits 130, the usual code for Ctrl+C.
+.SH PASS\-THROUGH
+.PP
+None. Everything after \fB\-\-\fR, or from the first word that is not an option, is the command that \fBagain\fR runs.
+.SH NEEDS
+.PP
+Bash only. \fBsleep\fR from coreutils does the waiting. It is on every Linux system, BusyBox included.
+.SH EXAMPLES
+.SS A health check while a service starts
+.PP
+.RS 4
+.nf
+$ again -- curl -fsS https://example.com/health
+curl: (7) Failed to connect to example.com port 443
+again: try 1 of 5 failed, exit 7, next in 1s
+curl: (7) Failed to connect to example.com port 443
+again: try 2 of 5 failed, exit 7, next in 2s
+{"status":"ok"}
+again: try 3 of 5 worked, 3.1s in total
+.fi
+.RE
+.SS Giving up
+.PP
+.RS 4
+.nf
+$ again -n 3 -- ping -c1 -W1 10.0.0.9
+PING 10.0.0.9 (10.0.0.9) 56(84) bytes of data.
+
+--- 10.0.0.9 ping statistics ---
+1 packets transmitted, 0 received, 100% packet loss, time 0ms
+
+again: try 1 of 3 failed, exit 1, next in 1s
+\&...
+again: try 2 of 3 failed, exit 1, next in 2s
+\&...
+again: gave up after 3 tries, last exit 1
+$ echo $?
+1
+.fi
+.RE
+.SS A rollout, checked every 5 seconds
+.PP
+.RS 4
+.nf
+$ again -n 10 -d 5 --fixed -- kubectl rollout status deploy/api --timeout=30s
+error: deployment "api" exceeded its progress deadline
+again: try 1 of 10 failed, exit 1, next in 5s
+deployment "api" successfully rolled out
+again: try 2 of 10 worked, 36s in total
+.fi
+.RE
+.SS Long waits with a cap
+.PP
+.RS 4
+.nf
+$ again -n 6 -d 10 --max-delay 30 -- false
+again: try 1 of 6 failed, exit 1, next in 10s
+again: try 2 of 6 failed, exit 1, next in 20s
+again: try 3 of 6 failed, exit 1, next in 30s
+again: try 4 of 6 failed, exit 1, next in 30s
+again: try 5 of 6 failed, exit 1, next in 30s
+again: gave up after 6 tries, last exit 1
+.fi
+.RE
+.SS Only for the codes that can pass
+.PP
+.RS 4
+.nf
+$ again --on 75 -n 3 -- sh -c 'exit 1'
+again: try 1 of 3 failed, exit 1, which is not in --on, so no more tries
+.fi
+.RE
+.SS Seeing each command
+.PP
+.RS 4
+.nf
+$ again -v -n 2 -d 5 --fixed -- sh -c 'exit 1'
++ sh -c 'exit 1'
+again: try 1 of 2 failed, exit 1, next in 5s
++ sh -c 'exit 1'
+again: gave up after 2 tries, last exit 1
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBagain: myfunc: command not found\fR : The name is not a program on your \fBPATH\fR or a bash builtin. Shell functions and aliases live only in your shell. Put the work in a script, or run \fBagain \-\- bash \-c 'source ~/.bashrc; myfunc'\fR.
+.PP
+\fBagain: \-\-times needs a whole number of 1 or more, not 0\fR : \fB\-n\fR counts every try, the first one too. \fB\-n 1\fR runs the command once.
+.PP
+It retries a command that can never work : Some commands exit 1 for every kind of error. Use \fB\-\-on\fR with the codes that mean a passing problem, or lower \fB\-n\fR.
+.PP
+The waits are longer than I asked for : \fB\-\-max\-delay\fR is 60 by default, but \fB\-d\fR above it is cut down to it. \fB\-d 90\fR waits 60 seconds unless you also give \fB\-\-max\-delay 90\fR.
+.SH EXIT STATUS
+.TP
+0
+A try worked.
+.TP
+2
+Bad usage, such as \fB\-n 0\fR or no command.
+.TP
+127
+The command does not exist.
+.TP
+130
+Stopped with Ctrl+C.
+.TP
+other
+The exit code of the command's last try.
+.SH SEE ALSO
+.PP
+\fBwaitfor\fR, \fBnotify\-done\fR, \fBtimeout(1)\fR

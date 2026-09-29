@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# again: run a command again until it works.
+set -uo pipefail
+TB_CMD=again
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: again [options] [--] command [args]
+
+Run a command again until it works.
+
+Options:
+  -n, --times N       tries in total, 5 by default
+  -d, --delay SECS    the first wait, 1 by default, then it doubles
+  --max-delay SECS    the longest single wait, 60 by default
+  --fixed             wait the same time between every try
+  --on CODE           try again only after this exit code, can repeat
+  -q, --quiet         only the command's output and the last error
+  -v, --verbose       the command line before each try
+  -h, --help          this help
+
+Examples:
+  again -- curl -fsS https://example.com/health
+  again -n 10 -d 5 --fixed -- kubectl rollout status deploy/api
+  again --on 75 -- rsync -a src/ backup:/srv/src/
+
+Needs: bash only. See man again.
+Exit: 0 when a try worked, else the command's last exit code, 2 bad usage.
+EOF
+}
+
+# A whole number of seconds or tries. Returns 1 when it is not one.
+is_count() { [[ $1 =~ ^[0-9]{1,6}$ ]]; }
+
+# True when the exit code is one --on asked for, or when --on was not given.
+retry_on() {
+    local c
+    (( ${#on_codes[@]} )) || return 0
+    for c in "${on_codes[@]}"; do
+        (( c == $1 )) && return 0
+    done
+    return 1
+}
+
+main() {
+    local try=1 rc=0 wait=$delay start
+    if ! type -t -- "$1" >/dev/null 2>&1; then
+        tb_err "$1: command not found"
+        exit 127
+    fi
+    start=$(tb_now_ms)
+    while :; do
+        tb_show "$@"
+        "$@"
+        rc=$?
+        if (( rc == 0 )); then
+            (( try > 1 )) && tb_info "$TB_CMD: try $try of $times worked, $(tb_elapsed $(( $(tb_now_ms) - start ))) in total"
+            return 0
+        fi
+        if ! retry_on "$rc"; then
+            tb_info "$TB_CMD: try $try of $times failed, exit $rc, which is not in --on, so no more tries"
+            return "$rc"
+        fi
+        if (( try >= times )); then
+            tb_err "gave up after $(tb_plural "$times" try tries), last exit $rc"
+            return "$rc"
+        fi
+        tb_info "$TB_CMD: try $try of $times failed, exit $rc, next in ${wait}s"
+        sleep "$wait"
+        (( try++ ))
+        if (( ! fixed )); then
+            wait=$(( wait * 2 ))
+            (( wait > max_delay )) && wait=$max_delay
+        fi
+    done
+}
+
+# Split the arguments into our options and the command, so the command's
+# own options, such as curl -fsS, are never bundled or read as ours.
+# Usage: split_command "short letters with a value" "long options with a value" "$@"
+# Sets OPTS, and CMD as -- followed by the command.
+split_command() {
+    local short=$1 long=" $2 " a i
+    shift 2
+    OPTS=() CMD=()
+    while (( $# )); do
+        a=$1
+        shift
+        case $a in
+            --) CMD=(-- "$@"); return ;;
+            --*=*) OPTS+=("$a") ;;
+            --*) OPTS+=("$a")
+                 if [[ $long == *" $a "* ]] && (( $# )); then OPTS+=("$1"); shift; fi ;;
+            -?*) OPTS+=("$a")
+                 for (( i = 1; i < ${#a}; i++ )); do
+                     [[ $short == *"${a:i:1}"* ]] || continue
+                     if (( i == ${#a} - 1 && $# )); then OPTS+=("$1"); shift; fi
+                     break
+                 done ;;
+            *) CMD=(-- "$a" "$@"); return ;;
+        esac
+    done
+}
+
+times=5 delay=1 max_delay=60 fixed=0 on_codes=()
+split_command "nd" "--times --delay --max-delay --on" "$@"
+tb_expand "nd" ${OPTS[@]+"${OPTS[@]}"} ${CMD[@]+"${CMD[@]}"}
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -n|--times)   tb_optarg "$@"; times=$2; shift
+                      is_count "$times" && (( 10#$times >= 1 )) || tb_usage_error "--times needs a whole number of 1 or more, not $times"
+                      times=$(( 10#$times )) ;;
+        -d|--delay)   tb_optarg "$@"; delay=$2; shift
+                      is_count "$delay" || tb_usage_error "--delay needs whole seconds, not $delay"
+                      delay=$(( 10#$delay )) ;;
+        --max-delay)  tb_optarg "$@"; max_delay=$2; shift
+                      is_count "$max_delay" || tb_usage_error "--max-delay needs whole seconds, not $max_delay"
+                      max_delay=$(( 10#$max_delay )) ;;
+        --fixed)      fixed=1 ;;
+        --on)         tb_optarg "$@"; shift
+                      [[ $1 =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= 255 )) || tb_usage_error "--on needs an exit code from 0 to 255, not $1"
+                      on_codes+=("$(( 10#$1 ))") ;;
+        --)           shift; break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            break ;;
+    esac
+    shift
+done
+
+(( $# )) || tb_usage_error "no command to run, put it after --"
+(( delay > max_delay )) && delay=$max_delay
+main "$@"
+exit $?
