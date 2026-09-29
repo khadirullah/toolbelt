@@ -120,6 +120,16 @@ setup() {
     [ "${lines[1]}" = "+ apt search ripgrep" ]
 }
 
+@test "a closed pipe after a search is not an error" {
+    tb_stub apt 'echo "htop/stable 3.4.1-1 amd64"; exit 141'
+    run pkg search htop
+    [ "$status" -eq 0 ]
+    [ "$output" = "htop/stable 3.4.1-1 amd64" ]
+    tb_stub apt 'exit 141'
+    run pkg install htop
+    [ "$status" -eq 1 ]
+}
+
 @test "a failing package manager exits 1" {
     tb_stub apt 'echo "E: Unable to locate package nosuch" >&2; exit 100'
     run pkg install nosuch

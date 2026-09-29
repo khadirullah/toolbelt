@@ -176,6 +176,11 @@ do_simple() {
     fi
     rc=$?
     (( dry_run )) && return 0
+    # 141 is SIGPIPE: the reader, such as head, closed the pipe. Not a failure
+    # for a command that only reads.
+    if (( rc == 141 )) && [[ $action != install && $action != remove ]]; then
+        return 0
+    fi
     if (( rc != 0 )); then
         tb_die 1 "${CMD[0]} $action stopped with exit $rc, see its message above"
     fi
