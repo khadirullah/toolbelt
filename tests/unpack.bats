@@ -442,6 +442,21 @@ mk_initrd() {
     restored
 }
 
+@test "a file that cannot look inside compressed data still finds the tar" {
+    # file 5.46 and later in a sandbox, as on Arch, cannot fork a decompressor.
+    local real
+    real=$(type -P file)
+    tb_stub file "case \" \$* \" in
+    *' -z '*) echo application/x-decompression-error-zlib-Fork-is-required-to-uncompress--but-disabled ;;
+    *) exec '$real' \"\$@\" ;;
+esac"
+    tar -czf backup.bin backup && rm -rf backup
+    run unpack -v backup.bin
+    [ "$status" -eq 0 ]
+    [[ $output == *"backup.bin: tar.gz, from the content"* ]]
+    restored
+}
+
 @test "a plain gz with a tar inside unpacks the tar" {
     tar -cf - backup | gzip > backup.gz
     rm -rf backup

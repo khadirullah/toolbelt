@@ -261,8 +261,9 @@ detect_content() {
     outer=$(file --brief --mime-type -- "$f" 2>/dev/null) || return 1
     if comp=$(mime_comp "$outer"); then
         inner=$(file --brief --mime-type -z -- "$f" 2>/dev/null)
-        if [[ $inner == "$outer" || -z $inner ]] && set_decomp "$comp" quiet; then
-            # file could not look inside, so decompress the first bytes.
+        # file could not look inside, so decompress the first bytes. A sandboxed
+        # file, as on Arch, answers application/x-decompression-error-... here.
+        if [[ $inner != application/x-tar && $inner != application/x-cpio ]] && set_decomp "$comp" quiet; then
             inner=$("${DECOMP[@]}" <"$f" 2>/dev/null | head -c 8192 | file --brief --mime-type - 2>/dev/null)
         fi
         case $inner in
