@@ -35,7 +35,13 @@ def layer(entries, gz=False):
                 i.size, i.mode = len(b), 0o4755 if kind == "suid" else 0o644
                 t.addfile(i, io.BytesIO(b))
     raw = buf.getvalue()
-    return gzip.compress(raw, mtime=0) if gz else raw
+    if not gz:
+        return raw
+    # GzipFile, since gzip.compress takes no mtime before python 3.8.
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as g:
+        g.write(raw)
+    return out.getvalue()
 
 l1 = layer([
     ("etc", "dir", None), ("etc/nginx", "dir", None),
