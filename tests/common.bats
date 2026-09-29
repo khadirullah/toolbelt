@@ -34,6 +34,7 @@ case \$cmd in
     run)    tb_run "\$@" ;;
     tmp)    tb_tmpdir d; echo "\$d" ;;
     freename) tb_free_name "\$@" ;;
+    bytes)  tb_bytes "\$@" ;;
     alive)  tb_alive "\$1" && echo alive || echo gone ;;
 esac
 SH
@@ -173,6 +174,19 @@ SH
     run demo tmp
     [ -n "$output" ]
     [ ! -e "$output" ]
+}
+
+@test "bytes counts the files in a folder, not the folders" {
+    find . -maxdepth 0 -printf '' 2>/dev/null || skip "BusyBox find counts to the kilobyte"
+    mkdir -p trip/sub
+    printf 'hello\n' > trip/a.txt
+    printf 'xy\n' > trip/sub/b.txt
+    # du -sb before coreutils 9 adds 4KB for each folder.
+    tb_stub du 'echo "8201	$3"'
+    run demo bytes trip trip/a.txt
+    [ "$output" = 15 ]
+    run demo bytes trip/sub
+    [ "$output" = 3 ]
 }
 
 @test "alive counts a zombie as gone" {
