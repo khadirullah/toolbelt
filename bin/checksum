@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# checksum: hash a file, or check it against a hash or SUMS file.
+set -uo pipefail
+TB_CMD=checksum
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: checksum [options] file ...
+       checksum [options] file hash
+       checksum [options] -c sums-file
+
+Hash a file, or check it against a hash or SUMS file.
+
+Options:
+  -a, --algo NAME     md5, sha1, sha256, sha512, b2 or b3, sha256 by default
+  -c, --check FILE    check every file listed in a SUMS file
+  --ignore-missing    with -c, skip listed files that are not here
+  --no-sums           print hashes only, never look for a SUMS file
+  -q, --quiet         only the result lines
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Examples:
+  checksum debian-13.1.0-amd64-netinst.iso
+  checksum notes.txt 9a0364b9e99bb480dd25e1f0284c8555
+  checksum -c SHA256SUMS
+  checksum -a b2 notes.txt
+
+Needs: sha256sum and its siblings, b2sum for b2, b3sum for b3. See man checksum.
+Exit: 0 ok, 1 a hash did not match or a file is missing, 2 bad usage,
+      3 missing tool, 4 refused.
+EOF
+}
+
+# The tool that makes a hash with an algorithm.
+algo_tool() {
+    case $1 in
+        md5) echo md5sum ;; sha1) echo sha1sum ;; sha256) echo sha256sum ;;
+        sha512) echo sha512sum ;; b2) echo b2sum ;; b3) echo b3sum ;;
+        *) return 1 ;;
+    esac
+}
+
+# The algorithms that make a hash this many hex digits long, most likely first.
+algos_for_length() {
+    case $1 in
+        32) echo md5 ;; 40) echo sha1 ;; 64) echo "sha256 b3" ;; 128) echo "sha512 b2" ;;
+        *) return 1 ;;
+    esac
+}
+
+# The algorithm a SUMS file name points to, or nothing.
+algo_from_name() {
+    local n
+    n=$(basename -- "$1")
+    n=${n,,}
+    case $n in
+        *sha256*) echo sha256 ;; *sha512*) echo sha512 ;; *sha1*) echo sha1 ;;
+        *md5*) echo md5 ;; *b2sum*|*.b2|*blake2*) echo b2 ;; *b3sum*|*.b3|*blake3*) echo b3 ;;
+    esac
+}
+
+# The algorithm for a BSD style tag such as SHA256 or BLAKE2b.
+algo_from_tag() {
+    case ${1^^} in
+        MD5) echo md5 ;; SHA1) echo sha1 ;; SHA256) echo sha256 ;; SHA512) echo sha512 ;;
+        BLAKE2B|BLAKE2B-512) echo b2 ;; BLAKE3) echo b3 ;;
+    esac
+}
+
+# Exit 3 with the install line when the tool for an algorithm is missing.
+# Call it before hash_file, which runs in $( ) where an exit only ends
+# the subshell.
+need_algo() { tb_need "$(algo_tool "$1")"; }
+
+# Hash one file and print the hex digits. The file goes in on stdin, so odd
+# names never change the tool's output.
+hash_file() {
+    local algo=$1 file=$2 tool out
+    tool=$(algo_tool "$algo") || return 1
+    tb_show_text "$tool < $file"
+    out=$("$tool" < "$file") || return 1
+    echo "${out%%[[:space:]]*}"
+}
+
+# Read a SUMS file and print "tag hash name" per entry, split by the byte
+# 0x1f, which never collapses the way a tab does in read. It reads
+# GNU lines (hash  name, hash *name), BSD lines (SHA256 (name) = hash) and a
+# bare hash on a line of its own.
+parse_sums() {
+    awk '
+        { sub(/\r$/, "") }
+        /^[ \t]*(#|$)/ { next }
+        /^[A-Za-z0-9-]+ \(.*\) = [0-9A-Fa-f]+$/ {
+            tag = $0; sub(/ .*/, "", tag)
+            hash = $0; sub(/.* = /, "", hash)
+            name = $0; sub(/^[A-Za-z0-9-]+ \(/, "", name); sub(/\) = [0-9A-Fa-f]+$/, "", name)
+            print tag "\037" hash "\037" name
+            next
+        }
+        /^\\?[0-9A-Fa-f]+ [ *]./ {
+            line = $0; esc = 0
+            if (substr(line, 1, 1) == "\\") { esc = 1; line = substr(line, 2) }
+            hash = line; sub(/ .*/, "", hash)
+            name = substr(line, length(hash) + 3)
+            if (esc) gsub(/\\\\/, "\\", name)
+            sub(/^\.\//, "", name)
+            print "\037" hash "\037" name
+            next
+        }
+        /^[0-9A-Fa-f]+[ \t]*$/ { h = $0; sub(/[ \t]+$/, "", h); print "\037" h "\037"; next }
+    ' "$1"
+}
+
+# Print a verdict line: OK, FAILED or MISSING, then the name.
+verdict() {
+    local word=$1 name=$2 note=${3:-} colour=""
+    case $word in
+        OK) colour=$C_GRN ;;
+        *)  colour=$C_RED ;;
+    esac
+    if [[ -n $note ]]; then
+        printf '%s%-7s%s  %s  (%s)\n' "$colour" "$word" "$C_OFF" "$name" "$note"
+    else
+        printf '%s%-7s%s  %s\n' "$colour" "$word" "$C_OFF" "$name"
+    fi
+}
+
+# Compare a file with a hash. The algorithms to try come after the hash,
+# so a 64 digit hash tries sha256 and then b3 when b3sum is installed.
+# Sets MATCH_ALGO and GOT. Returns 0 on a match.
+compare_file() {
+    local file=$1 want=${2,,} algo first=1
+    shift 2
+    MATCH_ALGO=$1
+    GOT=""
+    for algo in "$@"; do
+        if (( ! first )); then
+            tb_has "$(algo_tool "$algo")" || continue
+            tb_say "no match with $MATCH_ALGO, trying $algo"
+        fi
+        first=0
+        need_algo "$algo"
+        GOT=$(hash_file "$algo" "$file") || return 2
+        if [[ ${GOT,,} == "$want" ]]; then
+            MATCH_ALGO=$algo
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The algorithms to try for one entry: -a, the tag, the file name, or the length.
+pick_algos() {
+    local tag=$1 fromname=$2 hash=$3 a
+    if [[ -n $algo_opt ]]; then echo "$algo_opt"; return 0; fi
+    if [[ -n $tag ]]; then
+        a=$(algo_from_tag "$tag")
+        [[ -n $a ]] && { echo "$a"; return 0; }
+    fi
+    if [[ -n $fromname ]]; then
+        local len
+        len=$(algos_for_length "${#hash}") || true
+        # A SUMS name wins, as long as the hash has the right length for it.
+        if [[ " $len " == *" $fromname "* ]]; then echo "$fromname"; return 0; fi
+    fi
+    algos_for_length "${#hash}"
+}
+
+# checksum -c SUMS
+check_sums() {
+    local sums=$1 dir fromname tag hash name path n_ok=0 n_bad=0 n_miss=0 n_skip=0 algos
+    [[ -f $sums ]] || tb_die 1 "$sums: no such file"
+    dir=$(dirname -- "$sums")
+    fromname=$(algo_from_name "$sums")
+    local seen=0
+    while IFS=$'\037' read -r tag hash name; do
+        seen=1
+        if [[ -z $name ]]; then
+            # A bare hash in name.sha256 belongs to name.
+            name=$(basename -- "$sums")
+            name=${name%.*}
+        fi
+        if [[ $name == /* ]]; then path=$name; else path=$dir/$name; fi
+        [[ $dir == . && $name != /* ]] && path=$name
+        if [[ ! -e $path ]]; then
+            if (( ignore_missing )); then
+                ((n_skip++))
+                tb_say "skipping $name, it is not here"
+                continue
+            fi
+            verdict MISSING "$name"
+            ((n_miss++))
+            continue
+        fi
+        if [[ -d $path ]]; then
+            tb_err "$name is a folder"
+            ((n_bad++))
+            continue
+        fi
+        algos=$(pick_algos "$tag" "$fromname" "$hash") || {
+            tb_err "$name: the hash in $sums has ${#hash} hex digits, which fits no algorithm"
+            ((n_bad++))
+            continue
+        }
+        # shellcheck disable=SC2086
+        compare_file "$path" "$hash" $algos
+        case $? in
+            0) verdict OK "$name"; ((n_ok++)) ;;
+            1) verdict FAILED "$name"; ((n_bad++)) ;;
+            *) tb_err "could not read $path"; ((n_bad++)) ;;
+        esac
+    done < <(parse_sums "$sums")
+    (( seen )) || tb_die 1 "no hashes found in $sums"
+    if (( n_ok + n_bad + n_miss == 0 )); then
+        tb_err "none of the files in $sums is here"
+        return 1
+    fi
+    local line="$n_ok OK, $n_bad failed"
+    (( n_miss )) && line+=", $n_miss missing"
+    (( n_skip )) && line+=", $n_skip not here and skipped"
+    echo "$line"
+    (( n_bad + n_miss == 0 ))
+}
+
+# Look for a SUMS file beside a file that lists it. Sets SUMS_FILE,
+# SUMS_TAG and SUMS_HASH. Returns 1 when there is none.
+find_sums() {
+    local file=$1 dir base cand tag hash name a candidates=()
+    dir=$(dirname -- "$file")
+    base=$(basename -- "$file")
+    for a in sha256 sha512 b2 sha1 md5 b3; do
+        [[ -n $algo_opt && $a != "$algo_opt" ]] && continue
+        candidates+=("$file.$a" "$file.${a}sum")
+    done
+    for a in SHA256SUMS SHA512SUMS B2SUMS SHA1SUMS MD5SUMS B3SUMS; do
+        [[ -n $algo_opt && ${a,,} != "$algo_opt"sums ]] && continue
+        candidates+=("$dir/$a" "$dir/$a.txt" "$dir/${a,,}.txt")
+    done
+    # Fedora ships Fedora-...-CHECKSUM files in the BSD format.
+    for cand in "$dir"/*CHECKSUM "$dir"/*-CHECKSUMS; do
+        candidates+=("$cand")
+    done
+    for cand in "${candidates[@]}"; do
+        [[ -f $cand && ! $cand -ef $file ]] || continue
+        while IFS=$'\037' read -r tag hash name; do
+            if [[ -n $algo_opt && -n $tag && $(algo_from_tag "$tag") != "$algo_opt" ]]; then
+                continue
+            fi
+            if [[ $name == "$base" ]] || [[ -z $name && $cand == "$file".* ]]; then
+                SUMS_FILE=$cand
+                SUMS_TAG=$tag
+                SUMS_HASH=$hash
+                tb_say "found $base in $cand"
+                return 0
+            fi
+        done < <(parse_sums "$cand")
+    done
+    return 1
+}
+
+# checksum FILE ...
+hash_files() {
+    local f rc=0 algos h
+    for f in "$@"; do
+        if [[ -d $f ]]; then tb_err "$f is a folder, name the files in it"; rc=1; continue; fi
+        if [[ ! -e $f ]]; then tb_err "$f: no such file"; rc=1; continue; fi
+        if [[ ! -r $f ]]; then tb_err "$f: permission denied"; rc=1; continue; fi
+        if (( ! no_sums )) && find_sums "$f"; then
+            algos=$(pick_algos "$SUMS_TAG" "$(algo_from_name "$SUMS_FILE")" "$SUMS_HASH") || {
+                tb_err "$f: the hash in $SUMS_FILE fits no algorithm"
+                rc=1
+                continue
+            }
+            # shellcheck disable=SC2086
+            compare_file "$f" "$SUMS_HASH" $algos
+            case $? in
+                0) verdict OK "$f" "$MATCH_ALGO, $(basename -- "$SUMS_FILE")" ;;
+                1) verdict FAILED "$f" "$MATCH_ALGO, $(basename -- "$SUMS_FILE")"
+                   show_want_got "${SUMS_HASH,,}" "$GOT"
+                   rc=1 ;;
+                *) tb_err "could not read $f"; rc=1 ;;
+            esac
+            continue
+        fi
+        need_algo "${algo_opt:-sha256}"
+        h=$(hash_file "${algo_opt:-sha256}" "$f") || { tb_err "could not read $f"; rc=1; continue; }
+        printf '%s  %s\n' "$h" "$f"
+    done
+    return "$rc"
+}
+
+show_want_got() {
+    printf '  want %s\n  got  %s\n' "$1" "$2" >&2
+}
+
+# checksum FILE HASH
+compare_one() {
+    local f=$1 want=$2 algos
+    [[ -e $f ]] || tb_die 1 "$f: no such file"
+    [[ -d $f ]] && tb_die 1 "$f is a folder, name the file in it"
+    if [[ -n $algo_opt ]]; then
+        algos=$algo_opt
+    else
+        algos=$(algos_for_length "${#want}")
+    fi
+    tb_say "comparing with a ${#want} digit hash, trying $algos"
+    # shellcheck disable=SC2086
+    compare_file "$f" "$want" $algos
+    case $? in
+        0) verdict OK "$f" "$MATCH_ALGO"; return 0 ;;
+        1) verdict FAILED "$f" "$MATCH_ALGO"
+           show_want_got "${want,,}" "$GOT"
+           return 1 ;;
+        *) tb_die 1 "could not read $f" ;;
+    esac
+}
+
+# A pasted hash, cleaned: spaces gone and a "sha256:" prefix read as -a.
+# Sets WANT, or returns 1 when the text is not a hash at all.
+clean_hash() {
+    local h=$1 pre a
+    h=${h//[[:space:]]/}
+    if [[ $h == *:* ]]; then
+        pre=${h%%:*}
+        a=$(algo_from_tag "$pre")
+        [[ -z $a ]] && a=$(algo_from_name "$pre")
+        [[ -n $a ]] || return 1
+        [[ -z $algo_opt ]] && algo_opt=$a
+        h=${h#*:}
+    fi
+    [[ $h =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    WANT=$h
+}
+
+main() {
+    if [[ -n $algo_opt ]]; then
+        algo_tool "$algo_opt" >/dev/null || tb_usage_error "unknown algorithm $algo_opt, use md5, sha1, sha256, sha512, b2 or b3"
+    fi
+    tb_color_stdout
+    if [[ -n $check_file ]]; then
+        (( ${#files[@]} )) && tb_usage_error "-c takes the SUMS file only, not other files"
+        check_sums "$check_file"
+        return
+    fi
+    (( ${#files[@]} )) || tb_usage_error "name a file to hash"
+    if (( ${#files[@]} == 2 )) && [[ ! -e ${files[1]} ]]; then
+        if clean_hash "${files[1]}"; then
+            if ! algos_for_length "${#WANT}" >/dev/null && [[ -z $algo_opt ]]; then
+                tb_usage_error "the hash has ${#WANT} hex digits, a hash has 32, 40, 64 or 128"
+            fi
+            compare_one "${files[0]}" "$WANT"
+            return
+        fi
+    fi
+    hash_files "${files[@]}"
+}
+
+algo_opt=""
+check_file=""
+ignore_missing=0
+no_sums=0
+files=()
+tb_expand "ac" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -a|--algo)        tb_optarg "$@"; algo_opt=${2,,}; shift
+                          algo_opt=${algo_opt%sum}
+                          [[ $algo_opt == blake2* ]] && algo_opt=b2
+                          [[ $algo_opt == blake3* ]] && algo_opt=b3
+                          ;;
+        -c|--check)       tb_optarg "$@"; check_file=$2; shift ;;
+        --ignore-missing) ignore_missing=1 ;;
+        --no-sums)        no_sums=1 ;;
+        --)               shift; files+=("$@"); break ;;
+        -*)               tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)                files+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

@@ -1,0 +1,232 @@
+.TH "CHECKSUM" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+checksum \- hash a file, or check it against a hash or SUMS file
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+checksum [options] file ...
+checksum [options] file hash
+checksum [options] -c sums-file
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBchecksum\fR answers one question after a download. Is this file the one the project published? It works three ways.
+.PP
+With only file names, it hashes each file with sha256. Before that, it looks beside the file for a SUMS file that lists it, such as the \fBSHA256SUMS\fR next to a Debian ISO. When it finds one, it checks the file against it and prints \fBOK\fR or \fBFAILED\fR instead of a bare hash. When there is none, it prints the hash in the same format as \fBsha256sum\fR, so you can save the output as a SUMS file of your own.
+.PP
+With a file and a hash, such as one you copied from a download page, it compares the two. You do not have to say which algorithm the hash is. \fBchecksum\fR works it out from the length.
+.PP
+With \fB\-c SUMS\fR, it checks every file the SUMS file lists and prints one line per file with a count at the end.
+.PP
+Every check prints one line per file:
+.PP
+.RS 4
+.nf
+OK       debian-13.1.0-amd64-netinst.iso
+FAILED   debian-13.1.0-amd64-DVD-1.iso
+MISSING  debian-13.1.0-amd64-DVD-2.iso
+.fi
+.RE
+.PP
+In a terminal, \fBOK\fR is green and the other two are red. \fBchecksum\fR exits 1 when any file fails or is missing, so a script can stop on a bad download.
+.SH OPTIONS
+.TP
+\fB\-a\fR, \fB\-\-algo NAME\fR
+Use md5, sha1, sha256, sha512, b2 or b3. The default is sha256. \fBblake2b\fR, \fBsha256sum\fR and upper case names work too.
+.TP
+\fB\-c\fR, \fB\-\-check FILE\fR
+Check every file listed in a SUMS file.
+.TP
+\fB\-\-ignore\-missing\fR
+With \fB\-c\fR, skip listed files that are not here instead of calling them missing.
+.TP
+\fB\-\-no\-sums\fR
+Print hashes only. Never look for a SUMS file.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result lines.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step, the SUMS file it found, and each hash command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH HOW IT PICKS THE ALGORITHM
+.PP
+For \fBchecksum FILE HASH\fR, the length of the hash decides.
+.TP
+32
+md5
+.TP
+40
+sha1
+.TP
+64
+sha256, then b3 when \fBb3sum\fR is installed
+.TP
+128
+sha512, then b2
+.PP
+Two algorithms make 64 digit hashes, and two make 128 digit ones. \fBchecksum\fR tries the common one first. When that does not match, it tries the other, and \fB\-v\fR shows \fBno match with sha256, trying b3\fR. The result line names the algorithm that matched.
+.PP
+A pasted hash may start with a label such as \fBsha256:\fR or \fBSHA512:\fR, the way Docker and many download pages print it. \fBchecksum\fR reads the label as \fB\-a\fR and drops it. It also drops spaces, so a hash split across two lines still works when you quote it.
+.PP
+For a SUMS file, the choice goes in this order:
+.IP \(bu 2
+\fB\-a\fR, when you give it.
+.IP \(bu 2
+The tag on a BSD style line, such as \fBSHA256 (file.iso) = ...\fR. Fedora and FreeBSD use this format.
+.IP \(bu 2
+The name of the SUMS file, such as \fBSHA512SUMS\fR or \fBfile.iso.sha256\fR, when the hash has the right length for it.
+.IP \(bu 2
+The length of the hash, as above.
+.SH HOW IT FINDS A SUMS FILE
+.PP
+For each file, \fBchecksum\fR looks for these files beside it, in this order, and uses the first one that lists the file by name:
+.IP \(bu 2
+\fBfile.sha256\fR, \fBfile.sha256sum\fR, and the same with sha512, b2, sha1, md5 and b3.
+.IP \(bu 2
+\fBSHA256SUMS\fR, \fBSHA512SUMS\fR, \fBB2SUMS\fR, \fBSHA1SUMS\fR, \fBMD5SUMS\fR and \fBB3SUMS\fR, each also as \fBNAME.txt\fR and in lower case as \fBsha256sums.txt\fR.
+.IP \(bu 2
+Files ending in \fBCHECKSUM\fR or \fB\-CHECKSUMS\fR, which is how Fedora names them.
+.PP
+A \fBfile.sha256\fR that holds only a bare hash, with no name after it, counts as the hash for \fBfile\fR. With \fB\-a\fR, only the SUMS files for that algorithm count.
+.PP
+It reads three line formats:
+.PP
+.RS 4
+.nf
+ff0b18e3...  debian-13.1.0-amd64-netinst.iso        GNU, from sha256sum
+ff0b18e3... *debian-13.1.0-amd64-netinst.iso        GNU, binary mode
+SHA256 (Fedora-Workstation-Live-42-1.1.x86_64.iso) = 26551053...   BSD
+.fi
+.RE
+.PP
+Blank lines, lines that start with \fB#\fR, and Windows line endings are fine. The PGP signature lines around a Fedora CHECKSUM file are skipped, because they match none of the formats.
+.SH SAFETY CHECKS
+.IP \(bu 2
+\fBchecksum\fR only reads. It never changes, moves or deletes a file.
+.IP \(bu 2
+It feeds each file to the hash tool on standard input, so a file named \fB\-c\fR or with a newline in its name cannot change what the tool does.
+.IP \(bu 2
+A hash of the wrong length is a usage error with exit 2. It never counts as a failed file.
+.IP \(bu 2
+\fBchecksum\fR does not check the PGP signature on a SUMS file. When the SUMS file comes from the same mirror as the ISO, a hacked mirror can change both. For that, run \fBgpg \-\-verify SHA256SUMS.sign SHA256SUMS\fR first.
+.SH PASS\-THROUGH
+.PP
+\fBchecksum\fR takes no options for the hash tools. Everything after \fB\-\-\fR is a file name, which lets you hash a file whose name starts with a dash.
+.PP
+.RS 4
+.nf
+$ checksum -- -weird-name.txt
+.fi
+.RE
+.SH NEEDS
+.PP
+\fBsha256sum\fR, \fBmd5sum\fR, \fBsha1sum\fR, \fBsha512sum\fR and \fBb2sum\fR, all from coreutils. BusyBox has all of them except \fBb2sum\fR, so on Alpine \fB\-a b2\fR needs \fBapk add coreutils\fR. \fBb3\fR needs \fBb3sum\fR, which is a package called \fBb3sum\fR on Debian, Ubuntu, Fedora, Arch and Alpine. When it is missing, \fBchecksum\fR names the package and exits 3.
+.SH EXAMPLES
+.SS Check a download against the SUMS file beside it
+.PP
+.RS 4
+.nf
+$ ls
+SHA256SUMS  debian-13.1.0-amd64-netinst.iso
+$ checksum debian-13.1.0-amd64-netinst.iso
+OK       debian-13.1.0-amd64-netinst.iso  (sha256, SHA256SUMS)
+.fi
+.RE
+.SS A download that went wrong
+.PP
+.RS 4
+.nf
+$ checksum debian-13.1.0-amd64-DVD-1.iso
+FAILED   debian-13.1.0-amd64-DVD-1.iso  (sha256, SHA256SUMS)
+  want c36abfca184c4d3b5458a864bef2686b57725a890268c01a86d92784704335aa
+  got  b690c618f7ef137b4834057d41779be6049ad31bc5d353e616693c46213f0a44
+$ echo $?
+1
+.fi
+.RE
+.PP
+Download it again. A partial download or a bad mirror gives a different hash every time.
+.SS Check everything in a SUMS file
+.PP
+.RS 4
+.nf
+$ checksum -c SHA256SUMS
+OK       debian-13.1.0-amd64-netinst.iso
+OK       debian-13.1.0-amd64-DVD-1.iso
+MISSING  debian-13.1.0-amd64-DVD-2.iso
+2 OK, 0 failed, 1 missing
+$ checksum -c SHA256SUMS --ignore-missing
+OK       debian-13.1.0-amd64-netinst.iso
+OK       debian-13.1.0-amd64-DVD-1.iso
+2 OK, 0 failed, 1 not here and skipped
+.fi
+.RE
+.PP
+The first run exits 1 because of the missing file. The second exits 0.
+.SS Compare with a hash from a web page
+.PP
+.RS 4
+.nf
+$ checksum notes.txt 9c345463e1fec644c6eee8e6158d953f
+OK       notes.txt  (md5)
+.fi
+.RE
+.PP
+The 32 digits told \fBchecksum\fR to use md5.
+.SS A Fedora CHECKSUM file
+.PP
+.RS 4
+.nf
+$ checksum -v Fedora-Workstation-Live-42-1.1.x86_64.iso
+checksum: found Fedora-Workstation-Live-42-1.1.x86_64.iso in ./Fedora-Workstation-42-1.1-x86_64-CHECKSUM
++ sha256sum < Fedora-Workstation-Live-42-1.1.x86_64.iso
+OK       Fedora-Workstation-Live-42-1.1.x86_64.iso  (sha256, Fedora-Workstation-42-1.1-x86_64-CHECKSUM)
+.fi
+.RE
+.SS Make a SUMS file of your own
+.PP
+.RS 4
+.nf
+$ checksum --no-sums *.iso > SHA256SUMS
+$ checksum -a md5 notes.txt ubuntu-24.04.3-desktop-amd64.iso
+9c345463e1fec644c6eee8e6158d953f  notes.txt
+3bee204ae8e1ed05ba6ab8e448ef40be  ubuntu-24.04.3-desktop-amd64.iso
+.fi
+.RE
+.PP
+The output has the same format as \fBsha256sum\fR, so \fBsha256sum \-c\fR reads it too.
+.SH TROUBLESHOOTING
+.PP
+\fBchecksum: the hash has 6 hex digits, a hash has 32, 40, 64 or 128\fR : Part of the hash is missing. Copy it again. When it came from a page that wraps long lines, quote it so both halves reach \fBchecksum\fR.
+.PP
+\fBchecksum: needs b3sum. Install it with: sudo apt install b3sum\fR : The line names the package for your distro. Install it, or use another algorithm.
+.PP
+\fBMISSING  debian\-13.1.0\-amd64\-DVD\-2.iso\fR : The SUMS file lists files for a whole release, and you downloaded only some. Add \fB\-\-ignore\-missing\fR.
+.PP
+\fBchecksum: none of the files in SHA256SUMS is here\fR : Run it from the folder that holds the files, or keep the SUMS file in that folder. \fBchecksum\fR looks for the listed names beside the SUMS file.
+.PP
+A plain hash instead of \fBOK\fR : No SUMS file beside the file lists it by that name. A renamed download, such as \fBdebian.iso\fR, no longer matches the name in \fBSHA256SUMS\fR. Use \fBchecksum \-c SHA256SUMS\fR after renaming it back, or compare with the hash directly.
+.SH EXIT STATUS
+.TP
+0
+Every file matched, or it printed the hashes.
+.TP
+1
+A hash did not match, or a file is missing or unreadable.
+.TP
+2
+Bad usage, such as a hash of the wrong length or an unknown algorithm.
+.TP
+3
+The hash tool is missing.
+.TP
+4
+Refused.
+.SH SEE ALSO
+.PP
+\fBdupes\fR, \fBsha256sum(1)\fR, \fBb2sum(1)\fR, \fBgpg(1)\fR
