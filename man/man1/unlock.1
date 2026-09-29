@@ -1,0 +1,211 @@
+.TH "UNLOCK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+unlock \- decrypt a file made by lock, age or gpg
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+unlock [options] file ... [-- age or gpg options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBunlock\fR writes the plain copy of an encrypted file next to it, and keeps the encrypted file. \fBsecrets.env.age\fR gives \fBsecrets.env\fR. A name with \fB.tar\fR before the ending holds a folder, so \fBphotos.tar.age\fR gives the folder \fBphotos/\fR.
+.PP
+.RS 4
+.nf
+secrets.env.age -> secrets.env (1.3KB, 1.9s)
+.fi
+.RE
+.PP
+It opens files from \fBlock\fR, and any other file made with \fBage\fR or \fBgpg\fR. It tells the two apart from the first bytes of the file, not from the name, so a gpg file called \fBnotes.age\fR still opens with gpg.
+.TP
+\fBnotes.txt.age\fR, \fB.gpg\fR, \fB.asc\fR or \fB.pgp\fR
+\fBnotes.txt\fR
+.TP
+\fBphotos.tar.age\fR or \fBphotos.tar.gpg\fR
+the folder \fBphotos/\fR
+.TP
+anything else
+nothing until you name the output with \fB\-o\fR, or print it with \fB\-\-cat\fR
+.PP
+When the file needs a passphrase, age or gpg asks for it. When it is locked to a key, \fBunlock\fR finds the key:
+.IP \(bu 2
+For an age file, it tries \fB~/.config/age/keys.txt\fR, \fB~/.ssh/id_ed25519\fR and \fB~/.ssh/id_rsa\fR, in that order, and says which ones it used. \fB\-i\fR names a key in another place.
+.IP \(bu 2
+For a gpg file, gpg looks in your keyring as always.
+.SH OPTIONS
+.TP
+\fB\-i\fR, \fB\-\-identity FILE\fR
+The private key for an age file. Can repeat. Without it \fBunlock\fR tries the usual places above.
+.TP
+\fB\-o\fR, \fB\-\-out NAME\fR
+Name the output yourself. Only with one file. For a folder, it names the folder.
+.TP
+\fB\-\-cat\fR
+Print the plain content to stdout and write nothing.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH SAFETY CHECKS
+.IP \(bu 2
+\fBunlock\fR never overwrites. When the output name is taken, it stops with exit 4 and names \fB\-o\fR and \fB\-\-cat\fR as the ways out.
+.IP \(bu 2
+It decrypts into a hidden temp file or folder beside the output, and renames it only when age or gpg finished without an error. A wrong passphrase, a wrong key or a damaged file leaves nothing behind.
+.IP \(bu 2
+A folder comes out of a temp folder in one rename, so you never see half a folder.
+.IP \(bu 2
+\fB\-\-cat\fR on a folder, with the output going to a terminal, stops with exit 2. A tar stream on screen is noise. Pipe it to \fBtar\fR instead.
+.PP
+The plain copy lands on disk. For a secret you only need to read once, \fB\-\-cat\fR keeps it off the disk.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBage \-d\fR for age files and to \fBgpg \-\-decrypt\fR for gpg files:
+.PP
+.RS 4
+.nf
+$ unlock report.pdf.gpg -- --pinentry-mode loopback
+$ unlock backup.tar.gpg -- --ignore-mdc-error
+.fi
+.RE
+.PP
+\fB\-\-ignore\-mdc\-error\fR opens very old gpg files that have no integrity check. Use it only on files you trust.
+.SH NEEDS
+.PP
+\fBage\fR for age files and \fBgpg\fR for gpg files. You only need the one your files use. \fBtar\fR for folders.
+.TP
+Debian, Ubuntu
+age: \fBsudo apt install age\fR. gpg: \fBsudo apt install gnupg\fR
+.TP
+Fedora
+age: \fBsudo dnf install age\fR. gpg: \fBsudo dnf install gnupg2\fR
+.TP
+Arch
+age: \fBsudo pacman \-S age\fR. gpg: \fBsudo pacman \-S gnupg\fR
+.TP
+openSUSE
+age: \fBsudo zypper install age\fR. gpg: \fBsudo zypper install gpg2\fR
+.TP
+Alpine
+age: \fBsudo apk add age\fR. gpg: \fBsudo apk add gnupg\fR
+.SH EXAMPLES
+.SS A file with a passphrase
+.PP
+.RS 4
+.nf
+$ unlock secrets.env.age
+Enter passphrase:
+secrets.env.age -> secrets.env (1.3KB, 1.9s)
+.fi
+.RE
+.SS A folder
+.PP
+.RS 4
+.nf
+$ unlock photos.tar.gpg
+photos.tar.gpg -> photos/ (8.7KB, 3 files, 0.1s)
+.fi
+.RE
+.SS Locked to your SSH key
+.PP
+.RS 4
+.nf
+$ unlock photos.tar.age
+unlock: using ~/.ssh/id_ed25519
+photos.tar.age -> photos/ (8.9KB, 3 files, 0.0s)
+.fi
+.RE
+.SS A key somewhere else
+.PP
+.RS 4
+.nf
+$ unlock -i ~/keys/work.txt report.pdf.age
+report.pdf.age -> report.pdf (212KB, 0.0s)
+.fi
+.RE
+.SS Read one line and write nothing
+.PP
+.RS 4
+.nf
+$ unlock --cat secrets.env.age | grep DB_HOST
+Enter passphrase:
+DB_HOST=db.example.com
+.fi
+.RE
+.SS See what is in a locked folder
+.PP
+.RS 4
+.nf
+$ unlock --cat photos.tar.age | tar -tv
+drwxr-xr-x me/me             0 2026-09-29 16:40 photos/
+-rw-r--r-- me/me          4201 2026-09-29 16:40 photos/IMG_4410.jpg
+-rw-r--r-- me/me          3890 2026-09-29 16:40 photos/IMG_4411.jpg
+-rw-r--r-- me/me            14 2026-09-29 16:40 photos/albums.txt
+.fi
+.RE
+.SS A gpg file, step by step
+.PP
+.RS 4
+.nf
+$ unlock -v secrets.env.gpg
++ gpg --no-symkey-cache --decrypt -o - -- secrets.env.gpg > secrets.env
+gpg: AES256.CFB encrypted data
+gpg: encrypted with 1 passphrase
+secrets.env.gpg -> secrets.env (1.3KB, 0.1s)
+.fi
+.RE
+.SS The plain copy is already there
+.PP
+.RS 4
+.nf
+$ unlock secrets.env.gpg
+unlock: secrets.env exists. Use -o for another name, or --cat
+$ unlock -o secrets.new secrets.env.gpg
+secrets.env.gpg -> secrets.new (1.3KB, 0.1s)
+.fi
+.RE
+.SS A wrong passphrase
+.PP
+.RS 4
+.nf
+$ unlock secrets.env.gpg
+gpg: decryption failed: Bad session key
+unlock: could not decrypt secrets.env.gpg, wrong passphrase or key. Nothing was written
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBunlock: X is locked to a key, and there is no key in ~/.config/age/keys.txt or ~/.ssh. Name it with \-i\fR : The age file needs a private key that is not in the usual places. Pass it with \fB\-i\fR.
+.PP
+\fBage: error: no identity matched any of the recipients\fR : None of your keys can open it. It was locked for someone else, or for a key you no longer have.
+.PP
+\fBunlock: X is not an age or gpg file\fR : The file does not start like either. It may be damaged, or made by another tool such as \fBopenssl\fR or \fBzip \-e\fR.
+.PP
+\fBgpg: problem with the agent: Inappropriate ioctl for device\fR : gpg cannot find the terminal. Run \fBexport GPG_TTY=$(tty)\fR and try again.
+.PP
+\fBunlock\fR did not ask for the gpg passphrase : gpg\-agent remembered it from an earlier run. \fBlock\fR and \fBunlock\fR turn that off with \fB\-\-no\-symkey\-cache\fR, but plain gpg does not. \fBgpgconf \-\-reload gpg\-agent\fR makes it forget.
+.SH EXIT STATUS
+.TP
+0
+Every file was unlocked.
+.TP
+1
+It failed. A wrong passphrase or key, no key found, or a file that is not age or gpg. Nothing was written for it.
+.TP
+2
+Bad usage, such as a file with no known ending and no \fB\-o\fR.
+.TP
+3
+age or gpg is missing, whichever the file needs.
+.TP
+4
+Refused. The output name is taken.
+.SH SEE ALSO
+.PP
+\fBlock\fR, \fBage(1)\fR, \fBgpg(1)\fR, \fBtar(1)\fR

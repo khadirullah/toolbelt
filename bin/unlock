@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# unlock: decrypt a file made by lock, age or gpg.
+set -uo pipefail
+TB_CMD=unlock
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: unlock [options] file ... [-- age or gpg options]
+
+Decrypt a file made by lock, age or gpg.
+
+Options:
+  -i, --identity FILE the private key for age, can repeat
+  -o, --out NAME      name the output yourself
+      --cat           print to stdout and write nothing
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to age -d for age files and gpg -d for gpg files.
+
+Examples:
+  unlock secrets.env.age
+  unlock photos.tar.age
+  unlock --cat secrets.env.age | grep DB_HOST
+  unlock -i ~/keys/work.txt report.pdf.age
+
+Needs: age for age files, gpg for gpg files, tar for folders.
+See man unlock.
+Exit: 0 ok, 1 failed or wrong key, 2 bad usage, 3 missing tool, 4 refused.
+EOF
+}
+
+# age or gpg, from the first bytes of the file. Empty when it is neither.
+detect() {
+    local head first
+    head=$(head -c 40 -- "$1" 2>/dev/null | tr -d '\0')
+    case $head in
+        age-encryption.org/*|"-----BEGIN AGE ENCRYPTED FILE-----"*) echo age; return ;;
+        "-----BEGIN PGP MESSAGE-----"*) echo gpg; return ;;
+    esac
+    # A binary OpenPGP file starts with a packet tag, a byte with the top
+    # bit set: 0x8c for a passphrase, 0x84 for a public key, and so on.
+    first=$(head -c 1 -- "$1" | od -An -tu1 | tr -d ' ')
+    if [[ -n $first ]] && (( first >= 128 )); then
+        case $(( first & 64 ? first & 63 : (first >> 2) & 15 )) in
+            1|3|8|9|18|20) echo gpg ;;
+        esac
+    fi
+}
+
+# The "-> type" lines of an age header, armoured or not.
+age_stanzas() {
+    local f=$1
+    if [[ $(head -c 34 -- "$f") == "-----BEGIN AGE ENCRYPTED FILE-----" ]]; then
+        sed -n '2,/^-----END/p' -- "$f" | head -n 40 | grep -v '^-----' | tr -d '\r\n' \
+            | base64 -d 2>/dev/null | head -c 4096 | sed -n '/^---/q; /^-> /p'
+    else
+        head -c 4096 -- "$f" | sed -n '/^---/q; /^-> /p' 2>/dev/null
+    fi
+}
+
+# Fill DEC with the command that decrypts a file to stdout.
+dec_cmd() {
+    local f=$1 k stanzas found=() shown=()
+    if [[ $TOOL == age ]]; then
+        DEC=(age -d)
+        if (( ${#identities[@]} )); then
+            for k in "${identities[@]}"; do DEC+=(-i "$k"); done
+        else
+            stanzas=$(age_stanzas "$f")
+            if [[ $stanzas != *"-> scrypt"* ]]; then
+                # Locked to a key: try the usual places.
+                for k in "${XDG_CONFIG_HOME:-$HOME/.config}/age/keys.txt" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa"; do
+                    [[ -f $k ]] || continue
+                    found+=(-i "$k")
+                    shown+=("${k/#$HOME/\~}")
+                done
+                if (( ${#found[@]} == 0 )); then
+                    tb_err "$f is locked to a key, and there is no key in ~/.config/age/keys.txt or ~/.ssh. Name it with -i"
+                    return 1
+                fi
+                tb_info "unlock: using ${shown[*]}"
+                DEC+=("${found[@]}")
+            fi
+        fi
+        DEC+=(${TB_PASS[@]+"${TB_PASS[@]}"} -- "$f")
+    else
+        DEC=(gpg)
+        (( TB_VERBOSE )) || DEC+=(--quiet)
+        gpg --dump-options 2>/dev/null | grep -qx -- --no-symkey-cache && DEC+=(--no-symkey-cache)
+        DEC+=(--decrypt -o - ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$f")
+    fi
+}
+
+# A command as tb_show prints it, without the "+ ", for a pipeline.
+cmd_text() {
+    local out="" a
+    for a in "$@"; do
+        if [[ $a =~ ^[][A-Za-z0-9_./:=,@%+^-]+$ ]]; then out+=" $a"; else out+=" '${a//\'/\'\\\'\'}'"; fi
+    done
+    echo "${out# }"
+}
+
+# Read a mode such as 0644 from the umask, for a folder mktemp made 0700.
+dir_mode() { printf '%o' $(( 0777 & ~$(umask) )); }
+
+unlock_one() {
+    local f=$1 base out folder=0 tmp start rc entries=() size extra=""
+    [[ -f $f ]] || { tb_err "$f: no such file"; return 1; }
+    TOOL=$(detect "$f")
+    if [[ -z $TOOL ]]; then
+        tb_err "$f is not an age or gpg file"
+        return 1
+    fi
+    if [[ $TOOL == age ]]; then
+        tb_need age
+    else
+        tb_need gpg
+        if [[ -z ${GPG_TTY:-} && -t 0 ]]; then
+            GPG_TTY=$(tty)
+            export GPG_TTY
+        fi
+    fi
+    base=$f
+    case $base in
+        *.age|*.gpg|*.asc|*.pgp) base=${base%.*} ;;
+        *) [[ -n $out_name ]] || (( print )) || { tb_err "$f has no .age or .gpg ending, so name the output with -o"; return "$E_USAGE"; } ;;
+    esac
+    if [[ $base == *.tar ]]; then
+        folder=1
+        base=${base%.tar}
+    fi
+    out=${out_name:-$base}
+    dec_cmd "$f" || return 1
+    if (( print )); then
+        if (( folder )) && [[ -t 1 ]]; then
+            tb_err "$f holds a folder as a tar stream. Pipe it, such as: unlock --cat $f | tar -t"
+            return "$E_USAGE"
+        fi
+        tb_show "${DEC[@]}"
+        "${DEC[@]}" || { tb_err "could not decrypt $f, wrong passphrase or key"; return 1; }
+        return 0
+    fi
+    if [[ -e $out || -L $out ]]; then
+        tb_err "$out exists. Use -o for another name, or --cat"
+        return "$E_SAFE"
+    fi
+    start=$(tb_now_ms)
+    if (( folder )); then
+        tb_need tar
+        tmp=$(mktemp -d "$(dirname -- "$out")/.unlock-XXXXXX") || { tb_err "could not write in $(dirname -- "$out")"; return 1; }
+        tb_cleanup_add "$tmp"
+        tb_show_text "$(cmd_text "${DEC[@]}") | tar -xf - -C $(dirname -- "$out")"
+        "${DEC[@]}" | tar -xf - -C "$tmp"
+        local ps=("${PIPESTATUS[@]}")
+        if (( ps[0] != 0 || ps[1] != 0 )); then
+            tb_err "could not decrypt $f, wrong passphrase or key. Nothing was written"
+            return 1
+        fi
+        shopt -s nullglob dotglob
+        entries=("$tmp"/*)
+        shopt -u nullglob dotglob
+        if (( ${#entries[@]} == 1 )) && [[ -d ${entries[0]} && ! -L ${entries[0]} ]]; then
+            mv -- "${entries[0]}" "$out" || { tb_err "could not write $out"; return 1; }
+        else
+            chmod "$(dir_mode)" "$tmp"
+            mv -- "$tmp" "$out" || { tb_err "could not write $out"; return 1; }
+        fi
+        size=$(tb_human "$(tb_bytes "$out")")
+        extra=", $(tb_plural "$(find "$out" -type f | wc -l)" file)"
+        echo "$f -> $out/ ($size$extra, $(tb_elapsed $(( $(tb_now_ms) - start ))))"
+        return 0
+    fi
+    tmp=$(mktemp "$(dirname -- "$out")/.unlock-XXXXXX") || { tb_err "could not write in $(dirname -- "$out")"; return 1; }
+    tb_cleanup_add "$tmp"
+    tb_show_text "$(cmd_text "${DEC[@]}") > $out"
+    "${DEC[@]}" > "$tmp"
+    rc=$?
+    if (( rc != 0 )); then
+        rm -f -- "$tmp"
+        tb_err "could not decrypt $f, wrong passphrase or key. Nothing was written"
+        return 1
+    fi
+    if [[ -e $out ]]; then
+        tb_err "$out appeared while unlock ran. Use -o for another name"
+        return "$E_SAFE"
+    fi
+    mv -- "$tmp" "$out" || { tb_err "could not write $out"; return 1; }
+    echo "$f -> $out ($(tb_human "$(tb_bytes "$out")"), $(tb_elapsed $(( $(tb_now_ms) - start ))))"
+}
+
+main() {
+    local f rc=0 r
+    (( ${#files[@]} )) || tb_usage_error "name a file to unlock"
+    [[ -n $out_name && ${#files[@]} -gt 1 ]] && tb_usage_error "-o names one output, so give one file"
+    for f in "${files[@]}"; do
+        unlock_one "$f"
+        r=$?
+        (( r > rc )) && rc=$r
+    done
+    return "$rc"
+}
+
+files=()
+identities=()
+out_name=""
+print=0
+tb_expand "io" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -i|--identity) tb_optarg "$@"; identities+=("$2"); shift
+                       [[ -f ${identities[-1]} ]] || tb_usage_error "${identities[-1]}: no such key file"
+                       ;;
+        -o|--out)      tb_optarg "$@"; out_name=${2%/}; shift ;;
+        --cat)         print=1 ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)             files+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?
