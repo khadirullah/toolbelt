@@ -1,0 +1,194 @@
+.TH "GIT-SYNC" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+git\-sync \- fetch and rebase the current branch onto its upstream
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+git sync [options]
+git-sync [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Bringing a branch up to date takes four commands when you have uncommitted work. \fBgit stash \-u\fR, \fBgit fetch \-\-prune\fR, \fBgit rebase\fR, then \fBgit stash pop\fR. Miss the stash and the rebase refuses to start. Miss \fB\-\-prune\fR and branches your team deleted months ago stay in \fBgit branch \-r\fR.
+.PP
+\fBgit sync\fR runs all four in order and says what each one did. When the rebase hits a conflict it runs \fBgit rebase \-\-abort\fR, puts your stashed work back, and tells you. Your branch is then exactly as it was before, and you can rebase by hand when you have time for the conflict.
+.PP
+The upstream is the branch \fBgit status\fR compares against, set by \fBgit push \-u\fR or \fBgit branch \-u\fR. A feature branch can track its own remote branch, such as \fBorigin/feat/ctx\-warn\fR, or \fBorigin/main\fR so that every sync replays it on top of the newest \fBmain\fR.
+.PP
+What happens after the fetch depends on where the two branches stand.
+.TP
+no new commits
+The upstream: has new commits. What \fBgit sync\fR does: Fast\-forwards to the upstream.
+.TP
+has new commits
+The upstream: has new commits. What \fBgit sync\fR does: Rebases your commits on top of the upstream.
+.TP
+has new commits
+The upstream: nothing new. What \fBgit sync\fR does: Nothing. It says how many commits you have to push.
+.TP
+no new commits
+The upstream: nothing new. What \fBgit sync\fR does: Nothing. It says the branch is up to date.
+.PP
+It never pushes. After a sync that rebased, a branch you pushed before needs \fBgit push \-\-force\-with\-lease\fR.
+.PP
+It is a script named \fBgit\-sync\fR in toolbelt's \fBbin\fR folder. Git runs any program named \fBgit\-NAME\fR on your PATH as \fBgit NAME\fR.
+.SH OPTIONS
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the result line, and errors.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step and each git command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fBgit sync\fR takes no arguments. It always syncs the branch you are on with its upstream.
+.SH THE STEPS
+.IP \(bu 2
+\fBgit stash push \-\-include\-untracked\fR, when there are uncommitted changes or new files. Ignored files stay where they are.
+.IP \(bu 2
+\fBgit fetch \-\-prune REMOTE\fR, for the upstream's remote only. \fB\-\-prune\fR removes remote\-tracking branches such as \fBorigin/fix/old\-probe\fR whose branch is gone from the server.
+.IP \(bu 2
+\fBgit merge \-\-ff\-only\fR or \fBgit rebase\fR, as the table above says.
+.IP \(bu 2
+\fBgit stash pop\fR, when step 1 stashed something.
+.PP
+An upstream on the same repository, set with \fBgit branch \-u main\fR, skips the fetch.
+.SH HELP AND THE MAN PAGE
+.PP
+\fBgit sync \-h\fR and \fBgit\-sync \-\-help\fR print the help. \fBgit sync \-\-help\fR makes git open the man page \fBgit\-sync(1)\fR, which toolbelt installs from this document.
+.SH SAFETY CHECKS
+.IP \(bu 2
+A rebase that stops on a conflict is aborted at once. The branch, the files and the stash end as they were before \fBgit sync\fR started, and it exits 1.
+.IP \(bu 2
+A stash that no longer applies cleanly after the rebase stays in the stash list. \fBgit sync\fR says so and exits 1. Nothing is lost, see \fBgit stash list\fR.
+.IP \(bu 2
+A merge, rebase, cherry\-pick or revert that is already half done makes it refuse with exit 4.
+.IP \(bu 2
+A detached HEAD, or a branch with no upstream, stops it with exit 1 and the command to fix that.
+.IP \(bu 2
+When the upstream branch itself was deleted on the server, the fetch prunes it. \fBgit sync\fR stops with exit 1 and tells you to pick another upstream.
+.IP \(bu 2
+It never pushes, never deletes a local branch, and never drops a stash it could not apply.
+.SH PASS\-THROUGH
+.PP
+None. \fBgit sync\fR runs a fixed set of git commands, and \fB\-v\fR prints each one.
+.SH NEEDS
+.PP
+git 2.30 or newer, from the \fBgit\fR package on every distro.
+.SH EXAMPLES
+.SS A normal morning
+.PP
+.RS 4
+.nf
+$ git sync
+stashed 1 changed file
+fetched origin, 3 new commits on main
+rebased feat/ctx-warn onto origin/main, 2 commits replayed
+restored the stashed file
+removed 2 remote branches that are gone from origin
+.fi
+.RE
+.PP
+\fBfeat/ctx\-warn\fR tracks \fBorigin/main\fR here, so its two commits now sit on top of the three new ones.
+.SS Nothing new
+.PP
+.RS 4
+.nf
+$ git sync
+stashed 1 changed file
+fetched origin, nothing new on main
+feat/ctx-warn already has everything from origin/main, 2 commits to push
+restored the stashed file
+.fi
+.RE
+.SS On main with no local commits
+.PP
+.RS 4
+.nf
+$ git switch main
+$ git sync
+fetched origin, nothing new on main
+fast-forwarded main to origin/main
+.fi
+.RE
+.SS A conflict
+.PP
+.RS 4
+.nf
+$ git sync
+fetched origin, 1 new commit on main
+git-sync: rebasing feat/ctx-warn onto origin/main hit a conflict. The rebase is undone and feat/ctx-warn is as it was
+rebase by hand with: git rebase origin/main
+$ echo $?
+1
+.fi
+.RE
+.PP
+Run \fBgit rebase origin/main\fR when you are ready, fix each file it names, \fBgit add\fR it and run \fBgit rebase \-\-continue\fR.
+.SS A new branch
+.PP
+.RS 4
+.nf
+$ git switch -c feat/new
+$ git sync
+git-sync: feat/new has no upstream branch. Push it with: git push -u origin feat/new
+.fi
+.RE
+.SS See every git command
+.PP
+.RS 4
+.nf
+$ git sync -v
++ git stash push -q --include-untracked -m 'git-sync on feat/ctx-warn'
+stashed 1 changed file
++ git fetch -q --prune origin
+git-sync: origin had 2 remote branches before the fetch
+fetched origin, nothing new on main
+feat/ctx-warn already has everything from origin/main, 2 commits to push
++ git stash pop -q
+restored the stashed file
+.fi
+.RE
+.SS Sync, then push
+.PP
+.RS 4
+.nf
+$ git sync && git push --force-with-lease
+.fi
+.RE
+.PP
+The \fB&&\fR stops the push when the sync failed.
+.SH TROUBLESHOOTING
+.PP
+\fBgit\-sync: NAME has no upstream branch. Push it with: git push \-u origin NAME\fR : The branch has never been pushed, or was created without \fB\-\-track\fR. Push it with \fB\-u\fR, or point it at an existing branch with \fBgit branch \-u origin/main\fR.
+.PP
+\fBgit\-sync: rebasing NAME onto origin/main hit a conflict. The rebase is undone and NAME is as it was\fR : The new commits on the upstream and yours change the same lines. Rebase by hand, or merge with \fBgit merge origin/main\fR if you prefer a merge commit.
+.PP
+\fBgit\-sync: your stashed changes clash with the new commits. They are still in the stash, see git stash show \-p\fR : The rebase worked, but your uncommitted changes touch lines the new commits changed. \fBgit status\fR shows the files with conflict markers. Fix them, then \fBgit stash drop\fR removes the saved copy.
+.PP
+\fBgit\-sync: git fetch origin failed, nothing was rebased\fR : The remote was not reachable, or it asked for a password with no terminal. The message from git above says which. Your stashed work is back in place.
+.PP
+\fBgit\-sync: origin/NAME is gone from origin. Point BRANCH at another with: git branch \-u REMOTE/BRANCH\fR : The branch your branch tracks was deleted on the server, often after its pull request was merged. Switch to \fBmain\fR, or track another branch with \fBgit branch \-u origin/main\fR.
+.SH EXIT STATUS
+.TP
+0
+The branch is up to date with its upstream.
+.TP
+1
+Not a repository, no upstream, a detached HEAD, a failed fetch, a rebase conflict, or a stash that did not apply.
+.TP
+2
+Bad usage, such as an argument.
+.TP
+3
+git is not installed.
+.TP
+4
+Refused, because a merge, rebase, cherry\-pick or revert is in progress.
+.SH SEE ALSO
+.PP
+\fBgit\-prune\-merged\fR, \fBgit\-undo\fR, \fBgit\-wip\fR, \fBgit\-fetch(1)\fR, \fBgit\-rebase(1)\fR, \fBgit\-stash(1)\fR

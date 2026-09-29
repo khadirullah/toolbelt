@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# git-sync: fetch and rebase the current branch onto its upstream.
+set -uo pipefail
+TB_CMD=git-sync
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: git sync [options]
+
+Fetch and rebase the current branch onto its upstream.
+
+Options:
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each git command before it runs
+  -h, --help          this help
+
+It stashes your uncommitted changes, new files included, fetches the
+upstream's remote with --prune, rebases onto the upstream, and puts the
+changes back. A rebase that hits a conflict is undone, so the branch is
+left as it was.
+
+Examples:
+  git sync
+  git sync -v
+  git sync && git push
+
+Needs: git 2.30 or newer. See man git-sync.
+Exit: 0 ok, 1 failed or a conflict, 2 bad usage, 3 no git, 4 refused.
+EOF
+}
+
+git_path() { git rev-parse --git-path "$1" 2>/dev/null; }
+
+check_busy() {
+    local what="" p
+    if [[ -d $(git_path rebase-merge) || -d $(git_path rebase-apply) ]]; then what="a rebase"
+    elif p=$(git_path MERGE_HEAD) && [[ -f $p ]]; then what="a merge"
+    elif p=$(git_path CHERRY_PICK_HEAD) && [[ -f $p ]]; then what="a cherry-pick"
+    elif p=$(git_path REVERT_HEAD) && [[ -f $p ]]; then what="a revert"
+    fi
+    [[ -z $what ]] || tb_die "$E_SAFE" "refused, $what is in progress. Finish it or abort it first"
+}
+
+# Remote-tracking refs of one remote, one per line.
+remote_refs() { git for-each-ref --format='%(refname)' "refs/remotes/$1/" 2>/dev/null | grep -v '/HEAD$'; }
+
+# Put the stashed changes back. Returns 1 when they conflict.
+restore_stash() {
+    (( stashed )) || return 0
+    tb_show git stash pop -q
+    if git stash pop -q >/dev/null 2>&1; then
+        if (( n_dirty == 1 )); then tb_info "restored the stashed file"; else tb_info "restored the stashed files"; fi
+        return 0
+    fi
+    tb_err "your stashed changes clash with the new commits. They are still in the stash, see git stash show -p"
+    return 1
+}
+
+main() {
+    local branch upstream remote merge before after new_n local_n gone=() r n_before
+    tb_need git
+    git rev-parse --git-dir >/dev/null 2>&1 || tb_die 1 "not inside a git repository"
+    [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]] ||
+        tb_die 1 "this is a bare repository, there is no branch to sync"
+    git rev-parse --verify -q HEAD >/dev/null || tb_die 1 "no commits yet, nothing to sync"
+    check_busy
+    branch=$(git symbolic-ref -q --short HEAD) ||
+        tb_die 1 "not on a branch, HEAD is detached. Switch to one with: git switch NAME"
+    upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) ||
+        tb_die 1 "$branch has no upstream branch. Push it with: git push -u origin $branch"
+    remote=$(git config "branch.$branch.remote")
+    merge=$(git config "branch.$branch.merge")
+    merge=${merge#refs/heads/}
+    cd "$(git rev-parse --show-toplevel)" || tb_die 1 "cannot enter the top of the repository"
+
+    # 1. Stash uncommitted work, new files too.
+    stashed=0
+    n_dirty=$(git status --porcelain --untracked-files=all | wc -l)
+    if (( n_dirty )); then
+        tb_run git stash push -q --include-untracked -m "git-sync on $branch" ||
+            tb_die 1 "git stash failed, nothing changed"
+        stashed=1
+        tb_info "stashed $(tb_plural "$n_dirty" "changed file")"
+    fi
+
+    # 2. Fetch, and note the remote branches the fetch prunes.
+    before=$(git rev-parse '@{upstream}')
+    if [[ $remote != . ]]; then
+        local refs_before
+        refs_before=$(remote_refs "$remote")
+        n_before=$(grep -c . <<<"$refs_before")
+        if ! tb_run git fetch -q --prune "$remote"; then
+            tb_err "git fetch $remote failed, nothing was rebased"
+            restore_stash
+            exit 1
+        fi
+        while IFS= read -r r; do
+            [[ -n $r ]] || continue
+            git show-ref --verify -q "$r" || gone+=("${r#refs/remotes/}")
+        done <<<"$refs_before"
+        tb_say "$remote had $n_before remote branches before the fetch"
+        after=$(git rev-parse '@{upstream}' 2>/dev/null) || {
+            tb_err "$upstream is gone from $remote. Point $branch at another with: git branch -u REMOTE/BRANCH"
+            restore_stash
+            exit 1
+        }
+        new_n=$(git rev-list --count "$before..$after")
+        if (( new_n )); then
+            tb_info "fetched $remote, $(tb_plural "$new_n" "new commit") on $merge"
+        else
+            tb_info "fetched $remote, nothing new on $merge"
+        fi
+    fi
+
+    # 3. Rebase onto the upstream.
+    local rc=0
+    local_n=$(git rev-list --count '@{upstream}..HEAD')
+    if git merge-base --is-ancestor '@{upstream}' HEAD; then
+        if (( local_n )); then
+            echo "$branch already has everything from $upstream, $(tb_plural "$local_n" "commit") to push"
+        else
+            echo "$branch is up to date with $upstream"
+        fi
+    elif (( local_n == 0 )); then
+        if tb_run git merge -q --ff-only '@{upstream}'; then
+            echo "fast-forwarded $branch to $upstream"
+        else
+            tb_err "could not fast-forward $branch to $upstream"
+            rc=1
+        fi
+    elif tb_show git rebase -q '@{upstream}'; git rebase -q '@{upstream}' >/dev/null 2>&1; then
+        echo "rebased $branch onto $upstream, $(tb_plural "$local_n" commit) replayed"
+    else
+        git rebase --abort >/dev/null 2>&1
+        tb_err "rebasing $branch onto $upstream hit a conflict. The rebase is undone and $branch is as it was"
+        tb_info "rebase by hand with: git rebase $upstream"
+        rc=1
+    fi
+
+    # 4. Put the stash back, then report pruned branches.
+    restore_stash || rc=1
+    if (( ${#gone[@]} )); then
+        if (( ${#gone[@]} == 1 )); then
+            tb_info "removed 1 remote branch that is gone from $remote"
+        else
+            tb_info "removed ${#gone[@]} remote branches that are gone from $remote"
+        fi
+        for r in "${gone[@]}"; do tb_say "gone: $r"; done
+    fi
+    return "$rc"
+}
+
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -*) tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)  tb_usage_error "git sync takes no arguments, it syncs the current branch with its upstream" ;;
+    esac
+    shift
+done
+
+main
+exit $?
