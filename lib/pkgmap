@@ -60,6 +60,7 @@ zstd           zstd                 zstd                 zstd                 zs
 yamllint       yamllint             yamllint             yamllint             yamllint             yamllint
 b2sum          coreutils            coreutils            coreutils            coreutils            coreutils
 b3sum          b3sum                b3sum                b3sum                b3sum                b3sum
+chmod          coreutils            coreutils            coreutils            coreutils            coreutils
 cmp            diffutils            diffutils            diffutils            diffutils            diffutils
 cp             coreutils            coreutils            coreutils            coreutils            coreutils
 diff           diffutils            diffutils            diffutils            diffutils            diffutils

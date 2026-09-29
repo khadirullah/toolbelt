@@ -1,0 +1,226 @@
+.TH "FIXPERMS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+fixperms \- set folders to 755 and files to 644, with a preview
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+fixperms [options] path ...
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Files copied from a USB stick, a Windows share or a zip file often arrive with the wrong modes. Everything is \fB777\fR, or everything is \fB600\fR and the web server cannot read it. \fBfixperms\fR puts a tree back to the usual modes. Folders get \fB755\fR, files get \fB644\fR, and scripts and programs keep their execute bit and get \fB755\fR.
+.PP
+It never changes anything before you see what will change. It counts the folders and files, shows how many of each would change and what modes they have now, and asks once:
+.PP
+.RS 4
+.nf
+site has 4 folders and 5 files.
+  folders to 755        3  now 777
+  files to 644          3  now 666, 600
+  files to 755          2  deploy.sh, css/main.css
+Change 8 modes? [y/N]
+.fi
+.RE
+.PP
+The \fBnow\fR column lists the most common current modes, up to three. The \fBfiles to 755\fR line lists the first three names instead, because those are the files it treats as programs, and you should see which ones.
+.PP
+A path that already has the right mode is left alone, so a second run prints \fBNothing to change\fR.
+.SH OPTIONS
+.SS What changes
+.TP
+\fB\-d\fR, \fB\-\-dirs\fR
+Change folders only.
+.TP
+\fB\-f\fR, \fB\-\-files\fR
+Change files only. With both \fB\-d\fR and \fB\-f\fR, it changes both.
+.TP
+\fB\-\-private\fR
+Use \fB700\fR for folders and \fB600\fR for files, and \fB700\fR for programs. For notes, keys and anything only you should read.
+.TP
+\fB\-\-dir\-mode MODE\fR
+The mode for folders, \fB755\fR by default. Three octal digits, such as \fB750\fR.
+.TP
+\fB\-\-file\-mode MODE\fR
+The mode for files, \fB644\fR by default.
+.TP
+\fB\-\-no\-exec\fR
+Give every file the file mode, scripts too.
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave matching names alone, and everything inside a matching folder. Can repeat.
+.SS Running
+.TP
+\fB\-n\fR, \fB\-\-dry\-run\fR
+Show what would change and stop.
+.TP
+\fB\-\-force\fR
+Allow a system folder or your home folder.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Change without asking. The safety checks still refuse.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step, and each \fBfind\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH HOW IT DECIDES
+.IP \(bu 2
+A folder gets the folder mode.
+.IP \(bu 2
+A file with any execute bit, for the owner, the group or others, counts as a program. It gets the file mode with an \fBx\fR added wherever there is an \fBr\fR. So \fB644\fR becomes \fB755\fR, \fB600\fR becomes \fB700\fR, and \fB640\fR becomes \fB750\fR.
+.IP \(bu 2
+Any other file gets the file mode.
+.IP \(bu 2
+With \fB\-\-no\-exec\fR, every file gets the file mode.
+.PP
+The execute rule has one catch. A file that arrived as \fB777\fR, such as \fBmain.css\fR above, has execute bits too, so it counts as a program and gets \fB755\fR. When a whole tree came in as \fB777\fR, run it with \fB\-\-no\-exec\fR first, then \fBchmod +x\fR the few scripts that need it:
+.PP
+.RS 4
+.nf
+$ fixperms -y --no-exec site
+$ chmod +x site/deploy.sh
+.fi
+.RE
+.PP
+With \fB\-x\fR, a pattern without a \fB/\fR matches a name anywhere in the tree, the way \fBfind \-name\fR does. A pattern with a \fB/\fR matches the path, the way \fBfind \-path\fR does. Quote patterns with \fB*\fR so the shell leaves them alone.
+.PP
+\fBfixperms\fR also takes a single file. \fBfixperms notes.txt\fR sets that one file.
+.SH SAFETY CHECKS
+.IP \(bu 2
+\fBSystem folders.\fR \fB/\fR, \fB/bin\fR, \fB/boot\fR, \fB/dev\fR, \fB/etc\fR, \fB/home\fR, \fB/lib\fR, \fB/lib32\fR, \fB/lib64\fR, \fB/libx32\fR, \fB/opt\fR, \fB/proc\fR, \fB/root\fR, \fB/run\fR, \fB/sbin\fR, \fB/srv\fR, \fB/sys\fR, \fB/usr\fR, \fB/usr/bin\fR, \fB/usr/lib\fR, \fB/usr/local\fR, \fB/usr/sbin\fR and \fB/var\fR are refused with exit 4. Their modes come from your packages, and \fBsudo fixperms /usr\fR would break \fBsudo\fR itself. A folder inside them, such as \fB/srv/www/shop\fR, is fine.
+.IP \(bu 2
+\fBYour home folder.\fR \fBfixperms ~\fR is refused with exit 4, because \fB~/.ssh\fR needs \fB700\fR and \fB600\fR and \fBssh\fR stops working with \fB755\fR. Pick a folder inside your home instead.
+.IP \(bu 2
+\fB`\-\-force`\fR skips both of those checks. Nothing skips the next ones.
+.IP \(bu 2
+\fBSymlinks.\fR \fBfixperms\fR never follows a symlink. A path you name that is a link is refused with exit 4. Links inside the tree are skipped, so a link to \fB/etc\fR inside your project cannot lead \fBfixperms\fR there.
+.IP \(bu 2
+\fBSpecial bits.\fR A folder or file with setuid, setgid or the sticky bit is left alone and counted as \fBleft alone\fR. A shared folder with setgid, such as \fB2775\fR, keeps its mode.
+.IP \(bu 2
+\fBThe question.\fR Without a terminal and without \fB\-y\fR, \fBfixperms\fR exits 4. Answering no exits 5.
+.PP
+The checks look at the path you type and at the real path behind it. \fB/bin\fR on Debian 13 is a link to \fB/usr/bin\fR, and both are refused as system folders.
+.SH PASS\-THROUGH
+.PP
+\fBfixperms\fR takes no options for \fBfind\fR or \fBchmod\fR. Use \fB\-x\fR to skip names.
+.SH NEEDS
+.PP
+\fBfind\fR, \fBchmod\fR and \fBstat\fR, from findutils and coreutils. Every distro has them. BusyBox has all three, and its \fBfind\fR supports the \fB\-perm /mode\fR tests that \fBfixperms\fR uses.
+.SH EXAMPLES
+.SS Fix a site copied from a USB stick
+.PP
+.RS 4
+.nf
+$ fixperms site
+site has 4 folders and 5 files.
+  folders to 755        3  now 777
+  files to 644          3  now 666, 600
+  files to 755          2  deploy.sh, css/main.css
+Change 8 modes? [y/N] y
+8 changed.
+$ fixperms site
+site has 4 folders and 5 files.
+Nothing to change, every mode is already right.
+.fi
+.RE
+.SS Only the files, with no programs
+.PP
+.RS 4
+.nf
+$ fixperms -n --files --no-exec site
+site has 4 folders and 5 files.
+  files to 644          5  now 666, 777, 775
+Dry run, nothing changed.
+.fi
+.RE
+.SS Leave the git folder and the scripts alone
+.PP
+.RS 4
+.nf
+$ fixperms -n -x .git -x '*.sh' site
+site has 3 folders and 4 files.
+  folders to 755        3  now 777
+  files to 644          3  now 666, 600
+  files to 755          1  css/main.css
+Dry run, nothing changed.
+.fi
+.RE
+.SS Make a folder private
+.PP
+.RS 4
+.nf
+$ fixperms -v --private site
+fixperms: counting what would change
+site has 4 folders and 5 files.
+  folders to 700        4  now 777, 755
+  files to 600          2  now 666
+  files to 700          2  deploy.sh, css/main.css
+Change 8 modes? [y/N] y
++ find -P site -type d '!' -perm /7000 '!' -perm 700 -exec chmod 700 '{}' +
++ find -P site -type f '!' -perm /7000 -perm /111 '!' -perm 700 -exec chmod 700 '{}' +
++ find -P site -type f '!' -perm /7000 '!' -perm /111 '!' -perm 600 -exec chmod 600 '{}' +
+8 changed.
+.fi
+.RE
+.SS A shared folder keeps its setgid bit
+.PP
+.RS 4
+.nf
+$ fixperms -n site
+site has 5 folders and 5 files.
+  folders to 755        3  now 777
+  files to 644          3  now 666, 600
+  files to 755          2  deploy.sh, css/main.css
+  left alone            1  setuid, setgid or sticky bit
+Dry run, nothing changed.
+.fi
+.RE
+.SS Refusals
+.PP
+.RS 4
+.nf
+$ fixperms /etc
+fixperms: refused, /etc is a system folder and its modes come from your packages. Pass --force if you are sure
+$ fixperms ~
+fixperms: refused, /home/khadir is your home folder and ~/.ssh needs 700 and 600. Pick a folder inside it, or pass --force
+$ fixperms link
+fixperms: refused, link is a symlink to site. fixperms never follows links, give the real path
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBfixperms: 12 changed, 3 could not change. They belong to another user, so run it with sudo\fR : Only the owner and root can change a mode. For a tree that belongs to \fBwww\-data\fR, run \fBsudo fixperms /srv/www/shop\fR.
+.PP
+A web server still returns 403 : Every folder above the site needs the \fBx\fR bit for the server's user too. \fBnamei \-l /srv/www/shop/index.html\fR shows the mode of each folder on the way. On Fedora and RHEL, SELinux can also block reads. Check with \fBls \-Z\fR and fix the label with \fBrestorecon \-R /srv/www/shop\fR.
+.PP
+A script stopped running after \fB\-\-no\-exec\fR : \fB\-\-no\-exec\fR takes the \fBx\fR bit off every file. Put it back with \fBchmod +x script.sh\fR.
+.PP
+\fBssh\fR says \fBbad permissions\fR after \fB\-\-force\fR on your home : Run \fBfixperms \-y \-\-private ~/.ssh\fR, which sets the folder to \fB700\fR and the keys to \fB600\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked, or there was nothing to change.
+.TP
+1
+It failed. A path is missing, or some modes could not change.
+.TP
+2
+Bad usage, such as a mode like \fB7777\fR or no path.
+.TP
+3
+\fBfind\fR, \fBchmod\fR or \fBstat\fR is missing.
+.TP
+4
+Refused. A system folder, your home folder, a symlink, or no terminal to ask in.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBchmod(1)\fR, \fBfind(1)\fR, \fBnamei(1)\fR
