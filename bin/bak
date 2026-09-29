@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# bak: copy a file aside before you edit it.
+set -uo pipefail
+TB_CMD=bak
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: bak [options] file ... [-- cp options]
+       bak -l | -r | -d | --prune N file ...
+
+Copy a file aside before you edit it.
+
+Options:
+  -l, --list          list the copies, newest first, with age and size
+  -r, --restore       put the newest copy back, after saving the current
+  -d, --diff          show what changed since the newest copy
+  --dir DIR           keep the copies in DIR instead of beside the file
+  --prune N           keep the newest N copies, trash the older ones
+  -y, --yes           restore or prune without asking
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to cp when making a copy, and to diff with -d.
+
+Examples:
+  bak nginx.conf
+  bak -l nginx.conf
+  bak -r nginx.conf
+  bak --prune 5 --dir ~/.bak ~/.bashrc
+
+Needs: cp, and diff for -d. See man bak.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# The folder that holds the copies of a path.
+copy_dir() {
+    if [[ -n $store ]]; then
+        echo "$store"
+    else
+        dirname -- "$1"
+    fi
+}
+
+# A copy's path as the user would type it, without a leading ./ when the
+# file was named without one.
+show_path() {
+    if [[ -z $store && $1 == ./* && $2 != ./* ]]; then
+        echo "${1#./}"
+    else
+        echo "$1"
+    fi
+}
+
+# Fill COPIES with the copies of a path, newest first. A copy is named
+# name.YYYY-MM-DD-HHMMSS.bak, or name.YYYY-MM-DD-HHMMSS-N.bak when two
+# copies were made in the same second.
+find_copies() {
+    local target=$1 dir base f rest keyed=() line
+    base=$(basename -- "$target")
+    dir=$(copy_dir "$target")
+    COPIES=()
+    [[ -d $dir ]] || return 0
+    for f in "$dir/$base".*.bak; do
+        [[ -e $f || -L $f ]] || continue
+        rest=${f#"$dir/$base."}
+        rest=${rest%.bak}
+        [[ $rest =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6})(-([0-9]+))?$ ]] || continue
+        keyed+=("$(printf '%s-%06d' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]:-0}")"$'\t'"$f")
+    done
+    (( ${#keyed[@]} )) || return 0
+    while IFS= read -r line; do
+        COPIES+=("$(show_path "${line#*$'\t'}" "$target")")
+    done < <(printf '%s\n' "${keyed[@]}" | sort -r)
+}
+
+# The time a copy was made, in seconds since the epoch, from its name.
+copy_time() {
+    local rest=${1%.bak}
+    rest=${rest##*.}
+    [[ $rest =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2}) ]] || { echo 0; return; }
+    date -d "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}" +%s 2>/dev/null || echo 0
+}
+
+# Make a new copy of a path and print its name.
+new_copy_name() {
+    local src=$1 dir base
+    base=$(basename -- "$src")
+    dir=$(copy_dir "$src")
+    show_path "$(tb_free_name "$dir/$base.$(date +%Y-%m-%d-%H%M%S).bak" file)" "$src"
+}
+
+# Check that the copy folder exists and can be written, making it for --dir.
+ready_dir() {
+    local dir
+    dir=$(copy_dir "$1")
+    if [[ -n $store && ! -d $dir ]]; then
+        tb_say "making $dir"
+        mkdir -p -- "$dir" || { tb_err "could not make $dir"; return 1; }
+    fi
+    if [[ ! -w $dir ]]; then
+        tb_err "$dir: permission denied, run it with sudo"
+        return 1
+    fi
+}
+
+# bak FILE: copy it beside itself, or into --dir.
+make_copy() {
+    local src=${1%/} dest
+    [[ -z $src ]] && src=/
+    if [[ ! -e $src && ! -L $src ]]; then
+        tb_err "$src: no such file or folder"
+        return 1
+    fi
+    [[ $src == / ]] && { tb_err "refusing to copy /"; return "$E_SAFE"; }
+    ready_dir "$src" || return 1
+    dest=$(new_copy_name "$src")
+    # -H follows a symlink given on the command line, so a linked dotfile
+    # is saved as its content. Links inside a folder stay links.
+    if ! tb_run cp -a -H ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$src" "$dest"; then
+        tb_err "could not copy $src to $dest"
+        [[ -e $dest ]] && rm -rf -- "$dest"
+        return 1
+    fi
+    echo "$src -> $dest"
+}
+
+# bak -l FILE
+list_copies() {
+    local target=${1%/} c now size
+    find_copies "$target"
+    if (( ${#COPIES[@]} == 0 )); then
+        tb_err "no copies of $target in $(copy_dir "$target")"
+        return 1
+    fi
+    now=$(date +%s)
+    for c in "${COPIES[@]}"; do
+        size=$(tb_human "$(tb_bytes "$c")")
+        printf '%-8s %7s  %s\n' "$(tb_age $(( now - $(copy_time "$c") ))) ago" "$size" "$c"
+    done
+}
+
+# bak -r FILE
+restore_copy() {
+    local target=${1%/} latest saved age
+    find_copies "$target"
+    if (( ${#COPIES[@]} == 0 )); then
+        tb_err "no copies of $target in $(copy_dir "$target")"
+        return 1
+    fi
+    latest=${COPIES[0]}
+    if [[ -e $target && -d $latest && ! -d $target ]] || [[ -d $target && ! -d $latest ]]; then
+        tb_err "$target and $latest are not the same kind, one is a folder. Restore it by hand"
+        return 1
+    fi
+    age=$(tb_age $(( $(date +%s) - $(copy_time "$latest") )))
+    if [[ -e $target || -L $target ]]; then
+        tb_confirm "Restore $target from the copy made $age ago? The current one is saved first."
+        ready_dir "$target" || return 1
+        saved=$(new_copy_name "$target")
+        if [[ -d $target && ! -L $target ]]; then
+            # A folder moves aside whole, so the restore leaves no stray files.
+            tb_run mv -- "$target" "$saved" || { tb_err "could not move $target aside"; return 1; }
+        else
+            tb_run cp -a -H -- "$target" "$saved" || { tb_err "could not save $target"; return 1; }
+        fi
+        tb_info "saved the current $target as $saved"
+    else
+        tb_confirm "Restore $target from the copy made $age ago?"
+    fi
+    if ! tb_run cp -a -- "$latest" "$target"; then
+        tb_err "could not copy $latest back to $target"
+        if [[ -n ${saved:-} && -d $saved && ! -e $target ]]; then
+            mv -- "$saved" "$target" && tb_err "put the current $target back"
+        fi
+        return 1
+    fi
+    echo "$latest -> $target"
+}
+
+# bak -d FILE
+diff_copy() {
+    local target=${1%/} latest rc flags=(-u)
+    tb_need diff
+    find_copies "$target"
+    if (( ${#COPIES[@]} == 0 )); then
+        tb_err "no copies of $target in $(copy_dir "$target")"
+        return 1
+    fi
+    [[ -e $target ]] || { tb_err "$target: no such file or folder"; return 1; }
+    latest=${COPIES[0]}
+    [[ -d $target ]] && flags=(-ru)
+    tb_run diff "${flags[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} -- "$latest" "$target"
+    rc=$?
+    case $rc in
+        0) tb_info "No changes since $latest." ;;
+        1) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# bak --prune N FILE
+prune_copies() {
+    local target=${1%/} old=() bytes=0 c
+    find_copies "$target"
+    if (( ${#COPIES[@]} <= keep )); then
+        tb_info "$(tb_plural "${#COPIES[@]}" copy copies) of $target, nothing to prune."
+        return 0
+    fi
+    old=("${COPIES[@]:keep}")
+    for c in "${old[@]}"; do
+        tb_info "trash  $c"
+        bytes=$(( bytes + $(tb_bytes "$c") ))
+    done
+    tb_confirm "Move $(tb_plural "${#old[@]}" "old copy" "old copies") of $target ($(tb_human "$bytes")) to the trash?"
+    tb_show_text "move ${#old[@]} copies to ${XDG_DATA_HOME:-$HOME/.local/share}/Trash"
+    if ! tb_trash "${old[@]}"; then
+        tb_err "could not move every copy to the trash"
+        return 1
+    fi
+    echo "$(tb_plural "${#old[@]}" "old copy" "old copies") of $target in the trash, $keep kept."
+}
+
+main() {
+    local f rc=0 r
+    (( ${#files[@]} )) || tb_usage_error "name a file or folder to copy"
+    if [[ $mode == make || $mode == restore ]]; then
+        tb_need cp
+    fi
+    for f in "${files[@]}"; do
+        case $mode in
+            make)    make_copy "$f" ;;
+            list)    list_copies "$f" ;;
+            restore) restore_copy "$f" ;;
+            diff)    diff_copy "$f" ;;
+            prune)   prune_copies "$f" ;;
+        esac
+        r=$?
+        (( r > rc )) && rc=$r
+    done
+    return "$rc"
+}
+
+set_mode() {
+    [[ $mode == make || $mode == "$1" ]] || tb_usage_error "use only one of -l, -r, -d and --prune"
+    mode=$1
+}
+
+mode=make
+store=""
+keep=0
+files=()
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -l|--list)    set_mode list ;;
+        -r|--restore) set_mode restore ;;
+        -d|--diff)    set_mode diff ;;
+        --prune)      tb_optarg "$@"; set_mode prune; keep=$2; shift
+                      [[ $keep =~ ^[0-9]+$ ]] && (( keep >= 1 )) || tb_usage_error "--prune needs a number of 1 or more"
+                      ;;
+        --dir)        tb_optarg "$@"; store=${2%/}; [[ -z $store ]] && store=/; shift ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            files+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

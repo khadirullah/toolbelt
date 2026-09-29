@@ -59,6 +59,7 @@ zip            zip                  zip                  zip                  zi
 zstd           zstd                 zstd                 zstd                 zstd                 zstd
 yamllint       yamllint             yamllint             yamllint             yamllint             yamllint
 cmp            diffutils            diffutils            diffutils            diffutils            diffutils
+cp             coreutils            coreutils            coreutils            coreutils            coreutils
 diff           diffutils            diffutils            diffutils            diffutils            diffutils
 find           findutils            findutils            findutils            findutils            findutils
 head           coreutils            coreutils            coreutils            coreutils            coreutils

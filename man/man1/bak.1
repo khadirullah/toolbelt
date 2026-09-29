@@ -1,0 +1,214 @@
+.TH "BAK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+bak \- copy a file aside before you edit it
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+bak [options] file ... [-- cp options]
+bak -l | -r | -d | --prune N file ...
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBbak\fR makes a dated copy of a file right next to it, so you can edit the file and still get the old version back. The copy of \fBnginx.conf\fR made at 14:30:12 on 29 September 2026 is called \fBnginx.conf.2026\-09\-29\-143012.bak\fR. The copy keeps the owner, the mode and the times of the original, because \fBbak\fR copies with \fBcp \-a\fR.
+.PP
+\fBbak\fR never overwrites a copy. When you make two copies in the same second, the second one gets a number, as in \fBnginx.conf.2026\-09\-29\-143012\-1.bak\fR, and it counts as the newer one.
+.PP
+It works on folders too. \fBbak site\fR copies the whole \fBsite\fR folder to \fBsite.2026\-09\-29\-143012.bak\fR with \fBcp \-a\fR, which keeps symlinks inside the folder as symlinks.
+.PP
+When the file you name is a symlink, such as a dotfile linked from a dotfiles repo, \fBbak\fR copies the file the link points to. The copy is a real file with the content, not a second link.
+.PP
+The other modes work on the copies that already exist:
+.IP \(bu 2
+\fB\-l\fR lists them, newest first, with their age and size.
+.IP \(bu 2
+\fB\-r\fR puts the newest copy back. Before it does, it saves the current file as a new copy, so a restore can be undone with another \fBbak \-r\fR.
+.IP \(bu 2
+\fB\-d\fR shows what changed between the newest copy and the file as it is now.
+.IP \(bu 2
+\fB\-\-prune N\fR keeps the newest N copies and moves the older ones to the trash.
+.PP
+\fBbak\fR finds the copies of a file by name. A copy is any file beside it called \fBname.YYYY\-MM\-DD\-HHMMSS.bak\fR or \fBname.YYYY\-MM\-DD\-HHMMSS\-N.bak\fR. Other files that end in \fB.bak\fR, such as \fBnginx.conf.old.bak\fR, are left alone.
+.SH OPTIONS
+.TP
+\fB\-l\fR, \fB\-\-list\fR
+List the copies of each file, newest first, with age and size.
+.TP
+\fB\-r\fR, \fB\-\-restore\fR
+Put the newest copy back, after saving the current file as a new copy. Asks first.
+.TP
+\fB\-d\fR, \fB\-\-diff\fR
+Show a unified diff from the newest copy to the current file.
+.TP
+\fB\-\-dir DIR\fR
+Keep the copies in DIR instead of beside the file. \fBbak\fR makes DIR when it does not exist. Use the same \fB\-\-dir\fR with \fB\-l\fR, \fB\-r\fR, \fB\-d\fR and \fB\-\-prune\fR.
+.TP
+\fB\-\-prune N\fR
+Keep the newest N copies and move the rest to the trash. Asks first. N is 1 or more.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Restore or prune without asking.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each step, and each \fBcp\fR, \fBmv\fR and \fBdiff\fR before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+Use only one of \fB\-l\fR, \fB\-r\fR, \fB\-d\fR and \fB\-\-prune\fR at a time. With none of them, \fBbak\fR makes a copy.
+.SH RESTORING
+.PP
+\fBbak \-r nginx.conf\fR does three things, in this order:
+.IP \(bu 2
+It finds the newest copy, for example \fBnginx.conf.2026\-09\-29\-143012.bak\fR, and asks \fBRestore nginx.conf from the copy made 3h ago? The current one is saved first. [y/N]\fR.
+.IP \(bu 2
+It saves the current \fBnginx.conf\fR as a new copy. That copy is now the newest.
+.IP \(bu 2
+It copies the old version back over \fBnginx.conf\fR with \fBcp \-a\fR, so the mode and times come back too.
+.PP
+Because step 2 makes the current file the newest copy, running \fBbak \-r\fR a second time puts back the version you had before the first restore. Restores never lose anything.
+.PP
+For a file, the copy goes back through \fBcp\fR, which writes into the existing file. A symlinked dotfile stays a symlink, and the file it points to gets the old content.
+.PP
+For a folder, the current folder moves aside whole with \fBmv\fR and becomes the new copy, and then the old copy is copied into place. Files you added after the copy was made do not linger in the restored folder. They are still in the copy that step 2 made.
+.PP
+When the file no longer exists, \fBbak \-r\fR copies the newest copy back without saving anything first.
+.SH WHERE THE COPIES GO
+.PP
+By default each copy sits beside its file, in the same folder. That keeps it easy to find, and it means you need write access to that folder. For files under \fB/etc\fR you need \fBsudo\fR, the same as for editing them.
+.PP
+\fB\-\-dir DIR\fR puts the copies in another folder, such as \fB~/.bak\fR. The copy keeps only the file name, so \fB/etc/hosts\fR and \fB~/projects/hosts\fR would share names in the same \fB\-\-dir\fR. Give each group of files its own folder if that matters to you.
+.SH SAFETY CHECKS
+.IP \(bu 2
+\fBbak\fR never overwrites a copy. A copy made in the same second gets a \fB\-1\fR, \fB\-2\fR and so on before \fB.bak\fR.
+.IP \(bu 2
+\fB\-r\fR and \fB\-\-prune\fR ask before they change anything. Without a terminal they refuse with exit 4 unless you pass \fB\-y\fR. Answering no exits 5.
+.IP \(bu 2
+\fB\-\-prune\fR moves old copies to the trash in \fB~/.local/share/Trash\fR, where your file manager can restore them. It never deletes them for good.
+.IP \(bu 2
+\fB\-r\fR refuses when the file is a folder and the copy is not, or the other way round.
+.IP \(bu 2
+\fBbak /\fR is refused with exit 4.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBcp\fR when \fBbak\fR makes a copy, and to \fBdiff\fR with \fB\-d\fR.
+.PP
+.RS 4
+.nf
+$ bak disk.img -- --reflink=auto
+$ bak -d nginx.conf -- -w
+.fi
+.RE
+.PP
+\fB\-\-reflink=auto\fR makes the copy instant on Btrfs and XFS, because the copy shares blocks with the original until one of them changes. \fB\-w\fR makes \fBdiff\fR ignore changes in white space.
+.SH NEEDS
+.PP
+\fBcp\fR from coreutils, or the \fBcp\fR in BusyBox. \fB\-d\fR also needs \fBdiff\fR, from the \fBdiffutils\fR package on every distro. Debian and Ubuntu install it by default. On Alpine, \fBapk add diffutils\fR gives the full \fBdiff\fR, and the BusyBox one also works.
+.SH EXAMPLES
+.SS Copy a config file before you edit it
+.PP
+.RS 4
+.nf
+$ bak nginx.conf
+nginx.conf -> nginx.conf.2026-09-29-143012.bak
+.fi
+.RE
+.SS See what you changed
+.PP
+.RS 4
+.nf
+$ bak -d nginx.conf
+--- nginx.conf.2026-09-29-143012.bak	2026-09-29 14:30:12.394283532 +0530
++++ nginx.conf	2026-09-29 14:41:56.426271431 +0530
+@@ -1,4 +1,4 @@
+ server {
+-    listen 80;
++    listen 443 ssl;
+     server_name example.com;
+ }
+.fi
+.RE
+.SS List the copies
+.PP
+.RS 4
+.nf
+$ bak -l nginx.conf
+2h ago       60B  nginx.conf.2026-09-29-143012.bak
+2d ago       55B  nginx.conf.2026-09-27-091200.bak
+.fi
+.RE
+.PP
+The age comes from the date in the name, which is when the copy was made. The file's own time is the time of the original, because \fBcp \-a\fR keeps it.
+.SS Put the old version back
+.PP
+.RS 4
+.nf
+$ bak -r nginx.conf
+Restore nginx.conf from the copy made 2h ago? The current one is saved first. [y/N] y
+saved the current nginx.conf as nginx.conf.2026-09-29-164356.bak
+nginx.conf.2026-09-29-143012.bak -> nginx.conf
+.fi
+.RE
+.SS Keep copies of dotfiles in one folder
+.PP
+.RS 4
+.nf
+$ bak -v --dir ~/.bak ~/.bashrc
+bak: making /home/khadir/.bak
++ cp -a -H -- /home/khadir/.bashrc /home/khadir/.bak/.bashrc.2026-09-29-164356.bak
+/home/khadir/.bashrc -> /home/khadir/.bak/.bashrc.2026-09-29-164356.bak
+.fi
+.RE
+.SS Keep only the newest two copies
+.PP
+.RS 4
+.nf
+$ bak --prune 2 nginx.conf
+trash  nginx.conf.2026-09-27-091200.bak
+Move 1 old copy of nginx.conf (55B) to the trash? [y/N] y
+1 old copy of nginx.conf in the trash, 2 kept.
+.fi
+.RE
+.SS Copy a whole folder
+.PP
+.RS 4
+.nf
+$ bak site
+site -> site.2026-09-29-164356.bak
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBbak: /etc: permission denied, run it with sudo\fR : The copy goes beside the file, and you cannot write to that folder. Run \fBsudo bak /etc/fstab\fR, or keep the copy somewhere you can write with \fB\-\-dir ~/.bak\fR.
+.PP
+\fBbak: no copies of nginx.conf in .\fR : There are no copies with the \fBname.YYYY\-MM\-DD\-HHMMSS.bak\fR pattern in that folder. If you made them with \fB\-\-dir\fR, pass the same \fB\-\-dir\fR again.
+.PP
+\fBbak: not asking without a terminal, pass \-\-yes to go ahead\fR : \fB\-r\fR and \fB\-\-prune\fR ask before they change anything. In a script or a cron job, add \fB\-y\fR.
+.PP
+\fBbak: nginx.conf and nginx.conf.2026\-09\-29\-143012.bak are not the same kind, one is a folder. Restore it by hand\fR : The name now belongs to a folder and the copy is a file, or the other way round. Move one of them and restore by hand with \fBcp \-a\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked. With \fB\-d\fR, the files may or may not differ.
+.TP
+1
+It failed, for example no copies exist, or the folder is not writable.
+.TP
+2
+Bad usage, such as two modes at once or \fB\-\-prune\fR without a number.
+.TP
+3
+\fBcp\fR or \fBdiff\fR is missing.
+.TP
+4
+Refused. No terminal to ask in, or \fBbak /\fR.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBmirror\fR, \fBlock\fR, \fBcp(1)\fR, \fBdiff(1)\fR
