@@ -1,0 +1,238 @@
+.TH "PORT" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+port \- show who is listening on a port
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+port [options] [PORT ...] [-- ss options]
+port --free
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBport\fR answers the question you ask when a server will not start because "address already in use". For each port you name, it prints one line per listening socket with the port, the address it listens on, the process id, the user that owns the process and the full command line.
+.PP
+.RS 4
+.nf
+8000/tcp  0.0.0.0  pid 4121  me  python3 -m http.server 8000
+.fi
+.RE
+.PP
+The address tells you who can reach the server:
+.IP \(bu 2
+\fB0.0.0.0\fR or \fB[::]\fR means every network interface. Other machines on your network can connect.
+.IP \(bu 2
+\fB127.0.0.1\fR or \fB[::1]\fR means this machine only.
+.IP \(bu 2
+Any other address, such as \fB192.168.1.24\fR, means that one interface.
+.PP
+A server that listens on both IPv4 and IPv6 shows two lines, one per address.
+.PP
+With no port, \fBport\fR lists every listening port on the machine, sorted by number. With \fB\-u\fR it looks at UDP instead of TCP. UDP has no "listening" state, so for UDP \fBport\fR shows every socket bound to the port.
+.PP
+\fBport\fR reads the sockets with \fBss\fR from iproute2. When \fBss\fR is missing it uses \fBlsof\fR. It reads the command line and the owner from \fB/proc\fR.
+.SS Processes of other users
+.PP
+Linux only shows you the process behind a socket when you own the process, or when you are root. For a port that a system service holds, such as CUPS on 631, \fBport\fR still sees that something listens, but not what:
+.PP
+.RS 4
+.nf
+631/tcp   127.0.0.1  owner hidden, run it with sudo to see the process
+.fi
+.RE
+.PP
+Run \fBsudo port 631\fR to see it, if \fBport\fR is in root's \fBPATH\fR, or \fBsudo ss \-tlnp 'sport = :631'\fR.
+.SS Containers
+.PP
+A port that a container publishes is held by a helper process, not by the program inside the container. For rootless podman that helper is \fBrootlessport\fR or \fBpasta\fR, and for Docker it is \fBdocker\-proxy\fR. When \fBport\fR sees one of these, it asks podman or docker which container publishes that port and names it:
+.PP
+.RS 4
+.nf
+5432/tcp  0.0.0.0  pid 1790  me  rootlessport, container pg-dev
+.fi
+.RE
+.PP
+Stop the container with \fBpodman stop pg\-dev\fR rather than killing the helper.
+.SH OPTIONS
+.TP
+\fB\-u\fR, \fB\-\-udp\fR
+Look at UDP sockets instead of TCP.
+.TP
+\fB\-k\fR, \fB\-\-kill\fR
+Stop the process that holds each port. It asks first.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+With \fB\-\-kill\fR, stop without asking. It is a usage error without \fB\-\-kill\fR.
+.TP
+\fB\-\-free\fR
+Print a TCP port between 8000 and 8999 that nothing listens on, then exit.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result lines. \fBport\fR has no other output, so this changes little.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show the \fBss\fR, \fBlsof\fR and \fBkill\fR commands before they run.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+A port may be written as \fB8000\fR or \fB:8000\fR. Anything outside 1 to 65535 is a usage error.
+.SH HOW \-\-KILL WORKS
+.PP
+\fB\-\-kill\fR stops the process, not the port. It goes like this for each process on the port:
+.IP \(bu 2
+It prints the line for the port, so you see what you are about to stop.
+.IP \(bu 2
+It asks \fBStop pid 4121 (python3)? [y/N]\fR. Only \fBy\fR or \fByes\fR goes on. With \fB\-y\fR it does not ask.
+.IP \(bu 2
+It sends \fBTERM\fR, the polite signal. Most programs close their files and exit.
+.IP \(bu 2
+It waits up to 5 seconds, checking every tenth of a second.
+.IP \(bu 2
+When the process is still running after 5 seconds, it asks again before it sends \fBKILL\fR. \fBKILL\fR cannot be caught, so the program gets no chance to save anything.
+.IP \(bu 2
+It checks the port again and prints \fBstopped after 0.1s. 8000/tcp is free.\fR
+.PP
+When a service manager such as systemd restarts the process, the port is taken again at once. \fBport\fR notices and says so. Stop the service instead, with \fBsystemctl stop NAME\fR.
+.SH SAFETY CHECKS
+.PP
+\fB\-\-kill\fR refuses in these cases:
+.IP \(bu 2
+The process is pid 1. That is systemd holding the port for socket activation, and it starts the real service the next time something connects. \fBport\fR tells you to stop the \fB.socket\fR unit, which \fBsystemctl list\-sockets\fR shows. Exit 4.
+.IP \(bu 2
+The process is the shell that runs \fBport\fR. Exit 4.
+.IP \(bu 2
+The process belongs to another user and you are not root. \fBport\fR prints the \fBsudo kill\fR line to run yourself. Exit 1.
+.IP \(bu 2
+\fBport\fR cannot see the process at all, because another user owns it. Exit 1.
+.IP \(bu 2
+There is no terminal to ask in and no \fB\-y\fR. Exit 4.
+.PP
+\fBport\fR never kills anything without first printing what it is.
+.SH \-\-FREE
+.PP
+\fBport \-\-free\fR prints the first TCP port from 8000 up that nothing listens on. Use it when you start a test server and do not care about the number:
+.PP
+.RS 4
+.nf
+$ python3 -m http.server "$(port --free)"
+.fi
+.RE
+.PP
+It checks \fB/proc/net/tcp\fR and \fB/proc/net/tcp6\fR, so it needs neither \fBss\fR nor \fBlsof\fR. Another program can still take the port between the check and your server starting. For a test that is rare enough not to matter.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBss\fR, or to \fBlsof\fR when \fBss\fR is missing. With \fBss\fR, the useful ones are \fB\-4\fR and \fB\-6\fR, to see only IPv4 or IPv6 sockets:
+.PP
+.RS 4
+.nf
+$ port 5353 -u -- -4
+5353/udp  0.0.0.0  owner hidden, run it with sudo to see the process
+.fi
+.RE
+.SH NEEDS
+.PP
+\fBss\fR from the \fBiproute2\fR package, which almost every distro installs. On Fedora the package is \fBiproute\fR. When \fBss\fR is missing, \fBport\fR uses \fBlsof\fR from the \fBlsof\fR package, and exits 3 with the install line when both are missing. \fBstat\fR and \fBtr\fR come with coreutils. \fBpodman\fR or \fBdocker\fR are only asked when a container helper holds the port.
+.SH EXAMPLES
+.SS Who holds a port
+.PP
+.RS 4
+.nf
+$ port 8000
+8000/tcp  0.0.0.0  pid 4121  me  python3 -m http.server 8000
+.fi
+.RE
+.SS Several ports at once
+.PP
+.RS 4
+.nf
+$ port 80 443 8000
+80/tcp    nobody listens
+443/tcp   nobody listens
+8000/tcp  0.0.0.0  pid 4121  me  python3 -m http.server 8000
+.fi
+.RE
+.PP
+The exit code is 1 here, because nothing listens on 80 or 443.
+.SS Every listening port
+.PP
+.RS 4
+.nf
+$ port
+631/tcp   127.0.0.1  owner hidden, run it with sudo to see the process
+631/tcp   [::1]  owner hidden, run it with sudo to see the process
+8000/tcp  0.0.0.0  pid 4121  me  python3 -m http.server 8000
+.fi
+.RE
+.SS Stop what holds a port
+.PP
+.RS 4
+.nf
+$ port -v -k 8000
++ ss -H -tlnp 'sport = :8000'
+8000/tcp  0.0.0.0  pid 4121  me  python3 -m http.server 8000
+Stop pid 4121 (python3)? [y/N] y
++ kill -TERM 4121
++ ss -H -tlnp 'sport = :8000'
+stopped after 0.1s. 8000/tcp is free.
+.fi
+.RE
+.SS A port that belongs to root
+.PP
+.RS 4
+.nf
+$ port -k 631
+631/tcp   127.0.0.1  owner hidden, run it with sudo to see the process
+631/tcp   [::1]  owner hidden, run it with sudo to see the process
+port: cannot see who holds 631/tcp. Find it with: sudo ss -tlnp 'sport = :631'
+.fi
+.RE
+.SS UDP
+.PP
+.RS 4
+.nf
+$ port -u 5353
+5353/udp  0.0.0.0  owner hidden, run it with sudo to see the process
+5353/udp  [::]  owner hidden, run it with sudo to see the process
+.fi
+.RE
+.SS A spare port for a test server
+.PP
+.RS 4
+.nf
+$ port --free
+8000
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBowner hidden, run it with sudo to see the process\fR : Another user, often root or a system account, owns the process. Run \fBsudo ss \-tlnp 'sport = :PORT'\fR to see it.
+.PP
+The server says "address already in use" but \fBport\fR says nobody listens : The old socket may be in the \fBTIME_WAIT\fR state for up to a minute after the server stopped. It is not listening, so \fBport\fR does not show it. Wait a minute, or start the server with \fBSO_REUSEADDR\fR. Also check UDP with \fB\-u\fR, and check that the server binds the address you think it does.
+.PP
+The server runs, but other machines cannot connect : The server may listen on \fB127.0.0.1\fR, which only this machine can reach, or a firewall blocks the port. Look at the address column, then check \fBsudo firewall\-cmd \-\-list\-ports\fR on Fedora or \fBsudo ufw status\fR on Ubuntu.
+.PP
+\fB\-\-kill\fR stops the process but the port is taken again at once : A service manager restarted it. Find the unit with \fBsystemctl status PID\fR and stop that.
+.SH EXIT STATUS
+.TP
+0
+Something listens on every port given, or \fB\-\-kill\fR stopped it.
+.TP
+1
+Nothing listens on at least one of the ports, or the process could not be stopped.
+.TP
+2
+Bad usage, such as a port above 65535 or \fB\-\-kill\fR with no port.
+.TP
+3
+Both \fBss\fR and \fBlsof\fR are missing.
+.TP
+4
+Refused. pid 1, this shell, or no terminal and no \fB\-y\fR.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBproc\fR, \fBsshfwd\fR, \fBss(8)\fR, \fBlsof(8)\fR, \fBkill(1)\fR

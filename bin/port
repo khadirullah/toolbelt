@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# port: who is listening on a port, and stop it if you ask.
+set -uo pipefail
+TB_CMD=port
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: port [options] [PORT ...] [-- ss options]
+       port --free
+
+Show who is listening on a port.
+
+Options:
+  -u, --udp           UDP instead of TCP
+  -k, --kill          stop the process, asking first
+  -y, --yes           stop it without asking, only with --kill
+  --free              print a spare TCP port between 8000 and 8999
+  -q, --quiet         only the result lines
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+With no PORT it lists every listening port.
+
+Pass-through:
+  Options after -- go to ss, or to lsof when ss is missing.
+
+Examples:
+  port 8000
+  port 80 443 5432
+  port -k 8000
+  port 53 -u -- -4
+
+Needs: ss from iproute2, or lsof. See man port.
+Exit: 0 ok, 1 nothing listens or it would not stop, 2 bad usage,
+      3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# Print one listener per line as "port<TAB>address<TAB>pid<TAB>name".
+# The pid and the name are empty when the process belongs to another user.
+listeners() {
+    local p=${1:-} filter=() line local_addr users pid name addr lport
+    if [[ $tool == ss ]]; then
+        [[ -n $p ]] && filter=("sport = :$p")
+        tb_show ss -H "-${proto:0:1}lnp" ${TB_PASS[@]+"${TB_PASS[@]}"} "${filter[@]}"
+        while IFS= read -r line; do
+            # State Recv-Q Send-Q Local Peer [users:(("name",pid=1,fd=3))]
+            read -r _ _ _ local_addr _ users <<<"$line"
+            lport=${local_addr##*:}
+            addr=${local_addr%:*}
+            addr=${addr%%%*}
+            pid="" name=""
+            if [[ $users =~ \(\(\"([^\"]*)\",pid=([0-9]+) ]]; then
+                name=${BASH_REMATCH[1]}
+                pid=${BASH_REMATCH[2]}
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$lport" "$addr" "$pid" "$name"
+        done < <(ss -H "-${proto:0:1}lnp" ${TB_PASS[@]+"${TB_PASS[@]}"} "${filter[@]}" 2>/dev/null)
+    else
+        local sel=-i${proto^^}
+        [[ -n $p ]] && sel+=":$p"
+        local args=(-nP -a "$sel" -F pcn)
+        [[ $proto == tcp ]] && args+=(-sTCP:LISTEN)
+        tb_show lsof ${TB_PASS[@]+"${TB_PASS[@]}"} "${args[@]}"
+        while IFS= read -r line; do
+            case $line in
+                p*) pid=${line:1} ;;
+                c*) name=${line:1} ;;
+                n*)
+                    local_addr=${line:1}
+                    local_addr=${local_addr%%->*}
+                    lport=${local_addr##*:}
+                    addr=${local_addr%:*}
+                    [[ $addr == '*' ]] && addr=0.0.0.0
+                    printf '%s\t%s\t%s\t%s\n' "$lport" "$addr" "$pid" "$name"
+                    ;;
+            esac
+        done < <(lsof ${TB_PASS[@]+"${TB_PASS[@]}"} "${args[@]}" 2>/dev/null)
+    fi
+}
+
+# The full command line of a pid, or the short name when /proc hides it.
+cmdline_of() {
+    local pid=$1 name=$2 cmd
+    cmd=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline")
+    cmd=${cmd% }
+    [[ -n $cmd ]] || cmd=$name
+    echo "$cmd"
+}
+
+# The user that owns a pid.
+owner_of() {
+    stat -c %U "/proc/$1" 2>/dev/null || echo "?"
+}
+
+# For a rootless podman or docker port helper, the container behind the port.
+container_of() {
+    local helper=$1 p=$2 tool_c="" cname ports
+    case $helper in
+        rootlessport*|conmon|pasta*|slirp4netns) tool_c=podman ;;
+        docker-proxy) tool_c=docker ;;
+        *) return 1 ;;
+    esac
+    tb_has "$tool_c" || return 1
+    while IFS=$'\t' read -r cname ports; do
+        # Ports look like 0.0.0.0:5432->5432/tcp, :::8080->80/tcp
+        if [[ ",$ports" =~ [:,\ ]$p-\> ]]; then
+            echo "$cname"
+            return 0
+        fi
+    done < <("$tool_c" ps --format '{{.Names}}	{{.Ports}}' 2>/dev/null)
+    return 1
+}
+
+# Print result lines for listener lines on stdin, and fill PIDS and PNAMES
+# with each process once. Ports held by hidden processes go in HIDDEN.
+print_lines() {
+    local lport addr pid name what cname seen=" "
+    while IFS=$'\t' read -r lport addr pid name; do
+        [[ -n $lport ]] || continue
+        if [[ -z $pid ]]; then
+            printf '%-9s %s  %s\n' "$lport/$proto" "$addr" "owner hidden, run it with sudo to see the process"
+            HIDDEN+=("$lport")
+            continue
+        fi
+        what=$(cmdline_of "$pid" "$name")
+        if cname=$(container_of "$name" "$lport"); then
+            what="$name, container $cname"
+        fi
+        printf '%-9s %s  pid %s  %s  %s\n' "$lport/$proto" "$addr" "$pid" "$(owner_of "$pid")" "$what"
+        if [[ $seen != *" $pid "* ]]; then
+            seen+="$pid "
+            PIDS+=("$pid")
+            PNAMES+=("$name")
+        fi
+    done
+}
+
+# The result lines for one port. Returns 1 when nobody listens.
+show_port() {
+    local p=$1 lines
+    lines=$(listeners "$p" | uniq)
+    if [[ -z $lines ]]; then
+        printf '%-9s %s\n' "$p/$proto" "nobody listens"
+        return 1
+    fi
+    print_lines <<<"$lines"
+}
+
+# Every listening port, sorted by number.
+show_all() {
+    local lines
+    lines=$(listeners "" | sort -t $'\t' -k1,1n -k2,2 | uniq)
+    if [[ -z $lines ]]; then
+        tb_info "port: nothing listens on $proto"
+        return 1
+    fi
+    print_lines <<<"$lines"
+}
+
+# True while a pid is alive.
+alive() { kill -0 "$1" 2>/dev/null; }
+
+# Stop one process: TERM, wait up to 5 seconds, then ask before KILL.
+stop_pid() {
+    local pid=$1 name=$2 p=$3 start i user
+    if (( pid == 1 )); then
+        tb_err "pid 1 holds $p/$proto for socket activation. Stop its .socket unit instead, find it with: systemctl list-sockets"
+        return "$E_SAFE"
+    fi
+    if (( pid == $$ || pid == PPID )); then
+        tb_err "pid $pid is this shell, not stopping it"
+        return "$E_SAFE"
+    fi
+    user=$(owner_of "$pid")
+    if [[ $user != "$(id -un)" ]] && (( EUID != 0 )); then
+        tb_err "pid $pid belongs to $user. Run: sudo kill $pid"
+        return 1
+    fi
+    tb_confirm "Stop pid $pid ($name)?"
+    start=$(tb_now_ms)
+    tb_run kill -TERM "$pid" || { tb_err "could not signal pid $pid"; return 1; }
+    for ((i = 0; i < 50; i++)); do
+        alive "$pid" || break
+        sleep 0.1
+    done
+    if alive "$pid"; then
+        tb_confirm "pid $pid did not stop after 5s. Send KILL, which gives it no chance to clean up?"
+        tb_run kill -KILL "$pid" || { tb_err "could not signal pid $pid"; return 1; }
+        for ((i = 0; i < 20; i++)); do
+            alive "$pid" || break
+            sleep 0.1
+        done
+        if alive "$pid"; then
+            tb_err "pid $pid is still running after KILL, it may be stuck in the kernel"
+            return 1
+        fi
+    fi
+    STOPPED_AFTER=$(tb_elapsed $(( $(tb_now_ms) - start )))
+    return 0
+}
+
+# Kill mode: show the port, stop each process on it, check it is free.
+kill_port() {
+    local p=$1 i rc=0 r
+    PIDS=() PNAMES=() HIDDEN=()
+    show_port "$p" || return 1
+    if (( ${#HIDDEN[@]} )) && (( ! ${#PIDS[@]} )); then
+        tb_err "cannot see who holds $p/$proto. Find it with: sudo ss -${proto:0:1}lnp 'sport = :$p'"
+        return 1
+    fi
+    for i in "${!PIDS[@]}"; do
+        stop_pid "${PIDS[i]}" "${PNAMES[i]}" "$p"
+        r=$?
+        (( r != 0 )) && rc=$r
+    done
+    (( rc == 0 )) || return "$rc"
+    if [[ -n $(listeners "$p") ]]; then
+        tb_err "stopped after $STOPPED_AFTER, but $p/$proto still has a listener, maybe a restarted service"
+        return 1
+    fi
+    echo "stopped after $STOPPED_AFTER. $p/$proto is free."
+}
+
+main() {
+    local p rc=0 r
+    if (( free )); then
+        p=$(tb_free_port 8000) || tb_die 1 "no free port between 8000 and 8999"
+        (( p < 9000 )) || tb_die 1 "no free port between 8000 and 8999"
+        echo "$p"
+        return 0
+    fi
+    if tb_has ss; then
+        tool=ss
+    else
+        tb_need lsof
+        tool=lsof
+    fi
+    if (( kill && ! ${#ports[@]} )); then
+        tb_usage_error "--kill needs a port number"
+    fi
+    if (( ! ${#ports[@]} )); then
+        PIDS=() PNAMES=() HIDDEN=()
+        show_all
+        return $?
+    fi
+    for p in "${ports[@]}"; do
+        if (( kill )); then
+            kill_port "$p"
+            r=$?
+        else
+            PIDS=() PNAMES=() HIDDEN=()
+            show_port "$p"
+            r=$?
+        fi
+        (( r != 0 && (rc == 0 || r > rc) )) && rc=$r
+    done
+    return "$rc"
+}
+
+ports=()
+proto=tcp
+kill=0
+free=0
+STOPPED_AFTER=0.0s
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -u|--udp)  proto=udp ;;
+        -k|--kill) kill=1 ;;
+        --free)    free=1 ;;
+        --)        shift; TB_PASS=("$@"); break ;;
+        -*)        tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            a=${1#:}
+            [[ $a =~ ^[0-9]+$ ]] && (( 10#$a >= 1 && 10#$a <= 65535 )) || tb_usage_error "$1 is not a port number, use 1 to 65535"
+            ports+=("$((10#$a))")
+            ;;
+    esac
+    shift
+done
+(( TB_YES && ! kill )) && tb_usage_error "--yes only goes with --kill"
+
+main
+exit $?
