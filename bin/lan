@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# lan: every device on the local network.
+set -uo pipefail
+TB_CMD=lan
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: lan [options] [-- arp-scan or nmap options]
+       lan [options] -P HOST [-- nmap options]
+
+Every device on the local network.
+
+Options:
+  -i, --iface IFACE   scan the subnet on this interface
+  --new               only devices not seen in earlier scans
+  -P, --ports HOST    scan the 1,000 common TCP ports on one device
+  -y, --yes           scan a subnet bigger than 1,024 addresses
+  -q, --quiet         only the device lines, no header or count
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to arp-scan, or to nmap when arp-scan is missing and
+  always for --ports.
+
+Examples:
+  lan
+  lan --new
+  lan -P nas.lan -- -sV
+
+Needs: arp-scan or nmap, and sudo, since both send raw packets.
+       avahi-resolve adds mDNS names. See man lan.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused.
+EOF
+}
+
+# Run a command as root, through sudo when this is not root already.
+as_root() {
+    if (( EUID == 0 )); then
+        tb_show "$@"
+        "$@"
+    else
+        tb_show sudo "$@"
+        sudo "$@"
+    fi
+}
+
+# The interface of the default route.
+default_iface() {
+    ip route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+ip2int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    echo $(( (a << 24) | (b << 16) | (c << 8) | d ))
+}
+
+int2ip() {
+    local n=$1
+    echo "$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))"
+}
+
+# A shorter vendor name: no company suffixes, 13 characters at most.
+short_vendor() {
+    local v=$1
+    [[ -z $v || $v == *Unknown* ]] && { echo "-"; return; }
+    v=${v%%,*}
+    v=$(sed -E 's/ \(.*\)$//; s/[[:space:]]+(Inc\.?|Ltd\.?|Co\.?|Corp\.?|Corporation|Incorporated|Limited|LLC|GmbH|AG|S\.?A\.?|B\.?V\.?|Technologies|Technology|Trading|Electronics|International|Communications|CO\.|LTD\.?|INC\.?)\b.*$//I' <<<"$v")
+    v=$(sed -E 's/[[:space:]]+(Co|Technologies|Technology|Trading|Electronics)$//I' <<<"$v")
+    # Cut long names at a word, so the column keeps a gap.
+    if (( ${#v} > 13 )); then
+        v=${v:0:14}
+        if [[ ${v:13:1} == " " ]]; then
+            v=${v:0:13}
+        elif [[ ${v:0:13} == *" "* ]]; then
+            v=${v:0:13}
+            v=${v% *}
+        else
+            v=${v:0:13}
+        fi
+    fi
+    v=${v%% }
+    echo "${v:--}"
+}
+
+# The vendor for a MAC from the local OUI files, for this machine's own row.
+oui_lookup() {
+    local prefix f v
+    prefix=$(tr -d ':' <<<"${1:0:8}" | tr '[:lower:]' '[:upper:]')
+    for f in /usr/share/arp-scan/ieee-oui.txt /usr/share/nmap/nmap-mac-prefixes /usr/share/ieee-data/oui.txt; do
+        [[ -r $f ]] || continue
+        v=$(awk -v p="$prefix" 'toupper($1) == p { $1 = ""; sub(/^[ \t]+/, ""); print; exit }' "$f")
+        [[ -n $v ]] && { echo "$v"; return; }
+    done
+}
+
+# A MAC with the locally administered bit set was made up by the device,
+# as phones do for each network.
+is_private_mac() {
+    local first=$(( 16#${1:0:2} ))
+    (( first & 2 ))
+}
+
+# A name for an address, from DNS or /etc/hosts, then from mDNS.
+name_of() {
+    local ip=$1 n=""
+    n=$(timeout 2 getent hosts "$ip" 2>/dev/null | awk '{ print $2; exit }')
+    if [[ -z $n ]] && tb_has avahi-resolve; then
+        n=$(timeout 2 avahi-resolve -a "$ip" 2>/dev/null | awk '{ print $2; exit }')
+    fi
+    echo "${n:--}"
+}
+
+# Scan with arp-scan or nmap. Prints "ip<TAB>mac<TAB>vendor" lines.
+scan() {
+    local out
+    if [[ $scanner == arp-scan ]]; then
+        out=$(as_root arp-scan -I "$iface" --localnet --plain ${TB_PASS[@]+"${TB_PASS[@]}"}) || return 1
+        awk -F'\t' '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !seen[$1]++ { print $1 "\t" tolower($2) "\t" $3 }' <<<"$out"
+    else
+        out=$(as_root nmap -sn -n -e "$iface" ${TB_PASS[@]+"${TB_PASS[@]}"} "$cidr") || return 1
+        awk '
+            /^Nmap scan report for / { if (ip != "") print ip "\t" mac "\t" ven; ip = $NF; gsub(/[()]/, "", ip); mac = ""; ven = "" }
+            /^MAC Address: / { mac = tolower($3); ven = $0; sub(/^[^(]*\(/, "", ven); sub(/\)$/, "", ven) }
+            END { if (ip != "") print ip "\t" mac "\t" ven }' <<<"$out"
+    fi
+}
+
+list_devices() {
+    local addr prefix nip start rows ip mac ven name total count state seen_file last_file last="" t0 took
+    local -A seen=()
+    tb_need ip
+    iface=${opt_iface:-$(default_iface)}
+    [[ -n $iface ]] || tb_die 1 "no default route, so no network to scan. Name an interface with -i"
+    ip link show "$iface" >/dev/null 2>&1 || tb_die 1 "no interface named $iface. List them with: ip -br link"
+    my_mac=$(ip -o link show "$iface" 2>/dev/null | sed -n 's|.*link/ether \([0-9a-f:]*\).*|\1|p')
+    [[ -n $my_mac ]] || tb_die 1 "$iface has no MAC address, so there is no LAN to scan on it. VPN links cannot be scanned."
+    addr=$(ip -o -4 addr show dev "$iface" 2>/dev/null | awk '{ print $4; exit }')
+    [[ -n $addr ]] || tb_die 1 "$iface has no IPv4 address. Check the link with: netcheck"
+    my_ip=${addr%/*}
+    prefix=${addr#*/}
+    nip=$(ip2int "$my_ip")
+    start=$(( nip & ((0xffffffff << (32 - prefix)) & 0xffffffff) ))
+    cidr="$(int2ip "$start")/$prefix"
+    total=$(( 1 << (32 - prefix) ))
+    if (( prefix < 22 )); then
+        tb_warn "$cidr has $(tb_commas "$total") addresses, which takes minutes to scan"
+        tb_confirm "Scan all of it?"
+    fi
+
+    (( EUID == 0 )) || tb_need sudo
+    tb_say "scanning $cidr on $iface with $scanner"
+    t0=$(tb_now_ms)
+    rows=$(scan) || tb_die 1 "$scanner failed on $iface. Run it with -v to see the command"
+    took=$(tb_elapsed $(( $(tb_now_ms) - t0 )))
+
+    # Add this machine, which neither tool lists.
+    rows=$(printf '%s\t%s\t%s\n%s\n' "$my_ip" "$my_mac" "$(oui_lookup "$my_mac")" "$rows" |
+        awk -F'\t' 'NF >= 2 && !seen[$1]++' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n)
+
+    state=$(tb_state_dir)/lan
+    mkdir -p "$state"
+    seen_file=$state/seen
+    last_file=$state/last
+    if [[ -f $seen_file ]]; then
+        while read -r mac _; do
+            [[ -n $mac ]] && seen[$mac]=1
+        done < "$seen_file"
+        [[ -f $last_file ]] && last=$(date -d "@$(cat "$last_file")" '+%b %-d' 2>/dev/null)
+    fi
+
+    local out="" names_dir ipw
+    tb_tmpdir names_dir || tb_die 1 "could not make a temp folder"
+    # Look the names up side by side, since a missing reverse DNS entry can
+    # take a second or two each.
+    while IFS=$'\t' read -r ip _ _; do
+        name_of "$ip" > "$names_dir/$ip" &
+    done <<<"$rows"
+    wait
+
+    # The IP column fits the longest address, and at least 15 characters.
+    ipw=$(awk -F'\t' 'BEGIN { w = 13 } length($1) > w { w = length($1) } END { print w + 2 }' <<<"$rows")
+    count=0
+    while IFS=$'\t' read -r ip mac ven; do
+        [[ -n $ip ]] || continue
+        if (( opt_new )) && [[ -n ${seen[$mac]:-} ]]; then
+            continue
+        fi
+        ven=$(short_vendor "$ven")
+        if [[ $ven == - && -n $mac ]] && is_private_mac "$mac"; then
+            ven="private MAC"
+        fi
+        name=$(cat "$names_dir/$ip" 2>/dev/null)
+        name=${name:--}
+        if [[ $ip == "$my_ip" ]]; then
+            [[ $name == - ]] && name=$(hostname 2>/dev/null || echo -)
+            name+=", this one"
+        fi
+        out+=$(printf '%-*s%-19s%-15s%s' "$ipw" "$ip" "${mac:--}" "$ven" "$name")$'\n'
+        ((count++))
+    done <<<"$rows"
+
+    # Remember every MAC seen, with the time it was first seen.
+    local now
+    now=$(date +%s)
+    while IFS=$'\t' read -r _ mac _; do
+        [[ -n $mac && -z ${seen[$mac]:-} ]] && printf '%s %s\n' "$mac" "$now" >> "$seen_file"
+    done <<<"$rows"
+    echo "$now" > "$last_file"
+
+    if (( TB_QUIET )); then
+        printf '%s' "$out"
+        return 0
+    fi
+    if (( opt_new )); then
+        if [[ -z $last ]]; then
+            echo "no earlier scan to compare with, so every device is new"
+        elif (( count == 0 )); then
+            echo "nothing new since the last scan on $last"
+            return 0
+        else
+            echo "$count new since the last scan on $last"
+        fi
+        printf '%s' "$out"
+        return 0
+    fi
+    echo "$cidr on $iface, $scanner, $(tb_commas "$total") addresses in $took"
+    echo
+    printf '%-*s%-19s%-15s%s\n' "$ipw" IP MAC VENDOR NAME
+    printf '%s' "$out"
+    echo "$(tb_plural "$count" device)"
+}
+
+# Resolve a host name to one IPv4 address.
+resolve() {
+    if [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$1"
+    else
+        getent ahostsv4 "$1" 2>/dev/null | awk '{ print $1; exit }'
+    fi
+}
+
+scan_ports() {
+    local host=$1 ip out ven closed took open_n
+    tb_need nmap
+    ip=$(resolve "$host")
+    [[ -n $ip ]] || tb_die 1 "cannot resolve $host. Try the IP address from: lan"
+    local args=(nmap --top-ports 1000 -T4 ${TB_PASS[@]+"${TB_PASS[@]}"} "$ip")
+    if (( EUID == 0 )); then
+        tb_show nmap -sS "${args[@]:1}"
+        out=$(nmap -sS "${args[@]:1}" 2>&1)
+    elif tb_has sudo; then
+        tb_show sudo nmap -sS "${args[@]:1}"
+        out=$(sudo nmap -sS "${args[@]:1}" 2>&1)
+    else
+        tb_info "no sudo, so a slower connect scan"
+        tb_show nmap -sT "${args[@]:1}"
+        out=$(nmap -sT "${args[@]:1}" 2>&1)
+    fi
+    (( $? == 0 )) || tb_die 1 "nmap failed on $host: $(tail -n1 <<<"$out")"
+    if grep -q 'Host seems down\|0 hosts up' <<<"$out"; then
+        tb_die 1 "$host ($ip) does not answer. It may be off, or a firewall drops every probe"
+    fi
+    ven=$(sed -n 's/^MAC Address: [0-9A-Fa-f:]* (\(.*\))$/\1/p' <<<"$out" | head -n1)
+    [[ -n $ven ]] && ven=$(short_vendor "$ven")
+    closed=$(sed -n 's/^Not shown: \([0-9]*\) closed.*/\1/p' <<<"$out" | head -n1)
+    took=$(sed -n 's/.*scanned in \([0-9.]*\) seconds.*/\1/p' <<<"$out" | head -n1)
+    if [[ $host == "$ip" ]]; then
+        printf '%s%s\n' "$ip" "${ven:+  $ven}"
+    else
+        printf '%s  %s%s\n' "$host" "$ip" "${ven:+  $ven}"
+    fi
+    open_n=0
+    while read -r p st svc _; do
+        [[ $st == open ]] || continue
+        printf '%-10s%s\n' "$p" "${svc:--}"
+        ((open_n++))
+    done < <(grep -E '^[0-9]+/(tcp|udp)[[:space:]]' <<<"$out")
+    local summary="$open_n open"
+    [[ -n $closed ]] && summary+=", $closed closed"
+    [[ -n $took ]] && summary+=", $(awk -v s="$took" 'BEGIN { printf "%.1fs", s }')"
+    echo "$summary"
+}
+
+main() {
+    if [[ -n $opt_ports ]]; then
+        scan_ports "$opt_ports"
+        return
+    fi
+    tb_need_any scanner arp-scan nmap
+    list_devices
+}
+
+opt_iface=""
+opt_new=0
+opt_ports=""
+scanner=""
+tb_expand "iP" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -i|--iface) tb_optarg "$@"; opt_iface=$2; shift ;;
+        -P|--ports) tb_optarg "$@"; opt_ports=$2; shift ;;
+        --new)      opt_new=1 ;;
+        --)         shift; TB_PASS=("$@"); break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          tb_usage_error "lan takes no arguments, got $1. Name a device with -P HOST" ;;
+    esac
+    shift
+done
+[[ -n $opt_ports ]] && (( opt_new )) && tb_usage_error "--new lists devices, and --ports scans one, pick one"
+
+main
+exit $?

@@ -1,0 +1,275 @@
+.TH "LAN" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+lan \- every device on the local network
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+lan [options] [-- arp-scan or nmap options]
+lan [options] -P HOST [-- nmap options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBlan\fR answers "what is on my network?" It scans the subnet of the default interface and lists each device that answers, with its IP address, its MAC address, the maker of its network card, and a name when one can be found.
+.PP
+.RS 4
+.nf
+$ lan
+[sudo] password for khadir:
+192.168.1.0/24 on wlp3s0, arp-scan, 256 addresses in 2.1s
+
+IP             MAC                VENDOR         NAME
+192.168.1.1    a4:91:b1:3e:07:c2  Technicolor    router.lan
+192.168.1.12   dc:a6:32:5f:1a:88  Raspberry Pi   pihole.lan
+192.168.1.24   8c:16:45:21:9b:e0  LCFC           km-laptop, this one
+192.168.1.31   f2:3a:9c:44:10:7d  private MAC    Pixel-8.local
+192.168.1.52   00:11:32:a8:4c:19  Synology       nas.lan
+192.168.1.77   50:c7:bf:02:e1:36  TP-LINK        HS110
+192.168.1.103  3c:22:fb:9d:05:4e  Apple          -
+7 devices
+.fi
+.RE
+.PP
+It is the command for finding the IP of a Raspberry Pi you just plugged in, checking what a new smart plug is called, or spotting a device you do not know.
+.PP
+With \fB\-P HOST\fR it looks at one device instead, and lists the TCP ports open on it.
+.SH HOW IT SCANS
+.PP
+\fBlan\fR sends an ARP request to every address in the subnet. ARP is how devices on one network find each other's MAC address, and every device answers it, even one whose firewall drops pings. That makes an ARP scan fast and complete, but it only works on the local network segment. Devices behind a router, or on the far end of a VPN, cannot be reached this way.
+.PP
+It uses \fBarp\-scan \-I IFACE \-\-localnet \-\-plain\fR when arp\-scan is installed, and \fBnmap \-sn \-n \-e IFACE SUBNET\fR when it is not. Both send raw packets, so both need root. \fBlan\fR runs them through \fBsudo\fR unless it already runs as root, and sudo asks for your password the first time.
+.PP
+The subnet comes from the IPv4 address of the interface. A laptop at \fB192.168.1.24/24\fR scans \fB192.168.1.0/24\fR, which is 256 addresses and takes about two seconds.
+.PP
+A subnet larger than 1,024 addresses, such as a \fB/16\fR on an office network, takes minutes. \fBlan\fR asks before it starts such a scan, and refuses with exit 4 when there is no terminal to ask in. \fB\-y\fR skips the question.
+.SH THE COLUMNS
+.TP
+IP
+The address that answered.
+.TP
+MAC
+The hardware address in the answer.
+.TP
+VENDOR
+The maker of the network card, from the first half of the MAC, as arp\-scan or nmap reports it. \fBlan\fR shortens it, so "Raspberry Pi Trading Ltd" shows as "Raspberry Pi".
+.TP
+NAME
+A name from DNS or \fB/etc/hosts\fR, through \fBgetent hosts\fR. When that finds none, an mDNS name from \fBavahi\-resolve\fR, such as \fBPixel\-8.local\fR. A dash when both find nothing.
+.PP
+This machine never answers its own ARP request, so \fBlan\fR adds it from \fBip link\fR and marks it \fBthis one\fR.
+.SS Private MAC
+.PP
+Phones and newer laptops make up a random MAC address for each Wi\-Fi network, so they cannot be tracked from network to network. A made\-up MAC has a bit set that marks it as locally assigned, and no maker owns it. \fBlan\fR shows those as \fBprivate MAC\fR.
+.PP
+The MAC stays the same on one network, so \fB\-\-new\fR still recognises the phone next time. The vendor column cannot say what the device is, though. The mDNS name often does, since phones announce names like \fBPixel\-8.local\fR or \fBKhadirs\-iPhone.local\fR.
+.PP
+Virtual machines also use locally assigned MACs. QEMU and KVM use \fB52:54:00\fR, which arp\-scan knows, so a VM shows as \fBQEMU virtual\fR rather than \fBprivate MAC\fR.
+.SH NEW DEVICES
+.PP
+Every scan saves the MAC addresses it saw, with the time each was first seen, in \fB~/.local/state/toolbelt/lan/seen\fR. \fB\-\-new\fR shows only the devices whose MAC is not in that file yet:
+.PP
+.RS 4
+.nf
+$ lan --new
+1 new since the last scan on Sep 22
+192.168.1.140  24:0a:c4:7b:31:d2  Espressif      -
+.fi
+.RE
+.PP
+Espressif makes the Wi\-Fi chip in many cheap smart plugs and bulbs, so that line is likely the plug you just set up.
+.PP
+The first scan has nothing to compare with, and says so. Delete the folder to start over.
+.PP
+The file keeps MACs from every network the machine has scanned. A laptop that scans at home and at work compares against both.
+.SH OPEN PORTS ON ONE DEVICE
+.PP
+\fB\-P HOST\fR runs an nmap port scan of the 1,000 most common TCP ports on one device:
+.PP
+.RS 4
+.nf
+$ lan -P nas.lan
+nas.lan  192.168.1.52  Synology
+22/tcp    ssh
+80/tcp    http
+443/tcp   https
+445/tcp   microsoft-ds
+5000/tcp  upnp
+5001/tcp  commplex-link
+6 open, 994 closed, 3.4s
+.fi
+.RE
+.PP
+The service names come from nmap's list of well\-known ports. They are guesses from the port number, so 5000 shows as \fBupnp\fR even when the Synology web page answers there. Pass \fB\-\- \-sV\fR to have nmap ask each service what it is, which takes longer.
+.PP
+With root, or through sudo, nmap uses a SYN scan (\fB\-sS\fR). It sends half a handshake, which is fast. Without sudo it falls back to a full TCP connect scan (\fB\-sT\fR), which is slower and shows up in the device's logs.
+.PP
+Scan only devices on your own network, or ones you have permission to scan. A port scan of someone else's machine is unwelcome at best, and against the rules of most networks.
+.SH OPTIONS
+.TP
+\fB\-i\fR, \fB\-\-iface IFACE\fR
+Scan the subnet on this interface instead of the one with the default route.
+.TP
+\fB\-\-new\fR
+Only devices whose MAC was not seen in an earlier scan.
+.TP
+\fB\-P\fR, \fB\-\-ports HOST\fR
+Scan the 1,000 common TCP ports on one device. HOST can be a name or an IP.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Scan a subnet bigger than 1,024 addresses without asking.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the device lines, with no header, table heading or count.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the scan command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to arp\-scan, or to nmap when arp\-scan is missing, and always to nmap for \fB\-P\fR:
+.PP
+.RS 4
+.nf
+$ lan -- --retry=3
+$ lan -P nas.lan -- -sV
+$ lan -P 192.168.1.1 -- -p 1-65535
+.fi
+.RE
+.PP
+\fB\-\-retry=3\fR makes arp\-scan ask each address three times, which helps on busy Wi\-Fi where answers get lost. \fB\-p 1\-65535\fR makes nmap check every port instead of the common 1,000.
+.SH NEEDS
+.PP
+\fBarp\-scan\fR or \fBnmap\fR, and \fBsudo\fR unless you run \fBlan\fR as root. \fBnmap\fR for \fB\-P\fR.
+.TP
+Debian, Ubuntu
+\fBsudo apt install arp\-scan nmap\fR
+.TP
+Fedora
+\fBsudo dnf install arp\-scan nmap\fR
+.TP
+Arch
+\fBsudo pacman \-S arp\-scan nmap\fR
+.TP
+openSUSE
+\fBsudo zypper install arp\-scan nmap\fR
+.TP
+Alpine
+\fBsudo apk add arp\-scan nmap\fR
+.PP
+\fBavahi\-resolve\fR is optional and adds mDNS names. It comes from \fBavahi\-utils\fR on Debian and Ubuntu, \fBavahi\-tools\fR on Fedora and Alpine, and \fBavahi\fR on Arch. It needs the avahi daemon running. \fBip\fR from iproute2 finds the interface and subnet.
+.SH EXAMPLES
+.SS Every device on the home network
+.PP
+.RS 4
+.nf
+$ lan
+192.168.122.0/24 on enp2s0, arp-scan, 256 addresses in 2.0s
+
+IP               MAC                VENDOR         NAME
+192.168.122.1    52:54:00:3e:07:c2  QEMU virtual   fedora
+192.168.122.12   dc:a6:32:5f:1a:88  Raspberry Pi   -
+192.168.122.31   f2:3a:9c:44:10:7d  private MAC    -
+192.168.122.77   50:c7:bf:02:e1:36  TP-LINK        -
+192.168.122.103  3c:22:fb:9d:05:4e  Apple          -
+192.168.122.210  42:4c:03:87:4d:42  private MAC    debian, this one
+6 devices
+.fi
+.RE
+.PP
+The IP column grows to fit the longest address.
+.SS Find the Raspberry Pi you just plugged in
+.PP
+.RS 4
+.nf
+$ lan -q | grep -i raspberry
+192.168.1.12   dc:a6:32:5f:1a:88  Raspberry Pi   -
+.fi
+.RE
+.SS Only what is new
+.PP
+.RS 4
+.nf
+$ lan --new
+1 new since the last scan on Sep 22
+192.168.1.140  24:0a:c4:7b:31:d2  Espressif      -
+.fi
+.RE
+.SS A second network card
+.PP
+.RS 4
+.nf
+$ lan -i enp0s31f6
+10.20.0.0/24 on enp0s31f6, arp-scan, 256 addresses in 1.9s
+\&...
+.fi
+.RE
+.SS With nmap, when arp\-scan is missing
+.PP
+.RS 4
+.nf
+$ lan -v
+lan: scanning 192.168.1.0/24 on wlp3s0 with nmap
++ sudo nmap -sn -n -e wlp3s0 192.168.1.0/24
+192.168.1.0/24 on wlp3s0, nmap, 256 addresses in 2.4s
+\&...
+.fi
+.RE
+.SS Ports on the NAS, with service versions
+.PP
+.RS 4
+.nf
+$ lan -v -P nas.lan -- -sV
++ sudo nmap -sS --top-ports 1000 -T4 -sV 192.168.1.52
+nas.lan  192.168.1.52  Synology
+22/tcp    ssh
+\&...
+.fi
+.RE
+.SS Nothing installed
+.PP
+.RS 4
+.nf
+$ lan
+lan: needs arp-scan. Install it with: sudo dnf install arp-scan
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+A device you know is there does not show up : It may be asleep. Phones drop off Wi\-Fi when the screen is off. Wake it and scan again. On busy Wi\-Fi, answers can get lost, so try \fBlan \-\- \-\-retry=3\fR.
+.PP
+Only this machine and the router show up : The interface may be a VPN, a Docker bridge or a VM network. Check which one \fBlan\fR scanned on the first line, and name the right one with \fB\-i\fR. \fBmyip\fR lists them all.
+.PP
+\fBhas no MAC address, so there is no LAN to scan on it\fR : The interface is a VPN or other point\-to\-point link. ARP does not work there. Use \fB\-i\fR with the Wi\-Fi or wired interface.
+.PP
+\fBhas no IPv4 address\fR : The interface is not connected, or only has IPv6. Run \fBnetcheck\fR.
+.PP
+Every name is a dash : The router does not publish names in DNS, and avahi is not installed or not running. Install \fBavahi\-utils\fR and start \fBavahi\-daemon\fR. Many routers also list connected devices with names in their admin page.
+.PP
+sudo asks for a password every time : That is sudo's own timeout. \fBlan\fR cannot scan without root.
+.PP
+\fB\-P\fR says the host does not answer : The device drops every probe, or it is off. Pass \fB\-\- \-Pn\fR to scan it anyway without the first ping.
+.SH EXIT STATUS
+.TP
+0
+The scan finished.
+.TP
+1
+It failed, such as no interface, no IPv4 address, a failed scan, or a device that does not answer.
+.TP
+2
+Bad usage, such as an argument without \fB\-P\fR, or \fB\-\-new\fR with \fB\-P\fR.
+.TP
+3
+\fBarp\-scan\fR and \fBnmap\fR are both missing, or \fBnmap\fR for \fB\-P\fR, or \fBsudo\fR.
+.TP
+4
+Refused a subnet over 1,024 addresses with no terminal to ask in.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBmyip\fR, \fBnetcheck\fR, \fBport\fR, \fBshare\fR, \fBarp\-scan(1)\fR, \fBnmap(1)\fR

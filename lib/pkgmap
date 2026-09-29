@@ -145,6 +145,7 @@ ping           iputils-ping         iputils              iputils              ip
 nmcli          network-manager      NetworkManager       networkmanager       NetworkManager       networkmanager-cli
 busybox        busybox              busybox              busybox              busybox              busybox
 iw             iw                   iw                   iw                   iw                   iw
+avahi-resolve  avahi-utils          avahi-tools          avahi                avahi-utils          avahi-tools
 resolvectl     systemd-resolved     systemd-resolved     systemd              systemd-resolved|systemd-network -
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
