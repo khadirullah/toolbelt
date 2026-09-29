@@ -7,7 +7,7 @@
 7z             7zip|p7zip-full      7zip|p7zip           7zip                 7zip|p7zip-full      7zip
 age            age                  age                  age                  age                  age
 ar             binutils             binutils             binutils             binutils             binutils
-archivemount   archivemount         archivemount         archivemount         archivemount         -
+archivemount   archivemount         archivemount         -                    archivemount         -
 arp-scan       arp-scan             arp-scan             arp-scan             arp-scan             arp-scan
 brotli         brotli               brotli               brotli               brotli               brotli
 bzip2          bzip2                bzip2                bzip2                bzip2                bzip2
@@ -38,7 +38,7 @@ notify-send    libnotify-bin        libnotify            libnotify            li
 openssl        openssl              openssl              openssl              openssl              openssl
 pbzip2         pbzip2               pbzip2               pbzip2               pbzip2               pbzip2
 pigz           pigz                 pigz                 pigz                 pigz                 pigz
-plzip          plzip                -                    plzip                plzip                -
+plzip          plzip                -                    -                    plzip                -
 podman         podman               podman               podman               podman               podman
 pv             pv                   pv                   pv                   pv                   pv
 python3        python3              python3              python               python3              python3
