@@ -1,0 +1,377 @@
+.TH "SECCHECK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+seccheck \- a quick security check of this machine, with fixes
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+seccheck [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBseccheck\fR runs 12 checks on the settings that matter most on a Linux desktop or small server, and gives each one a verdict. PASS means the setting is safe. WARN means it is weaker than it should be. FAIL means it leaves a real hole. SKIP means the check could not run here. Every WARN and FAIL comes with the exact command or setting that fixes it.
+.PP
+It is a first look, not an audit. It checks the common mistakes, such as a firewall that is off, sshd taking passwords, a private key others can read, or security updates left waiting. It does not scan for malware, read every config file, or test services from the outside.
+.PP
+\fBseccheck\fR only reads. It never changes a setting, never installs anything, never runs \fBsudo\fR itself, and never talks to the network. The fix lines are for you to run once you have read them.
+.SS Running as root or not
+.PP
+Most checks work as a normal user. Two need root to read their files on most distros, \fBsudo\fR (for \fB/etc/sudoers\fR) and sometimes \fBssh\fR (when \fB/etc/ssh/sshd_config\fR or an included file is private). As a normal user those checks say SKIP and name the file they could not read, and the summary counts them.
+.PP
+.RS 4
+.nf
+SKIP  sudo          needs root to read /etc/sudoers
+12 checks: 5 pass, 4 warn, 1 fail, 2 skipped (1 need root)
+To run them too: sudo seccheck
+.fi
+.RE
+.PP
+Run \fBsudo seccheck\fR for the full picture. As root, the \fB~/.ssh\fR check looks at the home folder of the user who ran sudo, not at root's own.
+.SS The output
+.PP
+Each result is one line with the verdict, the check name and what it found. Fix lines follow under a WARN or FAIL, marked \fBfix\fR. A check that found several things, such as open ports, lists them under each other.
+.PP
+The last line counts the verdicts. With \fB\-q\fR it is the only line.
+.SH CHECKS
+.TP
+\fBfirewall\fR
+Label: firewall. What it reads: firewalld, ufw or nftables, whichever is installed
+.TP
+\fBmac\fR
+Label: selinux, apparmor or mac. What it reads: SELinux mode or the AppArmor module
+.TP
+\fBupdates\fR
+Label: updates. What it reads: pending security updates, from the package lists on disk
+.TP
+\fBssh\fR
+Label: ssh password, ssh root. What it reads: the sshd config and every file it includes
+.TP
+\fBsecureboot\fR
+Label: secure boot. What it reads: the UEFI secure boot state
+.TP
+\fBencryption\fR
+Label: encryption. What it reads: whether \fB/\fR sits on a LUKS encrypted device
+.TP
+\fBports\fR
+Label: open ports. What it reads: TCP ports listening on the network
+.TP
+\fBsudo\fR
+Label: sudo. What it reads: sudo rules that need no password
+.TP
+\fBsshdir\fR
+Label: ~/.ssh. What it reads: modes of \fB~/.ssh\fR, private keys and \fBauthorized_keys\fR
+.TP
+\fBscreenlock\fR
+Label: screen lock. What it reads: the desktop's lock and idle settings
+.TP
+\fBpath\fR
+Label: PATH. What it reads: folders in PATH others can write to
+.TP
+\fBetc\fR
+Label: /etc files. What it reads: files in \fB/etc\fR others can write to
+.PP
+\fBseccheck \-\-list\fR prints the same list with a line on each.
+.SS firewall
+.PP
+\fBseccheck\fR looks for firewalld first, then ufw, then an nftables service.
+.IP \(bu 2
+\fBfirewalld\fR must be running. The default zone must not be \fBtrusted\fR, which lets everything in, and must not open a range of 100 or more ports. PASS names the zone.
+.IP \(bu 2
+\fBufw\fR must say \fBENABLED=yes\fR in \fB/etc/ufw/ufw.conf\fR.
+.IP \(bu 2
+\fBnftables\fR passes when \fBnftables.service\fR is active.
+.PP
+With none of them running, it is a WARN, with the install line for the firewall your distro ships, firewalld on Fedora and openSUSE and ufw elsewhere.
+.PP
+A firewall matters most on a laptop that joins other people's networks. On a machine behind a home router, it is a second wall behind the first.
+.SS mac
+.PP
+Mandatory access control limits what a program can do even when it runs as root. Fedora and RHEL use SELinux. Debian, Ubuntu and openSUSE use AppArmor.
+.IP \(bu 2
+SELinux \fBEnforcing\fR passes. \fBPermissive\fR is a WARN, because it logs what it would block but blocks nothing. \fBDisabled\fR is a WARN with the steps to turn it back on, which include a relabel at the next boot.
+.IP \(bu 2
+AppArmor passes when the kernel module says it is enabled.
+.IP \(bu 2
+Neither is a WARN.
+.PP
+\fB\-\-only selinux\fR and \fB\-\-only apparmor\fR both run this check.
+.SS updates
+.PP
+This check asks the package manager what it would upgrade, without downloading anything and without taking the package lock, so it is safe to run while an update runs.
+.TP
+apt
+Command: \fBapt\-get \-s dist\-upgrade\fR. Security updates are: packages from a \fB\-security\fR suite
+.TP
+dnf
+Command: \fBdnf \-C updateinfo list \-\-security\fR. Security updates are: advisories marked \fB/Sec.\fR
+.TP
+zypper
+Command: \fBzypper list\-patches \-\-category security\fR. Security updates are: patches marked needed
+.TP
+pacman
+Command: \fBpacman \-Qu\fR. Security updates are: not marked, every update counts
+.TP
+apk
+Command: \fBapk version \-l '<'\fR. Security updates are: not marked, every update counts
+.PP
+Any pending security update is a FAIL. The fix is \fBpkg upgrade\fR. On apt, \fBseccheck\fR also warns when the package lists are more than 3 days old, because then it cannot know about new updates. On pacman and apk, pending updates are a WARN, because those tools do not say which ones fix security problems.
+.PP
+The check reads the lists already on disk. It does not refresh them, so run \fBsudo apt update\fR or its equal first for a current answer.
+.SS ssh
+.PP
+This check runs only when sshd is running, as \fBssh.service\fR, \fBsshd.service\fR or a socket unit. With no sshd, it passes.
+.PP
+\fBseccheck\fR reads \fB/etc/ssh/sshd_config\fR the way sshd does. It follows each \fBInclude\fR line in place, in order, and keeps the first value it finds for each setting, because sshd does the same. Lines inside a \fBMatch\fR block apply only to some connections, so they are skipped.
+.IP \(bu 2
+\fBPasswordAuthentication\fR must be \fBno\fR. The default is yes, so a config that never sets it is a WARN. Password logins let anyone on the internet guess passwords. Keys cannot be guessed.
+.IP \(bu 2
+\fBPermitRootLogin yes\fR is a FAIL. The default, \fBprohibit\-password\fR, lets root in with a key only, which passes.
+.PP
+The fix tells you where to put the line. When the config includes \fB/etc/ssh/sshd_config.d/\fR, the fix names \fB/etc/ssh/sshd_config.d/00\-local.conf\fR. The \fB00\fR matters. sshd keeps the first value it reads, and files in that folder load in name order, so a line in \fB50\-local.conf\fR would lose to a \fB50\-cloud\-init.conf\fR that sets the opposite. After the change, \fBsvc restart ssh\fR applies it. Keep your current session open until you have tested a new login.
+.SS secureboot
+.PP
+On a UEFI machine, secure boot must be on. It stops a changed boot loader or kernel from starting. \fBseccheck\fR asks \fBmokutil \-\-sb\-state\fR, or reads the \fBSecureBoot\fR EFI variable when mokutil is missing. A BIOS machine has no secure boot, so the check says SKIP.
+.PP
+Turning it on is a firmware setting. With it on, kernel modules you build yourself, such as the NVIDIA driver or VirtualBox, must be signed, which most distros set up for you through a MOK key.
+.SS encryption
+.PP
+\fB/\fR must sit on a LUKS encrypted device. \fBseccheck\fR asks \fBfindmnt\fR which device holds \fB/\fR, and \fBlsblk\fR whether a \fBcrypt\fR device is among its parents, which covers LUKS alone, LVM on LUKS and LUKS on LVM.
+.PP
+Without encryption, anyone who takes the laptop or the drive can read every file. The fix is only possible at reinstall, in the installer, so this is a WARN, not a FAIL.
+.SS ports
+.PP
+\fBseccheck\fR runs \fBss \-Htlnp\fR and lists every TCP port that listens on the network. Ports on \fB127.0.0.1\fR and \fB::1\fR only take connections from this machine, so it leaves them out. sshd is left out too, because the ssh check covers it.
+.PP
+Each port shows the address, the program and its pid. As a normal user, \fBss\fR cannot see the owner of a port started by another user, so that line says \fBowner hidden, root can see it\fR.
+.PP
+Any such port is a WARN. The fix is to bind the program to \fB127.0.0.1\fR in its own config, or to stop it with \fBport NUMBER \-\-kill\fR. A web server meant for the network is fine, and the WARN is the reminder that it is open.
+.SS sudo
+.PP
+Every sudo rule should ask for a password. A \fBNOPASSWD\fR rule lets anything that runs as your user become root at once, including a malicious script or a browser exploit. \fBseccheck\fR reads \fB/etc/sudoers\fR and every file in \fB/etc/sudoers.d\fR, and fails on the first \fBNOPASSWD\fR or \fB!authenticate\fR it finds. It also fails when a sudoers file is writable by anyone but root.
+.PP
+The fix is \fBsudo visudo \-f FILE\fR, which checks the syntax before it saves. Never edit sudoers with a plain editor, because one typo locks you out of sudo.
+.SS sshdir
+.PP
+\fB~/.ssh\fR should be mode 700 and each private key 600.
+.IP \(bu 2
+A folder others can write to is a FAIL, because they could add a key to \fBauthorized_keys\fR.
+.IP \(bu 2
+A private key others can read is a FAIL. ssh refuses such a key anyway.
+.IP \(bu 2
+\fBauthorized_keys\fR writable by others is a FAIL.
+.IP \(bu 2
+A folder others can list, such as 755, is a WARN.
+.PP
+\fBseccheck\fR finds private keys by their first line, which contains \fBPRIVATE KEY\fR. It reads only that line, never the key.
+.SS screenlock
+.PP
+The screen should lock on its own when you walk away. \fBseccheck\fR reads the desktop's settings.
+.TP
+GNOME, Budgie, Pantheon, Unity
+\fBorg.gnome.desktop.screensaver lock\-enabled\fR and \fBorg.gnome.desktop.session idle\-delay\fR, through gsettings
+.TP
+Cinnamon
+the \fBorg.cinnamon.desktop\fR keys of the same names
+.TP
+MATE
+\fBorg.mate.screensaver\fR
+.TP
+KDE Plasma
+\fBAutolock\fR and \fBTimeout\fR in \fBkscreenlockerrc\fR, through kreadconfig5 or kreadconfig6
+.PP
+A lock that is off, or a screen that never goes idle, is a WARN. So is an idle time over 15 minutes. With no known desktop, such as on a server or over ssh, the check says SKIP.
+.SS path
+.PP
+No folder in PATH may be writable by others, because anyone could put a program there named \fBls\fR or \fBsudo\fR. An empty entry or \fB.\fR in PATH is a WARN, because then a command in the current folder runs before the real one.
+.SS etc
+.PP
+No file in \fB/etc\fR may be writable by others. \fBseccheck\fR runs \fBfind /etc \-xdev \-type f \-perm \-0002\fR and fails on the first file it finds. Such a file is almost always a mistake from a \fBchmod 777\fR.
+.SH OPTIONS
+.TP
+\fB\-\-only CHECKS\fR
+Run only these checks, comma separated, such as \fBssh,ports\fR. The names are in the table above. \fBselinux\fR and \fBapparmor\fR run \fBmac\fR. \fBsecure\-boot\fR, \fBssh\-dir\fR and \fBscreen\-lock\fR work too.
+.TP
+\fB\-\-strict\fR
+Exit 1 on a WARN as well as on a FAIL.
+.TP
+\fB\-\-list\fR
+List the checks and what each one reads, and run none.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the summary line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each check as it starts, and each command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH PER\-DISTRO NOTES
+.IP \(bu 2
+\fBDebian and Ubuntu.\fR No firewall is on by default, except Ubuntu, which installs ufw but leaves it off. Both pass for AppArmor. The ssh service is \fBssh.service\fR.
+.IP \(bu 2
+\fBFedora.\fR firewalld and SELinux are on by default. The ssh service is \fBsshd.service\fR. The updates check uses dnf's cached advisories, so run \fBsudo dnf check\-update\fR first when the cache is old.
+.IP \(bu 2
+\fBRHEL, Rocky and Alma.\fR As Fedora. Security advisories are marked Important or Critical, which the updates line counts separately.
+.IP \(bu 2
+\fBArch.\fR Nothing is on by default. pacman does not mark security updates, so every pending update is a WARN. \fBarch\-audit\fR gives a security\-only list.
+.IP \(bu 2
+\fBopenSUSE.\fR firewalld and AppArmor are on by default. zypper marks security patches.
+.IP \(bu 2
+\fBAlpine.\fR The updates check uses apk and counts every update. There is no desktop, so the screen lock check says SKIP.
+.SH NEEDS
+.PP
+Nothing is required. Each check uses the tool it needs when it is present and says SKIP when it is not.
+.IP \(bu 2
+\fBss\fR, from iproute2, for ports.
+.IP \(bu 2
+\fBsystemctl\fR, for firewall, ssh and nftables state.
+.IP \(bu 2
+\fBfindmnt\fR and \fBlsblk\fR, from util\-linux, for encryption.
+.IP \(bu 2
+\fBmokutil\fR, for secure boot, or the EFI variables when it is missing.
+.IP \(bu 2
+\fBgsettings\fR or \fBkreadconfig5\fR/\fBkreadconfig6\fR, for the screen lock.
+.IP \(bu 2
+The package manager, for updates.
+.SH EXAMPLES
+.SS A desktop virtual machine
+.PP
+.RS 4
+.nf
+$ seccheck
+WARN  firewall      no firewall is running
+      fix  sudo apt install ufw, then
+           sudo ufw enable
+PASS  apparmor      enabled
+FAIL  updates       60 security updates pending
+      fix  pkg upgrade
+PASS  ssh           sshd is not running
+SKIP  secure boot   this machine boots with BIOS, not UEFI
+WARN  encryption    / is not on LUKS
+      fix  only at reinstall, turn on disk encryption
+           in the installer
+WARN  open ports    8820/tcp on 0.0.0.0, python pid 390057
+                    8870/tcp on 0.0.0.0, python pid 969585
+                    8894/tcp on 0.0.0.0, python3 pid 1750199
+                    8840/tcp on 0.0.0.0, python3 pid 649883
+      fix  bind them to 127.0.0.1, or stop them: port 8820 --kill
+SKIP  sudo          needs root to read /etc/sudoers
+PASS  ~/.ssh        no ~/.ssh folder
+WARN  screen lock   the screen never goes idle, so it never locks
+      fix  set a blank screen delay in the desktop settings
+PASS  PATH          no world-writable folders
+PASS  /etc files    no world-writable files
+12 checks: 5 pass, 4 warn, 1 fail, 2 skipped (1 need root)
+To run them too: sudo seccheck
+$ echo $?
+1
+.fi
+.RE
+.PP
+The 60 security updates are the one FAIL. Four development web servers listen on every address, which the ports check points out.
+.SS A cloud server with a risky sshd and sudo setup
+.PP
+.RS 4
+.nf
+$ sudo seccheck --only ssh,sudo
+WARN  ssh password  sshd is running and takes passwords
+      fix  add "PasswordAuthentication no" to
+           /etc/ssh/sshd_config.d/00-local.conf, then
+           svc restart ssh
+FAIL  ssh root      PermitRootLogin yes, root can log in with a password
+      fix  add "PermitRootLogin prohibit-password" to
+           /etc/ssh/sshd_config.d/00-local.conf, then
+           svc restart ssh
+FAIL  sudo          NOPASSWD for %wheel in /etc/sudoers.d/90-wheel
+      fix  sudo visudo -f /etc/sudoers.d/90-wheel, drop NOPASSWD
+3 checks: 0 pass, 1 warn, 2 fail
+.fi
+.RE
+.PP
+\fBPermitRootLogin yes\fR came from \fB50\-cloud\-init.conf\fR. The fix goes in \fB00\-local.conf\fR so sshd reads it first.
+.SS Just the ssh folder and PATH
+.PP
+.RS 4
+.nf
+$ seccheck --only sshdir,path
+WARN  ~/.ssh        folder 755, others can list it
+      fix  chmod 700 /home/khadir/.ssh
+PASS  PATH          no world-writable folders
+2 checks: 1 pass, 1 warn, 0 fail
+.fi
+.RE
+.SS See what a check runs
+.PP
+.RS 4
+.nf
+$ seccheck -v --only ports
+seccheck: checking ports
++ ss -Htlnp
+WARN  open ports    3000/tcp on 0.0.0.0, node pid 8120
+                    8080/tcp on *, owner hidden, root can see it
+      fix  bind them to 127.0.0.1, or stop them: port 3000 --kill
+1 check: 0 pass, 1 warn, 0 fail
+.fi
+.RE
+.PP
+Port 8080 belongs to another user, so a normal user cannot see its owner.
+.SS A one\-line result for a script
+.PP
+.RS 4
+.nf
+$ seccheck -q; echo $?
+12 checks: 5 pass, 4 warn, 1 fail, 2 skipped (1 need root)
+1
+$ seccheck -q --only ssh,path --strict; echo $?
+2 checks: 2 pass, 0 warn, 0 fail
+0
+.fi
+.RE
+.SS The list of checks
+.PP
+.RS 4
+.nf
+$ seccheck --list
+firewall    firewalld, ufw or nftables is on, and lets in little
+mac         SELinux is enforcing or AppArmor is on
+updates     no security updates wait, from the package lists on disk
+ssh         sshd takes no passwords and no root password logins
+secureboot  secure boot is on, on a UEFI machine
+encryption  / sits on a LUKS encrypted device
+ports       no TCP port listens on the network, other than sshd
+sudo        every sudo rule asks for a password, needs root to read
+sshdir      ~/.ssh is 700 and private keys are 600
+screenlock  the desktop locks the screen when idle
+path        no folder in PATH is world-writable, and . is not in it
+etc         no file in /etc is world-writable
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB`seccheck: no check named X`\fR The name is not in the list. Run \fBseccheck \-\-list\fR for the names.
+.PP
+\fBThe ssh check says SKIP, needs root.\fR One of the sshd config files is readable by root only, which is common for files that cloud\-init writes. Run \fBsudo seccheck \-\-only ssh\fR.
+.PP
+\fBThe updates check passes, but I know updates are out.\fR The package lists on disk are old. Refresh them with \fBsudo apt update\fR, \fBsudo dnf check\-update\fR or \fBsudo zypper refresh\fR, then run the check again.
+.PP
+\fBA port I need shows as open.\fR That is the point of the WARN. If the service is meant for the network, keep it, and make sure the firewall only lets in the addresses that should reach it.
+.PP
+\fBThe screen lock check says SKIP over ssh.\fR It needs the desktop session's settings, which an ssh session cannot see. Run it in a terminal on the desktop.
+.PP
+\fBI fixed PasswordAuthentication, but it still warns.\fR An earlier file sets it to yes, and sshd keeps the first value. Put your line in \fB00\-local.conf\fR as the fix says, and check with \fBsudo sshd \-T | grep \-i password\fR.
+.SH EXIT STATUS
+.TP
+0
+No check failed. With \fB\-\-strict\fR, no check failed or warned.
+.TP
+1
+A check failed. With \fB\-\-strict\fR, a check failed or warned.
+.TP
+2
+Bad usage, such as an unknown check name or a word that is not an option.
+.PP
+SKIP never changes the exit status.
+.SH SEE ALSO
+.PP
+\fBport\fR, \fBsvc\fR, \fBpkg\fR, \fBfixperms\fR, \fBsshd_config(5)\fR, \fBsudoers(5)\fR, \fBss(8)\fR

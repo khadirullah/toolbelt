@@ -124,8 +124,14 @@ paccache       -                    -                    pacman-contrib       - 
 lsblk          util-linux           util-linux           util-linux           util-linux           lsblk
 findmnt        util-linux           util-linux           util-linux           util-linux           findmnt
 systemd-analyze systemd             systemd              systemd              systemd              -
+gsettings      libglib2.0-bin       glib2                glib2                glib2-tools          glib
+mokutil        mokutil              mokutil              mokutil              mokutil              -
+getenforce     selinux-utils        libselinux-utils     -                    selinux-tools        -
+ufw            ufw                  ufw                  ufw                  -                    ufw
+firewall-cmd   firewalld            firewalld            firewalld            firewalld            -
 tput           ncurses-bin          ncurses              ncurses              ncurses-utils        ncurses
 getent         libc-bin             glibc-common         glibc                glibc                musl-utils
+kreadconfig5   libkf5config-bin     kf5-kconfig-core     kconfig5             -                    -
 apt-get        apt                  -                    -                    -                    -
 dnf            -                    dnf                  -                    -                    -
 pacman         -                    -                    pacman               -                    -

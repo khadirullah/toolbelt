@@ -1,0 +1,630 @@
+#!/usr/bin/env bash
+# seccheck: a quick security check of this machine, with fixes.
+set -uo pipefail
+TB_CMD=seccheck
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: seccheck [options]
+
+A quick security check of this machine, with fixes.
+
+Options:
+      --only CHECKS   only these checks, comma separated, such as ssh,ports
+      --strict        count WARN as FAIL for the exit code
+      --list          list the checks and what each one reads
+  -q, --quiet         only the summary line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Checks:
+  firewall mac updates ssh secureboot encryption ports sudo sshdir
+  screenlock path etc
+
+Examples:
+  seccheck
+  seccheck --only ssh,ports
+  seccheck -q --strict
+  sudo seccheck
+
+Needs: nothing. ss, systemctl, lsblk and the rest are used when present.
+See man seccheck.
+Exit: 0 ok, 1 a check failed (or warned with --strict), 2 bad usage.
+EOF
+}
+
+# Tests point this at a fake tree with etc/, sys/ and so on in it.
+ROOT=${TB_ROOTFS:-}
+
+ALL_CHECKS=(firewall mac updates ssh secureboot encryption ports sudo sshdir screenlock path etc)
+
+declare -A WHAT=(
+    [firewall]="firewalld, ufw or nftables is on, and lets in little"
+    [mac]="SELinux is enforcing or AppArmor is on"
+    [updates]="no security updates wait, from the package lists on disk"
+    [ssh]="sshd takes no passwords and no root password logins"
+    [secureboot]="secure boot is on, on a UEFI machine"
+    [encryption]="/ sits on a LUKS encrypted device"
+    [ports]="no TCP port listens on the network, other than sshd"
+    [sudo]="every sudo rule asks for a password, needs root to read"
+    [sshdir]="~/.ssh is 700 and private keys are 600"
+    [screenlock]="the desktop locks the screen when idle"
+    [path]="no folder in PATH is world-writable, and . is not in it"
+    [etc]="no file in /etc is world-writable"
+)
+
+N_PASS=0 N_WARN=0 N_FAIL=0 N_SKIP=0 N_ROOT=0
+
+# Print one result: status, label, text, then fix lines.
+# Usage: report WARN "ssh password" "sshd takes passwords" "fix line" "more fix"...
+report() {
+    local st=$1 label=$2 text=$3 col=""
+    shift 3
+    case $st in
+        PASS) N_PASS=$(( N_PASS + 1 )); col=$C_GRN ;;
+        WARN) N_WARN=$(( N_WARN + 1 )); col=$C_YEL ;;
+        FAIL) N_FAIL=$(( N_FAIL + 1 )); col=$C_RED ;;
+        SKIP) N_SKIP=$(( N_SKIP + 1 )); col=$C_DIM ;;
+    esac
+    (( TB_QUIET )) && return 0
+    # More lines of text go under the first, in the text column.
+    printf '%s%-4s%s  %-12s  %s\n' "$col" "$st" "$C_OFF" "$label" "${text%%$'\n'*}"
+    while [[ $text == *$'\n'* ]]; do
+        text=${text#*$'\n'}
+        printf '%20s%s\n' "" "${text%%$'\n'*}"
+    done
+    local first=1 line
+    for line in "$@"; do
+        if (( first )); then
+            printf '      fix  %s\n' "$line"
+            first=0
+        else
+            printf '           %s\n' "$line"
+        fi
+    done
+}
+
+# A check that needs root, when not root.
+need_root() {
+    N_ROOT=$(( N_ROOT + 1 ))
+    report SKIP "$1" "needs root to read ${2#"$ROOT"}"
+}
+
+# Run a read-only command, shown with -v. Its errors are hidden.
+q() {
+    tb_show "$@"
+    "$@" 2>/dev/null
+}
+
+# True when a systemd unit is active.
+active() {
+    tb_has systemctl || return 1
+    tb_show systemctl is-active "$1"
+    systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- checks
+
+check_firewall() {
+    local zone ports range lo hi pm
+    if tb_has firewall-cmd; then
+        if ! active firewalld.service; then
+            report FAIL firewall "firewalld is installed but not running" "sudo systemctl enable --now firewalld"
+            return
+        fi
+        zone=$(q firewall-cmd --get-default-zone)
+        if [[ -z $zone ]]; then
+            report PASS firewall "firewalld is running"
+            return
+        fi
+        if [[ $zone == trusted ]]; then
+            report FAIL firewall "zone trusted lets everything in" "sudo firewall-cmd --set-default-zone=public"
+            return
+        fi
+        ports=$(q firewall-cmd --zone="$zone" --list-ports)
+        for range in $ports; do
+            if [[ $range =~ ^([0-9]+)-([0-9]+)/ ]]; then
+                lo=${BASH_REMATCH[1]} hi=${BASH_REMATCH[2]}
+                if (( hi - lo >= 100 )); then
+                    report WARN firewall "zone $zone lets in ports $lo-$hi" "sudo firewall-cmd --set-default-zone=public"
+                    return
+                fi
+            fi
+        done
+        report PASS firewall "firewalld on, zone $zone"
+        return
+    fi
+    if tb_has ufw || [[ -e $ROOT/etc/ufw/ufw.conf ]]; then
+        if [[ ! -r $ROOT/etc/ufw/ufw.conf ]]; then
+            need_root firewall "$ROOT/etc/ufw/ufw.conf"
+        elif grep -qiE '^[[:space:]]*ENABLED[[:space:]]*=[[:space:]]*yes' "$ROOT/etc/ufw/ufw.conf"; then
+            report PASS firewall "ufw is on"
+        else
+            report FAIL firewall "ufw is installed but off" "sudo ufw enable"
+        fi
+        return
+    fi
+    if active nftables.service; then
+        report PASS firewall "the nftables service is running"
+        return
+    fi
+    pm=$(tb_pm)
+    case $pm in
+        dnf|zypper) report WARN firewall "no firewall is running" \
+            "sudo $pm install firewalld, then" "sudo systemctl enable --now firewalld" ;;
+        *) local line
+           line=$(tb_install_line ufw) || line="install ufw"
+           report WARN firewall "no firewall is running" "$line, then" "sudo ufw enable" ;;
+    esac
+}
+
+check_mac() {
+    local mode="" f=$ROOT/sys/fs/selinux/enforce
+    if tb_has getenforce; then
+        mode=$(q getenforce)
+    elif [[ -r $f ]]; then
+        if [[ $(<"$f") == 1 ]]; then mode=Enforcing; else mode=Permissive; fi
+    fi
+    case $mode in
+        Enforcing) report PASS selinux enforcing; return ;;
+        Permissive) report WARN selinux "permissive, it logs but blocks nothing" \
+            "sudo setenforce 1, and set SELINUX=enforcing" "in /etc/selinux/config"; return ;;
+    esac
+    f=$ROOT/sys/module/apparmor/parameters/enabled
+    if [[ -r $f && $(<"$f") == Y ]]; then
+        report PASS apparmor enabled
+        return
+    fi
+    if [[ $mode == Disabled ]]; then
+        report WARN selinux "disabled" "set SELINUX=enforcing in /etc/selinux/config," "then run sudo touch /.autorelabel and reboot"
+        return
+    fi
+    report WARN mac "no SELinux or AppArmor" "turn on the one your distro ships, AppArmor on" \
+        "Debian, Ubuntu and openSUSE, SELinux on Fedora"
+}
+
+check_updates() {
+    local pm out total=0 sec=0 imp=0 age="" newest now
+    pm=$(tb_pm)
+    case $pm in
+        apt)
+            out=$(q apt-get -s -o Debug::NoLocking=1 dist-upgrade)
+            total=$(grep -c '^Inst ' <<<"$out")
+            sec=$(grep '^Inst ' <<<"$out" | grep -ci 'security')
+            if [[ -d $ROOT/var/lib/apt/lists ]]; then
+                newest=$(find "$ROOT/var/lib/apt/lists" -maxdepth 1 -type f -name '*Release' -printf '%T@\n' 2>/dev/null |
+                    sort -n | tail -n 1)
+                newest=${newest%.*}
+                printf -v now '%(%s)T' -1
+                if [[ -n $newest ]] && (( now - newest > 3 * 86400 )); then
+                    age="the package lists are $(tb_age $(( now - newest ))) old"
+                fi
+            fi ;;
+        dnf)
+            out=$(q dnf -q -C updateinfo list --security)
+            sec=$(grep -cE '/Sec\.' <<<"$out")
+            imp=$(grep -cE '(Important|Critical)/Sec\.' <<<"$out")
+            total=$sec ;;
+        zypper)
+            out=$(q zypper -n --no-refresh -q list-patches --category security)
+            sec=$(grep -c '| needed' <<<"$out")
+            imp=$(grep '| needed' <<<"$out" | grep -ciE 'important|critical')
+            total=$sec ;;
+        pacman)
+            out=$(q pacman -Qu)
+            total=$(grep -c . <<<"$out") ;;
+        apk)
+            out=$(q apk version -l '<')
+            total=$(grep -c ' < ' <<<"$out") ;;
+        *)
+            report SKIP updates "no package manager this check knows"
+            return ;;
+    esac
+    if (( sec > 0 )); then
+        local text
+        text="$(tb_plural "$sec" "security update") pending"
+        (( imp > 0 )) && text+=", $imp important"
+        [[ -n $age ]] && text+=", and $age"
+        report FAIL updates "$text" "pkg upgrade"
+    elif [[ $pm == pacman || $pm == apk ]] && (( total > 0 )); then
+        report WARN updates "$(tb_plural "$total" update) pending, $pm does not mark security ones" "pkg upgrade"
+    elif [[ -n $age ]]; then
+        report WARN updates "none pending, but $age" "sudo apt update, then run seccheck again"
+    elif (( total > 0 )); then
+        report PASS updates "no security updates, $total other"
+    else
+        report PASS updates "up to date"
+    fi
+}
+
+# Collect the sshd config lines that apply to every connection in
+# SSH_LINES, in the order sshd reads them, with Include files expanded in
+# place. Files it cannot read go to UNREADABLE. It runs in this shell, not
+# in $(...), so both arrays survive.
+ssh_lines() {
+    local file=$1 line key rest pat f inmatch=0
+    if [[ ! -r $file ]]; then
+        UNREADABLE+=("$file")
+        return
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%%#*}
+        line=${line//=/ }
+        read -r key rest <<<"$line"
+        [[ -n $key ]] || continue
+        case ${key,,} in
+            match) inmatch=1 ;;
+            include)
+                (( inmatch )) && continue
+                for pat in $rest; do
+                    [[ $pat == /* ]] || pat=/etc/ssh/$pat
+                    for f in "$ROOT"$pat; do
+                        [[ -e $f ]] && ssh_lines "$f"
+                    done
+                done ;;
+            *) (( inmatch )) || SSH_LINES+="$key $rest"$'\n' ;;
+        esac
+    done <"$file"
+}
+
+check_ssh() {
+    local unit="" u conf pw root lines fixfile
+    for u in ssh.service sshd.service ssh.socket sshd.socket; do
+        if active "$u"; then unit=${u%.*}; break; fi
+    done
+    if [[ -z $unit ]]; then
+        report PASS ssh "sshd is not running"
+        return
+    fi
+    conf=$ROOT/etc/ssh/sshd_config
+    UNREADABLE=()
+    SSH_LINES=""
+    tb_say "reading $conf and the files it includes"
+    ssh_lines "$conf"
+    lines=$SSH_LINES
+    if (( ${#UNREADABLE[@]} )); then
+        need_root "ssh" "${UNREADABLE[0]}"
+        return
+    fi
+    # sshd keeps the first value it reads for each keyword.
+    pw=$(awk 'tolower($1) == "passwordauthentication" { print tolower($2); exit }' <<<"$lines")
+    root=$(awk 'tolower($1) == "permitrootlogin" { print $2; exit }' <<<"$lines")
+    if [[ -d $ROOT/etc/ssh/sshd_config.d ]] && grep -qiE '^[[:space:]]*Include' "$conf"; then
+        fixfile=/etc/ssh/sshd_config.d/00-local.conf
+    else
+        fixfile=/etc/ssh/sshd_config
+    fi
+    if [[ ${pw:-yes} == yes ]]; then
+        report WARN "ssh password" "sshd is running and takes passwords" \
+            "add \"PasswordAuthentication no\" to" "$fixfile, then" "svc restart $unit"
+    else
+        report PASS "ssh password" "PasswordAuthentication no"
+    fi
+    case ${root:-prohibit-password} in
+        yes) report FAIL "ssh root" "PermitRootLogin yes, root can log in with a password" \
+                 "add \"PermitRootLogin prohibit-password\" to" "$fixfile, then" "svc restart $unit" ;;
+        *) report PASS "ssh root" "PermitRootLogin ${root:-prohibit-password}" ;;
+    esac
+}
+
+check_secureboot() {
+    local out var byte
+    if [[ ! -d $ROOT/sys/firmware/efi ]]; then
+        report SKIP "secure boot" "this machine boots with BIOS, not UEFI"
+        return
+    fi
+    if tb_has mokutil; then
+        out=$(q mokutil --sb-state)
+    fi
+    if [[ -z ${out:-} ]]; then
+        for var in "$ROOT"/sys/firmware/efi/efivars/SecureBoot-*; do
+            [[ -r $var ]] || continue
+            byte=$(od -An -tu1 "$var" 2>/dev/null | awk '{ v = $NF } END { print v }')
+            if [[ $byte == 1 ]]; then out="SecureBoot enabled"; else out="SecureBoot disabled"; fi
+        done
+    fi
+    case $out in
+        *enabled*) report PASS "secure boot" enabled ;;
+        *disabled*) report WARN "secure boot" disabled "turn it on in the firmware setup. Modules you build," \
+                        "such as NVIDIA or VirtualBox, then need signing" ;;
+        *) report SKIP "secure boot" "the firmware does not say" ;;
+    esac
+}
+
+check_encryption() {
+    local src types
+    if ! tb_has findmnt || ! tb_has lsblk; then
+        report SKIP encryption "needs findmnt and lsblk"
+        return
+    fi
+    src=$(q findmnt -n -o SOURCE /)
+    src=${src%%\[*}
+    if [[ $src != /dev/* ]]; then
+        report SKIP encryption "/ is on ${src:-an unknown device}, not a disk this check reads"
+        return
+    fi
+    types=$(q lsblk -s -n -r -o TYPE "$src")
+    if grep -qx crypt <<<"$types"; then
+        report PASS encryption "/ is on LUKS"
+    else
+        report WARN encryption "/ is not on LUKS" "only at reinstall, turn on disk encryption" "in the installer"
+    fi
+}
+
+check_ports() {
+    local out local_addr proc port addr who pid name ports=() seen=" " ssh_ok=0 line
+    if ! tb_has ss; then
+        report SKIP "open ports" "needs ss"
+        return
+    fi
+    out=$(q ss -Htlnp)
+    while read -r _ _ _ local_addr _ proc; do
+        [[ -n $local_addr ]] || continue
+        port=${local_addr##*:}
+        addr=${local_addr%:*}
+        case $addr in
+            127.*|\[::1\]|\[::ffff:127.*|localhost|*%lo) continue ;;
+        esac
+        name="" pid=""
+        if [[ $proc =~ \(\(\"([^\"]+)\",pid=([0-9]+) ]]; then
+            name=${BASH_REMATCH[1]} pid=${BASH_REMATCH[2]}
+        fi
+        if [[ $name == sshd* || ( -z $name && $port == 22 ) ]]; then
+            ssh_ok=1
+            continue
+        fi
+        [[ $seen == *" $port "* ]] && continue
+        seen+="$port "
+        if [[ -n $name ]]; then who="$name pid $pid"; else who="owner hidden, root can see it"; fi
+        ports+=("$port/tcp on $addr, $who")
+    done <<<"$out"
+    if (( ${#ports[@]} == 0 )); then
+        if (( ssh_ok )); then
+            report PASS "open ports" "only 22/tcp, for sshd"
+        else
+            report PASS "open ports" "no TCP port listens on the network"
+        fi
+        return
+    fi
+    local first=${ports[0]%%/*} text=${ports[0]} extra
+    if (( ${#ports[@]} == 1 )); then
+        report WARN "open ports" "$text" "bind it to 127.0.0.1, or stop it: port $first --kill"
+        return
+    fi
+    for extra in "${ports[@]:1:5}"; do text+=$'\n'"$extra"; done
+    (( ${#ports[@]} > 6 )) && text+=$'\n'"and $(( ${#ports[@]} - 6 )) more, see: ss -tlnp"
+    report WARN "open ports" "$text" "bind them to 127.0.0.1, or stop them: port $first --kill"
+}
+
+check_sudo() {
+    local f files=() hits=() line who mode
+    for f in "$ROOT/etc/sudoers" "$ROOT"/etc/sudoers.d/*; do
+        [[ -e $f ]] || continue
+        if [[ ! -r $f ]]; then
+            need_root sudo "$f"
+            return
+        fi
+        files+=("$f")
+    done
+    if (( ${#files[@]} == 0 )); then
+        report PASS sudo "no sudoers files"
+        return
+    fi
+    for f in "${files[@]}"; do
+        mode=$(stat -c %a -- "$f" 2>/dev/null)
+        if [[ -n $mode && $(( 8#$mode & 8#022 )) != 0 ]]; then
+            report FAIL sudo "${f#"$ROOT"} is writable by others, mode $mode" "sudo chmod 440 ${f#"$ROOT"}"
+            return
+        fi
+        while IFS= read -r line; do
+            line=${line%%#*}
+            [[ $line =~ NOPASSWD|!authenticate ]] || continue
+            read -r who _ <<<"$line"
+            [[ $who == Defaults* ]] && who="everyone"
+            hits+=("$who|${f#"$ROOT"}")
+        done <"$f"
+    done
+    if (( ${#hits[@]} == 0 )); then
+        report PASS sudo "every rule asks for a password"
+        return
+    fi
+    local h=${hits[0]}
+    report FAIL sudo "NOPASSWD for ${h%%|*} in ${h#*|}" "sudo visudo -f ${h#*|}, drop NOPASSWD"
+}
+
+check_sshdir() {
+    local home=$HOME d mode f key bad="" keys=0 kmode
+    if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} ]]; then
+        home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        [[ -n $home ]] || home=$HOME
+    fi
+    d=$home/.ssh
+    if [[ ! -d $d ]]; then
+        report PASS "~/.ssh" "no ~/.ssh folder"
+        return
+    fi
+    mode=$(stat -c %a -- "$d")
+    if (( 8#$mode & 8#022 )); then
+        report FAIL "~/.ssh" "folder $mode, others can write to it" "chmod 700 $d"
+        return
+    fi
+    for f in "$d"/*; do
+        [[ -f $f && $f != *.pub ]] || continue
+        read -r key 2>/dev/null <"$f" || continue
+        [[ $key == *"PRIVATE KEY"* ]] || continue
+        keys=$(( keys + 1 ))
+        kmode=$(stat -c %a -- "$f")
+        if (( 8#$kmode & 8#077 )); then
+            bad="$f $kmode"
+            break
+        fi
+    done
+    if [[ -n $bad ]]; then
+        f=${bad% *}
+        report FAIL "~/.ssh" "${f##*/} is ${bad##* }, others can read this private key" "chmod 600 $f"
+        return
+    fi
+    f=$d/authorized_keys
+    if [[ -f $f ]] && (( 8#$(stat -c %a -- "$f") & 8#022 )); then
+        report FAIL "~/.ssh" "authorized_keys is writable by others" "chmod 600 $f"
+        return
+    fi
+    if (( 8#$mode & 8#077 )); then
+        report WARN "~/.ssh" "folder $mode, others can list it" "chmod 700 $d"
+        return
+    fi
+    if (( keys )); then
+        report PASS "~/.ssh" "folder 700, $(tb_plural "$keys" "private key") 600"
+    else
+        report PASS "~/.ssh" "folder 700, no private keys"
+    fi
+}
+
+check_screenlock() {
+    local desk=${XDG_CURRENT_DESKTOP:-} lock idle schema="" session="" kread="" factor=1
+    if [[ $desk == *KDE* ]]; then
+        for kread in kreadconfig6 kreadconfig5 ""; do [[ -n $kread ]] && tb_has "$kread" && break; done
+        if [[ -z $kread ]]; then
+            report SKIP "screen lock" "needs kreadconfig5 or kreadconfig6"
+            return
+        fi
+        lock=$(q "$kread" --file kscreenlockerrc --group Daemon --key Autolock)
+        idle=$(q "$kread" --file kscreenlockerrc --group Daemon --key Timeout)
+        [[ -n $lock ]] || lock=true
+        idle=${idle:-5}
+        idle=$(( idle * 60 ))
+    else
+        case $desk in
+            *Cinnamon*|*X-Cinnamon*) schema=org.cinnamon.desktop.screensaver session=org.cinnamon.desktop.session ;;
+            *MATE*) schema=org.mate.screensaver session=org.mate.screensaver factor=60 ;;
+            *GNOME*|*Unity*|*Budgie*|*Pantheon*) schema=org.gnome.desktop.screensaver session=org.gnome.desktop.session ;;
+        esac
+        if [[ -z $schema ]]; then
+            report SKIP "screen lock" "no GNOME, Cinnamon, MATE or KDE session here"
+            return
+        fi
+        if ! tb_has gsettings; then
+            report SKIP "screen lock" "needs gsettings"
+            return
+        fi
+        lock=$(q gsettings get "$schema" lock-enabled)
+        idle=$(q gsettings get "$session" idle-delay)
+        idle=${idle##* }
+        [[ $idle =~ ^[0-9]+$ ]] || idle=0
+        idle=$(( idle * factor ))
+    fi
+    if [[ $lock != true ]]; then
+        report WARN "screen lock" "the screen never locks" "turn on the screen lock in the desktop settings"
+    elif (( idle == 0 )); then
+        report WARN "screen lock" "the screen never goes idle, so it never locks" "set a blank screen delay in the desktop settings"
+    elif (( idle > 900 )); then
+        report WARN "screen lock" "locks after $(( idle / 60 )) min idle" "15 minutes or less is safer, in the desktop settings"
+    else
+        report PASS "screen lock" "locks after $(( (idle + 59) / 60 )) min idle"
+    fi
+}
+
+check_path() {
+    local d mode IFS=: bad="" dot=0
+    for d in $PATH; do
+        if [[ -z $d || $d == . ]]; then
+            dot=1
+            continue
+        fi
+        [[ -d $d ]] || continue
+        mode=$(stat -L -c %a -- "$d" 2>/dev/null) || continue
+        if (( 8#$mode & 8#002 )); then
+            bad=$d
+            break
+        fi
+    done
+    if [[ -n $bad ]]; then
+        report FAIL PATH "$bad is world-writable, anyone can plant a command" "chmod o-w $bad, or take it out of PATH"
+    elif (( dot )); then
+        report WARN PATH "the current folder is in PATH" "take . and empty entries out of PATH in your shell startup file"
+    else
+        report PASS PATH "no world-writable folders"
+    fi
+}
+
+check_etc() {
+    local found
+    tb_show find "$ROOT/etc" -xdev -type f -perm -0002
+    found=$(find "$ROOT/etc" -xdev -type f -perm -0002 2>/dev/null | head -n 5)
+    if [[ -n $found ]]; then
+        local first=${found%%$'\n'*}
+        first=${first#"$ROOT"}
+        report FAIL "/etc files" "$first is world-writable" "sudo chmod o-w $first"
+    else
+        report PASS "/etc files" "no world-writable files"
+    fi
+}
+
+# ---------------------------------------------------------------- main
+
+list_checks() {
+    local c
+    for c in "${ALL_CHECKS[@]}"; do
+        printf '%-11s %s\n' "$c" "${WHAT[$c]}"
+    done
+}
+
+main() {
+    local c total summary
+    for c in "${checks[@]}"; do
+        tb_say "checking $c"
+        "check_$c"
+    done
+    total=$(( N_PASS + N_WARN + N_FAIL + N_SKIP ))
+    summary="$(tb_plural "$total" check): $N_PASS pass, $N_WARN warn, $N_FAIL fail"
+    if (( N_SKIP )); then
+        summary+=", $N_SKIP skipped"
+        (( N_ROOT )) && summary+=" ($N_ROOT need root)"
+    fi
+    echo "$summary"
+    if (( N_ROOT && EUID != 0 )); then
+        tb_info "To run them too: sudo $(command -v seccheck || echo seccheck)"
+    fi
+    (( N_FAIL )) && return 1
+    (( strict && N_WARN )) && return 1
+    return 0
+}
+
+strict=0
+only=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --only)   tb_optarg "$@"; only=$2; shift ;;
+        --strict) strict=1 ;;
+        --list)   list_checks; exit 0 ;;
+        -*)       tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)        tb_usage_error "seccheck takes no names, use --only $1" ;;
+    esac
+    shift
+done
+
+checks=()
+if [[ -n $only ]]; then
+    IFS=, read -r -a wanted <<<"$only"
+    for c in "${wanted[@]}"; do
+        case ${c,,} in
+            selinux|apparmor) c=mac ;;
+            secure-boot) c=secureboot ;;
+            ssh-dir|.ssh|~/.ssh) c=sshdir ;;
+            screen-lock|lock) c=screenlock ;;
+            *) c=${c,,} ;;
+        esac
+        [[ -n ${WHAT[$c]:-} ]] || tb_usage_error "no check named $c. The checks are: ${ALL_CHECKS[*]}"
+        [[ " ${checks[*]} " == *" $c "* ]] || checks+=("$c")
+    done
+else
+    checks=("${ALL_CHECKS[@]}")
+fi
+tb_color_stdout
+
+main
+exit $?
