@@ -1,0 +1,194 @@
+.TH "TIMER" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+timer \- countdown or stopwatch in the terminal
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+timer [options] duration [message]
+timer [options] --at HH:MM [message]
+timer
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBtimer\fR counts down from a duration such as \fB25m\fR, or to a clock time with \fB\-\-at 17:30\fR. The line on screen updates every second with the time left and the time it ends:
+.PP
+.RS 4
+.nf
+timer: 18:42 left, ends at 14:55, stand up
+.fi
+.RE
+.PP
+At zero it rings the terminal bell, prints a done line, and shows a desktop notice with your message, so you see it even when the terminal is behind other windows.
+.PP
+With no duration, \fBtimer\fR is a stopwatch. It shows the time running, Enter records a lap, and Ctrl+C stops it and prints the total.
+.PP
+\fBtimer\fR keeps time by the clock, not by counting sleeps. When the laptop sleeps in the middle of a countdown, the countdown catches up the moment it wakes. A timer that should have ended during the sleep ends right away.
+.SS Durations
+.TP
+\fB90\fR
+90 seconds
+.TP
+\fB90s\fR
+90 seconds
+.TP
+\fB25m\fR
+25 minutes
+.TP
+\fB2h\fR
+2 hours
+.TP
+\fB1h30m\fR
+1 hour and 30 minutes
+.TP
+\fB1m30s\fR
+1 minute and 30 seconds
+.PP
+The units go in the order h, m, s, each at most once. A bare number is seconds.
+.SS Clock times
+.PP
+\fB\-\-at 17:30\fR counts down to 17:30 today. When 17:30 has already passed, it counts to 17:30 tomorrow. The time is 24\-hour, \fBHH:MM\fR, in your local time zone. \fB\-\-at 7:05\fR works too.
+.SS The time left
+.PP
+Under an hour the time left shows as minutes and seconds, \fB18:42\fR. From an hour up it shows hours too, \fB2:58:10\fR.
+.PP
+When stderr is not a terminal, such as in a script or with its output sent to a file, \fBtimer\fR prints the start line once, instead of rewriting it every second, and the done line at the end.
+.SS The stopwatch
+.PP
+.RS 4
+.nf
+00:01:12.4  lap 1
+00:03:05.9  lap 2, +00:01:53.5
+00:03:40.2  stopped
+.fi
+.RE
+.PP
+Each lap line shows the total time and, from the second lap on, the time since the lap before. The lap lines and the stopped line go to stdout, so you can save them with \fBtimer > laps.txt\fR.
+.PP
+When stdin is not a terminal, each line of input is a lap and the end of input stops the stopwatch. \fBprintf '\en\en' | timer\fR records two laps and stops.
+.SH OPTIONS
+.TP
+\fB\-\-at HH:MM\fR
+Count down to this time today, or tomorrow when it has passed.
+.TP
+\fB\-\-bell\fR
+Ring the bell only, with no desktop notice.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Hide the countdown line. The done line still shows.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the \fBnotify\-send\fR line at the end.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+The words after the duration are the message. It shows on the countdown line, the done line and the notice. With no message the notice says, for example, \fB25m is up\fR. Put \fB\-\-\fR before a message that starts with a dash.
+.SH PASS\-THROUGH
+.PP
+None. Only the notice uses another tool.
+.SH NEEDS
+.PP
+\fBdate\fR and \fBsleep\fR from coreutils or BusyBox. \fBnotify\-send\fR from libnotify shows the desktop notice. It is optional. Without it, or with no desktop, you get the bell only.
+.TP
+Debian, Ubuntu
+\fBlibnotify\-bin\fR
+.TP
+Fedora
+\fBlibnotify\fR
+.TP
+Arch
+\fBlibnotify\fR
+.TP
+openSUSE
+\fBlibnotify\-tools\fR
+.TP
+Alpine
+\fBlibnotify\fR
+.SH EXAMPLES
+.SS A pomodoro
+.PP
+.RS 4
+.nf
+$ timer 25m "stand up"
+timer: 18:42 left, ends at 14:55, stand up
+.fi
+.RE
+.PP
+The line counts down in place. At zero:
+.PP
+.RS 4
+.nf
+timer: done at 14:55, stand up
+.fi
+.RE
+.SS Until a meeting
+.PP
+.RS 4
+.nf
+$ timer --at 17:30 standup call
+timer: 2:58:10 left, ends at 17:30, standup call
+.fi
+.RE
+.SS Stopped early
+.PP
+.RS 4
+.nf
+$ timer --at 23:30 standup call
+timer: 2:59:55 left, ends at 23:30, standup call
+^C
+timer: stopped with 2:59:53 left
+$ echo $?
+1
+.fi
+.RE
+.SS A stopwatch with laps
+.PP
+.RS 4
+.nf
+$ timer
+timer: Enter records a lap, Ctrl+C stops
+00:01:12.4  lap 1
+00:03:05.9  lap 2, +00:01:53.5
+00:03:40.2  stopped
+.fi
+.RE
+.SS After another command
+.PP
+.RS 4
+.nf
+$ make build; timer --bell 10m "check the deploy"
+.fi
+.RE
+.SS A duration it cannot read
+.PP
+.RS 4
+.nf
+$ timer 25x
+timer: cannot read 25x. Use 90, 90s, 25m, 1h30m or --at 17:30
+Try 'timer --help' for the options.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBtimer: cannot read 25x. Use 90, 90s, 25m, 1h30m or \-\-at 17:30\fR : The duration has a unit \fBtimer\fR does not know, or the units are out of order. Write \fB1h30m\fR, not \fB30m1h\fR.
+.PP
+\fBtimer: cannot read 25:00 as a time. Use HH:MM, such as 17:30\fR : \fB\-\-at\fR takes a clock time from \fB00:00\fR to \fB23:59\fR. For a duration of 25 minutes, write \fB25m\fR.
+.PP
+No notice at zero : The bell rang but no desktop notice appeared. Either \fBnotify\-send\fR is missing, or there is no desktop, such as over SSH. \fBtimer \-v\fR shows the \fBnotify\-send\fR line when it runs. See \fBnotify\-done\fR for more on notices.
+.PP
+The countdown line fills the screen with copies : The terminal is too narrow for the line, so it wraps. Make the window wider, or use a shorter message.
+.SH EXIT STATUS
+.TP
+0
+The countdown reached zero, or the stopwatch stopped.
+.TP
+1
+You stopped a countdown with Ctrl+C before zero.
+.TP
+2
+Bad usage, such as a duration it cannot read.
+.SH SEE ALSO
+.PP
+\fBnotify\-done\fR, \fBagain\fR, \fBsleep(1)\fR

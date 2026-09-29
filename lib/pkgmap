@@ -152,5 +152,6 @@ wl-paste       wl-clipboard         wl-clipboard         wl-clipboard         wl
 pbcopy         -                    -                    -                    -                    -
 pbpaste        -                    -                    -                    -                    -
 cksum          coreutils            coreutils            coreutils            coreutils            coreutils
+stty           coreutils            coreutils            coreutils            coreutils            coreutils
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils

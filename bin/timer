@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# timer: countdown or stopwatch in the terminal.
+set -uo pipefail
+TB_CMD=timer
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: timer [options] duration [message]
+       timer [options] --at HH:MM [message]
+       timer
+
+Countdown or stopwatch in the terminal.
+
+Options:
+  --at HH:MM          count down to this time, today or tomorrow
+  --bell              ring the bell only, no desktop notice
+  -q, --quiet         no countdown line, only the done line
+  -v, --verbose       the notify-send line
+  -h, --help          this help
+
+A duration is 90, 90s, 25m, 1h30m or 2h. A bare number is seconds.
+With no duration it is a stopwatch. Enter records a lap, Ctrl+C stops.
+
+Examples:
+  timer 25m "stand up"
+  timer --at 17:30 standup call
+  timer
+
+Needs: notify-send, optional, else the bell. See man timer.
+Exit: 0 ok, 1 stopped before zero, 2 bad usage.
+EOF
+}
+
+# A duration such as 90, 90s, 25m or 1h30m as seconds. Returns 1 when it is not one.
+parse_duration() {
+    local d=$1
+    if [[ $d =~ ^[0-9]{1,6}$ ]]; then
+        echo $(( 10#$d ))
+        return 0
+    fi
+    [[ $d =~ ^(([0-9]{1,4})h)?(([0-9]{1,5})m)?(([0-9]{1,6})s)?$ && -n $d ]] || return 1
+    echo $(( 10#${BASH_REMATCH[2]:-0} * 3600 + 10#${BASH_REMATCH[4]:-0} * 60 + 10#${BASH_REMATCH[6]:-0} ))
+}
+
+# Seconds left as 0:09, 18:42 or 2:58:10.
+fmt_left() {
+    local s=$1
+    if (( s >= 3600 )); then
+        printf '%d:%02d:%02d' $(( s / 3600 )) $(( s % 3600 / 60 )) $(( s % 60 ))
+    else
+        printf '%d:%02d' $(( s / 60 )) $(( s % 60 ))
+    fi
+}
+
+# Milliseconds as 00:03:05.9 for the stopwatch.
+fmt_watch() {
+    local ms=$1
+    printf '%02d:%02d:%02d.%d' $(( ms / 3600000 )) $(( ms % 3600000 / 60000 )) \
+        $(( ms % 60000 / 1000 )) $(( ms % 1000 / 100 ))
+}
+
+# Show a desktop notice. Returns 1 when there is no desktop to show it on.
+desktop_notice() {
+    [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] || return 1
+    tb_has notify-send || return 1
+    tb_show notify-send -u critical -- "$1" "$2"
+    notify-send -u critical -- "$1" "$2" >/dev/null 2>&1
+}
+
+# Wait a number of milliseconds.
+nap() { sleep "$(( $1 / 1000 )).$(printf '%03d' $(( $1 % 1000 )))"; }
+
+# Ctrl+C before zero.
+stop_countdown() {
+    local now left
+    now=$(tb_now_ms)
+    left=$(( (end_ms - now + 999) / 1000 ))
+    tb_line_end
+    (( left < 0 )) && left=0
+    tb_err "stopped with $(fmt_left "$left") left"
+    exit 1
+}
+
+countdown() {
+    local now left wait_ms ends msg_part="" body
+    [[ -n $message ]] && msg_part=", $message"
+    ends=$(date -d "@$(( end_ms / 1000 ))" +%H:%M)
+    trap stop_countdown INT TERM
+    now=$(tb_now_ms)
+    left=$(( (end_ms - now + 999) / 1000 ))
+    if ! tb_progress; then
+        tb_info "$TB_CMD: $(fmt_left "$left") left, ends at $ends$msg_part"
+    fi
+    while :; do
+        now=$(tb_now_ms)
+        (( now >= end_ms )) && break
+        left=$(( (end_ms - now + 999) / 1000 ))
+        tb_line "$TB_CMD: $(fmt_left "$left") left, ends at $ends$msg_part"
+        # Wake on each whole second of the countdown, so the line ticks evenly
+        # and a suspended laptop catches up at once.
+        wait_ms=$(( (end_ms - now) % 1000 ))
+        (( wait_ms == 0 )) && wait_ms=1000
+        nap "$wait_ms"
+    done
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    tb_line_end
+    printf '\a%s: done at %s%s\n' "$TB_CMD" "$(date +%H:%M)" "$msg_part" >&2
+    body=${message:-$label is up}
+    if (( ! only_bell )); then
+        desktop_notice "Timer done" "$body" || tb_say "no desktop, rang the terminal bell only"
+    fi
+    return 0
+}
+
+# Ctrl+C or the end of input stops the stopwatch.
+stop_watch() {
+    local now
+    now=$(tb_now_ms)
+    [[ -n $saved_tty ]] && stty "$saved_tty" 2>/dev/null
+    tb_line_end
+    printf '%s  stopped\n' "$(fmt_watch $(( now - start_ms )))"
+    exit 0
+}
+
+lap() {
+    local now
+    now=$(tb_now_ms)
+    (( laps++ ))
+    tb_line_end
+    if (( laps == 1 )); then
+        printf '%s  lap 1\n' "$(fmt_watch $(( now - start_ms )))"
+    else
+        printf '%s  lap %d, +%s\n' "$(fmt_watch $(( now - start_ms )))" "$laps" "$(fmt_watch $(( now - last_ms )))"
+    fi
+    last_ms=$now
+}
+
+stopwatch() {
+    local line
+    start_ms=$(tb_now_ms) last_ms=$start_ms laps=0 saved_tty=""
+    trap stop_watch INT TERM
+    if [[ -t 0 ]]; then
+        # Enter is read without echo, so the live line is not pushed down.
+        saved_tty=$(stty -g 2>/dev/null) && stty -echo 2>/dev/null
+        tb_info "$TB_CMD: Enter records a lap, Ctrl+C stops"
+        while :; do
+            tb_line "$(fmt_watch $(( $(tb_now_ms) - start_ms )))"
+            if IFS= read -r -t 0.1 line; then
+                lap
+            elif (( $? <= 128 )); then
+                stop_watch
+            fi
+        done
+    fi
+    # Not a terminal: each line of input is a lap, and the end of input stops.
+    while IFS= read -r line; do
+        lap
+    done
+    stop_watch
+}
+
+at="" only_bell=0 words=()
+tb_expand "" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        --at)   tb_optarg "$@"; at=$2; shift ;;
+        --bell) only_bell=1 ;;
+        --)     shift; words+=("$@"); break ;;
+        -*)     tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)      words+=("$1") ;;
+    esac
+    shift
+done
+
+if [[ -n $at ]]; then
+    [[ $at =~ ^([01]?[0-9]|2[0-3]):[0-5][0-9]$ ]] || tb_usage_error "cannot read $at as a time. Use HH:MM, such as 17:30"
+    now_s=$(date +%s)
+    target=$(date -d "$at" +%s 2>/dev/null) || tb_die 1 "date cannot read $at"
+    (( target <= now_s )) && target=$(( target + 86400 ))
+    end_ms=$(( target * 1000 ))
+    label=$at
+    message="${words[*]}"
+    countdown
+    exit $?
+fi
+if (( ${#words[@]} == 0 )); then
+    stopwatch
+    exit $?
+fi
+secs=$(parse_duration "${words[0]}") && (( secs > 0 )) ||
+    tb_usage_error "cannot read ${words[0]}. Use 90, 90s, 25m, 1h30m or --at 17:30"
+label=${words[0]}
+message="${words[*]:1}"
+end_ms=$(( $(tb_now_ms) + secs * 1000 ))
+countdown
+exit $?
