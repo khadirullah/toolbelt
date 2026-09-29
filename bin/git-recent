@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# git-recent: list local branches by their last commit, newest first.
+set -uo pipefail
+TB_CMD=git-recent
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: git recent [-n count] [options]
+
+List local branches by their last commit, newest first.
+
+Options:
+  -n, --count N       how many branches, 10 by default
+  -a, --all           every branch, however many
+  -q, --quiet         branch names only, one per line
+  -v, --verbose       every step, and each git command before it runs
+  -h, --help          this help
+
+A * marks the branch you are on.
+
+Examples:
+  git recent
+  git recent -n 3
+  git switch "$(git recent -q -n 1)"
+
+Needs: git 2.30 or newer. See man git-recent.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 no git.
+EOF
+}
+
+main() {
+    local fmt rows limit=() w_name=0 w_when=0 mark name when subject
+    tb_need git
+    git rev-parse --git-dir >/dev/null 2>&1 || tb_die 1 "not inside a git repository"
+    (( all )) || limit=("--count=$count")
+    fmt='%(HEAD)%09%(refname:short)%09%(committerdate:relative)%09%(subject)'
+    tb_show git for-each-ref --sort=-committerdate "${limit[@]}" "--format=$fmt" refs/heads/
+    rows=$(git for-each-ref --sort=-committerdate "${limit[@]}" "--format=$fmt" refs/heads/) ||
+        tb_die 1 "git for-each-ref failed"
+    if [[ -z $rows ]]; then
+        tb_info "no branches yet, make a first commit"
+        return 0
+    fi
+    if (( TB_QUIET )); then
+        cut -f 2 <<<"$rows"
+        return 0
+    fi
+    while IFS=$'\t' read -r mark name when subject; do
+        (( ${#name} > w_name )) && w_name=${#name}
+        (( ${#when} > w_when )) && w_when=${#when}
+    done <<<"$rows"
+    while IFS=$'\t' read -r mark name when subject; do
+        [[ $mark == '*' ]] || mark=' '
+        (( ${#subject} > 50 )) && subject="${subject:0:47}..."
+        printf '%s %-*s  %-*s  %s\n' "$mark" "$w_name" "$name" "$w_when" "$when" "$subject"
+    done <<<"$rows"
+}
+
+count=10
+all=0
+tb_expand "n" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--count) tb_optarg "$@"
+                    [[ $2 =~ ^[0-9]+$ ]] && (( 10#$2 >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                    count=$(( 10#$2 )); shift ;;
+        -a|--all)   all=1 ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          tb_usage_error "unexpected argument $1" ;;
+    esac
+    shift
+done
+
+main
+exit $?

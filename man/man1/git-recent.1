@@ -1,0 +1,144 @@
+.TH "GIT-RECENT" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+git\-recent \- list local branches by their last commit, newest first
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+git recent [-n count] [options]
+git-recent [-n count] [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBgit branch\fR lists branches in alphabetical order, which is rarely the order you need. After a week of switching between tickets, the question is "what was I working on on Tuesday?", and the answer is the branch with the newest commit.
+.PP
+\fBgit recent\fR lists your local branches sorted by the date of their last commit, newest first, 10 by default. Each line has the branch name, how long ago its last commit was, and that commit's subject. A \fB*\fR marks the branch you are on, as in \fBgit branch\fR.
+.PP
+It only reads. It never switches branches or changes anything.
+.PP
+The dates are commit dates, the time a commit was last written. A rebase or \fBgit commit \-\-amend\fR writes the commit again, so a branch you rebased this morning shows as this morning even when the work is older.
+.PP
+It is a script named \fBgit\-recent\fR in toolbelt's \fBbin\fR folder. Git runs any program named \fBgit\-NAME\fR on your PATH as \fBgit NAME\fR.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-count N\fR
+Show N branches. 10 by default.
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Show every local branch.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the branch names, one per line, for scripts.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show the git command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fB\-n3\fR and \fB\-\-count=3\fR work the same as \fB\-n 3\fR.
+.SH OUTPUT
+.PP
+.RS 4
+.nf
+  main              2 hours ago   tfcheck: add trivy section
+* feat/ctx-warn     5 hours ago   ctx: flag production contexts
+.fi
+.RE
+.IP \(bu 2
+The first column is \fB*\fR for the current branch and a space for the others.
+.IP \(bu 2
+The columns line up to the longest name and the longest age in the list.
+.IP \(bu 2
+Ages come from git's own relative dates, such as \fB26 hours ago\fR, \fB3 days ago\fR or \fB5 weeks ago\fR.
+.IP \(bu 2
+A subject longer than 50 characters is cut to 47 and ends in \fB...\fR, so a line fits in 80 columns.
+.SH HELP AND THE MAN PAGE
+.PP
+\fBgit recent \-h\fR and \fBgit\-recent \-\-help\fR print the help. \fBgit recent \-\-help\fR makes git open the man page \fBgit\-recent(1)\fR, which toolbelt installs from this document.
+.SH PASS\-THROUGH
+.PP
+None. \fBgit recent\fR runs one \fBgit for\-each\-ref\fR command, and \fB\-v\fR prints it.
+.SH NEEDS
+.PP
+git 2.30 or newer, from the \fBgit\fR package on every distro.
+.SH EXAMPLES
+.SS What was I working on
+.PP
+.RS 4
+.nf
+$ git recent -n 3
+  main              2 hours ago   tfcheck: add trivy section
+* feat/ctx-warn     5 hours ago   ctx: flag production contexts
+  fix/kwhy-pending  26 hours ago  kwhy: hint for Pending pods
+.fi
+.RE
+.SS Every branch, oldest at the bottom
+.PP
+.RS 4
+.nf
+$ git recent
+  main                 2 hours ago   tfcheck: add trivy section
+* feat/ctx-warn        5 hours ago   ctx: flag production contexts
+  fix/kwhy-pending     26 hours ago  kwhy: hint for Pending pods
+  fix/probe-timeout    3 days ago    kwhy: longer probe timeout
+  feat/kres-table      2 weeks ago   kres: table output
+  docs/readme-install  5 weeks ago   docs: install steps
+.fi
+.RE
+.PP
+The three at the bottom are merged already. \fBgit prune\-merged\fR deletes them.
+.SS Names only, for a script
+.PP
+.RS 4
+.nf
+$ git recent -q -n 1
+main
+$ git switch "$(git recent -q -n 1)"
+.fi
+.RE
+.SS Pick a branch with fzf
+.PP
+.RS 4
+.nf
+$ git switch "$(git recent -q -a | fzf)"
+.fi
+.RE
+.PP
+\fBfzf\fR shows the list and prints the one you pick. It is a separate tool.
+.SS See the git command
+.PP
+.RS 4
+.nf
+$ git recent -v -n 2
++ git for-each-ref --sort=-committerdate --count=2 '--format=%(HEAD)%09%(refname:short)%09%(committerdate:relative)%09%(subject)' refs/heads/
+  main           2 hours ago  tfcheck: add trivy section
+* feat/ctx-warn  5 hours ago  ctx: flag production contexts
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBgit\-recent: not inside a git repository\fR : Change into a folder of the repository first.
+.PP
+\fBno branches yet, make a first commit\fR : A new repository has no branches until its first commit.
+.PP
+A branch I know I used today is far down the list : \fBgit recent\fR sorts by the last commit, not by the last checkout. \fBgit reflog\fR shows every checkout, such as \fBgit reflog | grep 'checkout:' | head\fR.
+.PP
+The ages look wrong after a rebase : A rebase writes every commit again with a new commit date. That is the date \fBgit recent\fR shows.
+.SH EXIT STATUS
+.TP
+0
+It worked, even when there are no branches yet.
+.TP
+1
+Not a repository, or git failed.
+.TP
+2
+Bad usage, such as \fB\-n 0\fR.
+.TP
+3
+git is not installed.
+.SH SEE ALSO
+.PP
+\fBgit\-prune\-merged\fR, \fBgit\-sync\fR, \fBgit\-branch(1)\fR, \fBgit\-for\-each\-ref(1)\fR
