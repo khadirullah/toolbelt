@@ -1,0 +1,214 @@
+.TH "KYAML" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+kyaml \- print clean YAML of a live object, ready to reuse
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+kyaml [-n NAMESPACE] [-o FILE] [--status] [--no-namespace] KIND/NAME [-- kubectl options]
+kyaml [options] KIND NAME
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBkubectl get \-o yaml\fR prints an object the way the cluster stores it, not the way you wrote it. Half of it is bookkeeping. There are managedFields, which can run to hundreds of lines, and there is the status block. On top of that come the uid, resourceVersion, creationTimestamp and generation, and the last\-applied annotation that holds a second copy of the whole object as JSON. Apply that output to another namespace or cluster and some of it fails, since a uid or resourceVersion from one cluster means nothing in another.
+.PP
+\fBkyaml\fR runs \fBkubectl get \-o yaml\fR and removes what the cluster added. The rest is the object as a person would write it, with its labels, annotations of your own, and the spec. You can read it, diff it against the file in git, or save it and apply it somewhere else.
+.PP
+\fBkyaml\fR only reads the cluster. It writes a file only with \fB\-o\fR, and never over a file that exists.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-namespace NS\fR
+The object's namespace. The context's own namespace by default.
+.TP
+\fB\-o\fR, \fB\-\-out FILE\fR
+Write to FILE instead of stdout. It refuses when FILE exists.
+.TP
+\fB\-\-status\fR
+Keep the \fBstatus\fR block.
+.TP
+\fB\-\-no\-namespace\fR
+Drop \fBmetadata.namespace\fR too.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+No line about the file it wrote.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the kubectl command and the list of fields it removed.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+The object is \fBKIND/NAME\fR as kubectl writes it, such as \fBdeploy/api\fR, \fBsvc/api\fR or \fBconfigmap/app\-config\fR, or the same as two words. Any short name kubectl knows works, since \fBkyaml\fR hands it to kubectl as it is.
+.SH WHAT IT REMOVES
+.TP
+\fBstatus\fR
+The cluster writes it. Keep it with \fB\-\-status\fR.
+.TP
+\fBmetadata.managedFields\fR
+Server\-side apply bookkeeping, often most of the output.
+.TP
+\fBmetadata.uid\fR
+Unique to this cluster.
+.TP
+\fBmetadata.resourceVersion\fR
+A version counter for this copy. Applying it elsewhere can fail with a conflict.
+.TP
+\fBmetadata.creationTimestamp\fR
+The cluster sets it.
+.TP
+\fBmetadata.generation\fR
+The cluster counts it.
+.TP
+\fBmetadata.selfLink\fR
+Left over in objects from older clusters.
+.TP
+\fBkubectl.kubernetes.io/last\-applied\-configuration\fR
+A JSON copy of the object that \fBkubectl apply\fR keeps.
+.TP
+\fBdeployment.kubernetes.io/revision\fR
+The Deployment controller's counter.
+.TP
+\fBspec.clusterIP\fR, \fBspec.clusterIPs\fR of a Service
+The cluster picks the address. Copying it clashes in another cluster. A headless Service keeps \fBclusterIP: None\fR.
+.TP
+\fBmetadata.namespace\fR
+Only with \fB\-\-no\-namespace\fR, so \fBkubectl apply \-n OTHER\fR works on the file.
+.PP
+An \fBannotations:\fR block left empty after that goes too. Every other field stays as the cluster printed it, including defaults it filled in, such as \fBprogressDeadlineSeconds\fR or \fBsessionAffinity\fR. Those apply cleanly.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to \fBkubectl get\fR.
+.PP
+.RS 4
+.nf
+$ kyaml deploy/api -- --context kind-kind
+.fi
+.RE
+.SH NEEDS
+.PP
+\fBkubectl\fR. The filter is built in and uses \fBawk\fR, so no YAML tool is needed.
+.SH EXAMPLES
+.SS A Deployment, ready to reuse
+.PP
+.RS 4
+.nf
+$ kyaml -n shop deploy/api
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: api
+  name: api
+  namespace: shop
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+      - image: registry.example.com/api:2.3.0
+        name: api
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+.fi
+.RE
+.SS What it took out
+.PP
+.RS 4
+.nf
+$ kyaml -v -n shop deploy/api > api.yaml
++ kubectl get deploy/api -n shop -o yaml
+kyaml: removed deployment.kubernetes.io/revision, kubectl.kubernetes.io/last-applied-configuration, creationTimestamp, generation, managedFields (8 lines), resourceVersion, uid, status
+.fi
+.RE
+.PP
+The \fB+\fR and \fBkyaml:\fR lines go to stderr, so the file holds only the YAML.
+.SS Save a Service to a file
+.PP
+.RS 4
+.nf
+$ kyaml -v -n shop svc/api -o api-svc.yaml
++ kubectl get svc/api -n shop -o yaml
+kyaml: removed creationTimestamp, resourceVersion, uid, clusterIP, clusterIPs, status
+kyaml: wrote api-svc.yaml, 23 lines
+$ kyaml -n shop svc api -o api-svc.yaml
+kyaml: api-svc.yaml exists, pick another name or move it away first
+$ echo $?
+4
+.fi
+.RE
+.SS Move an object to another namespace
+.PP
+.RS 4
+.nf
+$ kyaml --no-namespace -n shop svc/api | head -8
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    example.com/owner: shop-team
+  labels:
+    app: api
+  name: api
+$ kyaml --no-namespace -n shop svc/api | kubectl apply -n staging -f -
+.fi
+.RE
+.PP
+Only the annotation you wrote yourself is left.
+.SS Keep the status
+.PP
+.RS 4
+.nf
+$ kyaml --status -n shop svc/api | tail -3
+  type: ClusterIP
+status:
+  loadBalancer: {}
+.fi
+.RE
+.SS Mistakes
+.PP
+.RS 4
+.nf
+$ kyaml -n shop api
+kyaml: give a kind and a name, for example deploy/api or svc/api
+Try 'kyaml --help' for the options.
+$ kyaml -n shop deploy/nope
+kyaml: no deploy/nope in shop. List them with: kubectl get deploy -n shop
+$ kyaml pizza/x
+kyaml: the cluster has no resource type pizza. List them with: kubectl api-resources
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBkubectl apply\fR of the file says \fBthe object has been modified\fR : The file still has a \fBresourceVersion\fR. That happens only when the field sits somewhere \fBkyaml\fR does not look, such as inside a List. Delete the line and apply again.
+.PP
+The Service in the new cluster gets a different IP : That is on purpose. \fBkyaml\fR drops \fBclusterIP\fR so the new cluster picks a free address. A headless Service is the exception. It keeps \fBclusterIP: None\fR, since without it the copy would get an address and stop being headless.
+.PP
+The output still has fields you did not write : The cluster fills in defaults, such as \fBterminationMessagePath\fR or \fBdnsPolicy\fR. They are valid and apply cleanly, so \fBkyaml\fR leaves them.
+.SH EXIT STATUS
+.TP
+0
+It printed or wrote the YAML.
+.TP
+1
+No such object or resource type, or kubectl failed.
+.TP
+2
+Bad usage, such as a name without a kind.
+.TP
+3
+kubectl is missing.
+.TP
+4
+Refused, since the file given to \fB\-o\fR exists.
+.SH SEE ALSO
+.PP
+\fBksecret\fR, \fByamlcheck\fR, \fBkubectl\-get(1)\fR, \fBkubectl\-apply(1)\fR

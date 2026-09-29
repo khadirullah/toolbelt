@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# kyaml: print clean YAML of a live object, ready to reuse.
+set -uo pipefail
+TB_CMD=kyaml
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: kyaml [-n NAMESPACE] [-o FILE] [--status] KIND/NAME [-- kubectl options]
+       kyaml [options] KIND NAME
+
+Print clean YAML of a live object, ready to reuse.
+
+Options:
+  -n, --namespace NS  the object's namespace, the context's own by default
+  -o, --out FILE      write to a file, never over one that exists
+  --status            keep the status block
+  --no-namespace      drop metadata.namespace too
+  -q, --quiet         no line about the file it wrote
+  -v, --verbose       what it removed, and the kubectl command
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to kubectl get, such as --context.
+
+Examples:
+  kyaml -n shop deploy/api
+  kyaml -n shop svc/api -o api-svc.yaml
+  kyaml --no-namespace -n shop cm app-config > app-config.yaml
+  kyaml deploy/api -- --context kind-kind
+
+Needs: kubectl. See man kyaml.
+Exit: 0 ok, 1 no such object or kubectl failed, 2 bad usage,
+      3 missing tool, 4 the output file exists.
+EOF
+}
+
+# Removes what the cluster added from `kubectl get -o yaml` output. kubectl
+# writes keys in sorted order with two spaces per level and list items at
+# the same indent as their key, which is what the filter relies on.
+# Lists what it removed, one per line, in the file named by `removed`.
+read -r -d '' FILTER <<'AWK'
+function indent(s) { match(s, /^ */); return RLENGTH }
+function keyof(s,    i) {
+    if (s ~ /^- /) return ""
+    i = index(s, ": ")
+    if (i) return substr(s, 1, i - 1)
+    if (s ~ /:$/) return substr(s, 1, length(s) - 1)
+    return ""
+}
+function drop(what, at) { skipping = 1; skipind = at; cur = what; print what > removed }
+BEGIN {
+    split("managedFields uid resourceVersion creationTimestamp generation selfLink", m, " ")
+    for (i in m) meta[m[i]] = 1
+    if (nons) meta["namespace"] = 1
+    ann["kubectl.kubernetes.io/last-applied-configuration"] = 1
+    ann["deployment.kubernetes.io/revision"] = 1
+}
+{
+    line = $0
+    ind = indent(line)
+    body = substr(line, ind + 1)
+    if (skipping) {
+        if (line ~ /^ *$/ || ind > skipind || (ind == skipind && body ~ /^- /)) {
+            if (cur == "managedFields") mf++
+            next
+        }
+        skipping = 0
+    }
+    k = keyof(body)
+    if (ind == 0) {
+        top = k
+        inann = 0
+        if (k == "kind") kind = substr(body, 7)
+        if (k == "status" && !keepstatus) { drop("status", 0); next }
+    }
+    if (top == "metadata" && ind == 2) {
+        inann = 0
+        if (k in meta) { drop(k, 2); next }
+        if (k == "annotations" && body == "annotations:") { inann = 1; annline = line; annshown = 0; next }
+    }
+    if (inann && ind == 4) {
+        if (k in ann) { drop(k, 4); next }
+        if (!annshown) { print annline; annshown = 1 }
+    }
+    # A headless Service keeps clusterIP: None, which it needs to stay headless.
+    if (top == "spec" && ind == 2 && kind == "Service" && k == "clusterIP" && body == "clusterIP: None") headless = 1
+    if (top == "spec" && ind == 2 && kind == "Service" && (k == "clusterIP" || k == "clusterIPs") && !headless) {
+        drop(k, 2); next
+    }
+    print line
+}
+END { if (mf) print "managedFields lines " mf > removed }
+AWK
+
+main() {
+    local nons=0 what
+    tb_need kubectl
+    if [[ -n $out && ( -e $out || -L $out ) ]]; then
+        tb_die "$E_SAFE" "$out exists, pick another name or move it away first"
+    fi
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    [[ -n $ns ]] || ns=$KNS
+    if ! kube_to "$TMP/raw" get "$obj" -n "$ns" -o yaml; then
+        if grep -q "doesn't have a resource type" "$TMP/kerr"; then
+            tb_die 1 "the cluster has no resource type ${obj%%/*}. List them with: kubectl api-resources"
+        fi
+        kube_notfound && tb_die 1 "no $obj in $ns. List them with: kubectl get ${obj%%/*} -n $ns"
+        kube_fail
+    fi
+    (( drop_ns )) && nons=1
+    awk -v removed="$TMP/removed" -v keepstatus="$keep_status" -v nons="$nons" "$FILTER" \
+        "$TMP/raw" > "$TMP/clean" || tb_die 1 "the YAML filter failed"
+    if (( TB_VERBOSE )) && [[ -s $TMP/removed ]]; then
+        local mf items=() r
+        mf=$(sed -n 's/^managedFields lines //p' "$TMP/removed")
+        while IFS= read -r r; do
+            case $r in
+                "managedFields lines "*) ;;
+                managedFields) items+=("managedFields (${mf:-0} lines)") ;;
+                *) items+=("$r") ;;
+            esac
+        done < "$TMP/removed"
+        what=$(printf '%s, ' "${items[@]}")
+        tb_say "removed ${what%, }"
+    fi
+    if [[ -z $out ]]; then
+        cat "$TMP/clean"
+        return
+    fi
+    if ! ( set -C; cat "$TMP/clean" > "$out" ) 2>/dev/null; then
+        [[ -e $out ]] && tb_die "$E_SAFE" "$out exists, pick another name or move it away first"
+        tb_die 1 "cannot write $out"
+    fi
+    tb_info "$TB_CMD: wrote $out, $(tb_plural "$(wc -l < "$TMP/clean")" line)"
+}
+
+ns=""
+out=""
+keep_status=0
+drop_ns=0
+args=()
+tb_expand "no" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--namespace)  tb_optarg "$@"; ns=$2; shift ;;
+        -o|--out)        tb_optarg "$@"; out=$2; shift ;;
+        --status)        keep_status=1 ;;
+        --no-namespace)  drop_ns=1 ;;
+        --)              shift; TB_PASS=("$@"); break ;;
+        -*)              tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)               args+=("$1") ;;
+    esac
+    shift
+done
+case ${#args[@]} in
+    1) obj=${args[0]} ;;
+    2) obj=${args[0]}/${args[1]} ;;
+    *) obj="" ;;
+esac
+if [[ ${#args[@]} -gt 2 ]]; then
+    tb_usage_error "one object at a time, such as deploy/api"
+fi
+if [[ ! $obj =~ ^[^/]+/[^/]+$ ]]; then
+    tb_usage_error "give a kind and a name, for example deploy/api or svc/api"
+fi
+
+main
+exit $?
