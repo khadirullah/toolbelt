@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# knodes: show node health and pressure at a glance.
+set -uo pipefail
+TB_CMD=knodes
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck source=../lib/kube.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
+
+usage() {
+    cat <<'EOF'
+usage: knodes [NODE] [-- kubectl options]
+
+Show node health and pressure at a glance.
+
+Options:
+  -q, --quiet         only the table
+  -v, --verbose       every step, and each kubectl command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to every kubectl call, such as --context.
+
+Examples:
+  knodes
+  knodes k8s-worker-2
+  knodes -- --context kind-kind
+
+Needs: kubectl and jq. metrics-server, optional, for the biggest users
+       on a node short of memory. See man knodes.
+Exit: 0 all nodes Ready with no pressure, 1 a node is NotReady or under
+      pressure, or kubectl failed, 2 bad usage, 3 missing tool.
+EOF
+}
+
+# One line per node: name, status, roles, age in seconds, kubelet version,
+# problems, then a problem per field as type|since|message.
+read -r -d '' NODES_JQ <<'JQ'
+def epoch: if . == null or . == "" then null else sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 end;
+def clean: tostring | gsub("[\t\n\r|]+"; " ") | gsub("^ +| +$"; "");
+now as $now |
+.items[] |
+([.status.conditions[]? | select(.type == "Ready")] | first) as $ready |
+([.status.conditions[]? |
+   select((.type == "Ready" and .status != "True") or
+          (.type != "Ready" and .status == "True" and
+           (.type | test("Pressure$|^NetworkUnavailable$"))))] ) as $bad |
+[ .metadata.name,
+  ((if $ready.status == "True" then "Ready" else "NotReady" end) +
+   (if .spec.unschedulable then ",SchedulingDisabled" else "" end)),
+  ([.metadata.labels // {} | keys[] | select(startswith("node-role.kubernetes.io/"))
+    | sub("node-role.kubernetes.io/"; "")] | if length == 0 then "worker" else join(",") end),
+  (($now - (.metadata.creationTimestamp | epoch // $now)) | floor),
+  (.status.nodeInfo.kubeletVersion // "-"),
+  ([$bad[] | if .type == "Ready" then "NotReady" else .type end] | join(",")),
+  ($bad[] | "\(if .type == "Ready" then "NotReady" else .type end)|\((.lastTransitionTime | epoch // 0) | floor)|\(.message // .reason // "" | clean)")
+] | map(tostring) | join("\t")
+JQ
+
+# Evicted pods per node in the last hour, from events. Prints "node count".
+read -r -d '' EVICT_JQ <<'JQ'
+def epoch: if . == null or . == "" then null else sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 end;
+now as $now |
+[.items[]? | select(.reason == "Evicted") |
+  select((((.lastTimestamp // .eventTime // .metadata.creationTimestamp) | epoch) // 0) > $now - 3600) |
+  (.source.host // .reportingInstance // "")] |
+group_by(.) | .[] | "\(.[0])\t\(length)"
+JQ
+
+# Pods on a node as "namespace name short-name", where the short name
+# drops the ReplicaSet hash, so api-5b8c9d7f6-2wq8d becomes api-2wq8d.
+read -r -d '' ONNODE_JQ <<'JQ'
+.items[] | (.metadata.labels["pod-template-hash"] // "") as $h |
+"\(.metadata.namespace)\t\(.metadata.name)\t\(if $h != "" then .metadata.name | sub("-" + $h; "") else .metadata.name end)"
+JQ
+
+# The three pods on a node that use the most memory, as "a 1.9Gi, b 820Mi".
+top_users() {
+    local n=$1
+    (( have_top )) || return 0
+    kube_to "$TMP/onnode" get pods -A --field-selector "spec.nodeName=$n" -o json || return 0
+    jq -r "$ONNODE_JQ" "$TMP/onnode" > "$TMP/onnode.tsv" 2>/dev/null || return 0
+    awk -F '\t' '
+        FILENAME == ARGV[1] { short[$1 "/" $2] = $3; next }
+        {
+            split($0, f, " "); k = f[1] "/" f[2]
+            if (!(k in short)) next
+            s = f[4]; n = s + 0; u = s; sub(/^[0-9.]+/, "", u)
+            b = (u == "Ki") ? n * 1024 : (u == "Mi") ? n * 1048576 : (u == "Gi") ? n * 1073741824 : n
+            print b "\t" short[k] " " (b < 1073741824 ? sprintf("%dMi", b / 1048576 + 0.5) : sprintf("%.1fGi", b / 1073741824))
+        }' "$TMP/onnode.tsv" "$TMP/toppods" | sort -t "$(printf '\t')" -k1,1nr | head -n 3 |
+        cut -f2 | paste -sd, - | sed 's/,/, /g'
+}
+
+main() {
+    local rows f names problems=0 width=4 w_st=6 w_role=4 w_ver=7 cond=0 now
+    tb_need kubectl jq
+    tb_tmpdir TMP || tb_die 1 "cannot make a temp folder"
+    kube_where
+    kube_to "$TMP/nodes" get nodes -o json || kube_fail
+    rows=$(jq -r "$NODES_JQ" "$TMP/nodes") || tb_die 1 "kubectl gave output jq cannot read"
+    [[ -n $rows ]] || tb_die 1 "the cluster has no nodes"
+    if [[ -n $node ]]; then
+        if ! cut -f1 <<<"$rows" | grep -qxF -- "$node"; then
+            mapfile -t names < <(cut -f1 <<<"$rows")
+            tb_die 1 "no node $node. Nodes are $(join_and "${names[@]}")"
+        fi
+        rows=$(awk -F '\t' -v n="$node" '$1 == n' <<<"$rows")
+    fi
+    while IFS=$'\t' read -r -a f; do
+        (( ${#f[0]} > width )) && width=${#f[0]}
+        (( ${#f[1]} > w_st )) && w_st=${#f[1]}
+        (( ${#f[2]} > w_role )) && w_role=${#f[2]}
+        (( ${#f[4]} > w_ver )) && w_ver=${#f[4]}
+        (( ${#f[@]} > 6 )) && cond=1
+    done <<<"$rows"
+    local fmt="%-$((width + 2))s %-${w_st}s  %-${w_role}s  %-4s %-${w_ver}s"
+    # shellcheck disable=SC2059
+    if (( cond )); then
+        printf "$fmt  %s\n" NODE STATUS ROLE AGE VERSION CONDITIONS
+    else
+        printf "$fmt\n" NODE STATUS ROLE AGE VERSION | sed 's/ *$//'
+    fi
+    while IFS=$'\t' read -r -a f; do
+        # shellcheck disable=SC2059
+        if (( cond )); then
+            printf "$fmt  %s\n" "${f[0]}" "${f[1]}" "${f[2]}" "$(tb_age "${f[3]}")" "${f[4]}" "${f[5]:-ok}"
+        else
+            printf "$fmt\n" "${f[0]}" "${f[1]}" "${f[2]}" "$(tb_age "${f[3]}")" "${f[4]}" | sed 's/ *$//'
+        fi
+    done <<<"$rows"
+    if (( ! cond )); then
+        (( TB_QUIET )) || echo "all conditions normal"
+        return 0
+    fi
+    (( TB_QUIET )) && return 1
+
+    # Details for each node with a problem.
+    have_top=0
+    local pressure=0
+    grep -q 'Pressure' <<<"$rows" && pressure=1
+    if (( pressure )); then
+        if kube_to "$TMP/ev" get events -A --field-selector reason=Evicted -o json; then
+            jq -r "$EVICT_JQ" "$TMP/ev" > "$TMP/evicted" 2>/dev/null
+        fi
+        if grep -q 'MemoryPressure' <<<"$rows" && kube_to "$TMP/toppods" top pods -A --no-headers; then
+            have_top=1
+        else
+            tb_say "no pod metrics, so no list of the biggest users"
+        fi
+    fi
+    now=$(date +%s)
+    local i type since msg rest n users
+    while IFS=$'\t' read -r -a f; do
+        for ((i = 6; i < ${#f[@]}; i++)); do
+            IFS='|' read -r type since msg <<<"${f[i]}"
+            rest=""
+            (( since > 0 )) && rest=" since $(tb_age $(( now - since )))"
+            printf "%-$((width + 2))s %s%s\n" "${f[0]}" "$type" "$rest"
+            if [[ -n $msg ]]; then
+                if [[ $msg == "kubelet "* ]]; then
+                    echo "  kubelet  ${msg#kubelet }"
+                else
+                    echo "  message  $msg"
+                fi
+            fi
+            if [[ $type == *Pressure ]]; then
+                n=$(awk -F '\t' -v n="${f[0]}" '$1 == n { print $2 }' "$TMP/evicted" 2>/dev/null)
+                echo "  evicted  $(tb_plural "${n:-0}" pod) in the last hour"
+            fi
+            if [[ $type == MemoryPressure ]]; then
+                users=$(top_users "${f[0]}")
+                [[ -n $users ]] && echo "  top      $users"
+            fi
+            problems=1
+        done
+    done <<<"$rows"
+    (( problems == 0 ))
+}
+
+node=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --) shift; TB_PASS=("$@"); break ;;
+        -*) tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            [[ -z $node ]] || tb_usage_error "one node at a time, not $node and $1"
+            node=${1#node/} ;;
+    esac
+    shift
+done
+
+main
+exit $?

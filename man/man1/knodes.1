@@ -1,0 +1,173 @@
+.TH "KNODES" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+knodes \- show node health and pressure at a glance
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+knodes [NODE] [-- kubectl options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBkubectl get nodes\fR says Ready or NotReady and little else. A node can be Ready and still be in trouble. Under MemoryPressure, DiskPressure or PIDPressure the kubelet refuses new pods and evicts running ones, and \fBget nodes\fR shows none of that. You find it in \fBkubectl describe node\fR, one node at a time, in a long block of conditions.
+.PP
+\fBknodes\fR prints one row per node with its status, roles, age and kubelet version. A CONDITIONS column appears when any node has a problem, and says \fBok\fR for the others. When every node is fine, the table ends with \fBall conditions normal\fR.
+.PP
+Each problem then gets a short block under the table.
+.IP \(bu 2
+The first line names the node, the condition and how long it has held, such as \fBMemoryPressure since 12m\fR.
+.IP \(bu 2
+\fBkubelet\fR or \fBmessage\fR is what the kubelet reported, such as \fBhas insufficient memory available\fR.
+.IP \(bu 2
+\fBevicted\fR for a pressure condition, the number of pods the kubelet evicted from that node in the last hour.
+.IP \(bu 2
+\fBtop\fR for MemoryPressure, the three pods on the node that use the most memory, as metrics\-server measured.
+.PP
+Name a node to see only that one.
+.PP
+\fBknodes\fR only reads. It never cordons, drains or changes a node.
+.SH OPTIONS
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the table, no detail blocks and no closing line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print each kubectl command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH WHAT COUNTS AS A PROBLEM
+.TP
+\fBReady\fR
+A problem when: not \fBTrue\fR. What it means: The kubelet is down, or has not reported in time. Shown as \fBNotReady\fR.
+.TP
+\fBMemoryPressure\fR
+A problem when: \fBTrue\fR. What it means: The node is low on memory. The kubelet evicts pods, those most over their memory request first.
+.TP
+\fBDiskPressure\fR
+A problem when: \fBTrue\fR. What it means: The node is low on disk or inodes. The kubelet deletes unused images and then evicts pods.
+.TP
+\fBPIDPressure\fR
+A problem when: \fBTrue\fR. What it means: The node is running out of process ids.
+.TP
+\fBNetworkUnavailable\fR
+A problem when: \fBTrue\fR. What it means: The network plugin has not set up the node's network.
+.PP
+The STATUS column also shows \fBSchedulingDisabled\fR for a cordoned node, as \fBkubectl get nodes\fR does. The ROLE column lists the \fBnode\-role.kubernetes.io/\fR labels, or \fBworker\fR for a node with none.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to every kubectl call.
+.PP
+.RS 4
+.nf
+$ knodes -- --context kind-kind
+.fi
+.RE
+.SH NEEDS
+.PP
+\fBkubectl\fR and \fBjq\fR. metrics\-server, optional, for the \fBtop\fR line. Without it, the line is left out and the rest still prints.
+.PP
+The account behind your context needs \fBlist\fR on nodes, and on events and pods in every namespace for the detail lines.
+.SH EXAMPLES
+.SS A node under memory pressure
+.PP
+.RS 4
+.nf
+$ knodes
+NODE           STATUS  ROLE           AGE  VERSION  CONDITIONS
+k8s-master     Ready   control-plane  41d  v1.35.2  ok
+k8s-worker-1   Ready   worker         41d  v1.35.2  ok
+k8s-worker-2   Ready   worker         41d  v1.35.2  MemoryPressure
+k8s-worker-2   MemoryPressure since 6h
+  kubelet  has insufficient memory available
+  evicted  2 pods in the last hour
+  top      prometheus-0 1.9Gi, loki-0 820Mi, api-2wq8d 210Mi
+$ echo $?
+1
+.fi
+.RE
+.PP
+prometheus\-0 is the pod to look at. \fBkres \-\-pods k8s\-worker\-2\fR shows it uses far more than it requests.
+.SS A node that stopped reporting
+.PP
+.RS 4
+.nf
+$ knodes
+NODE           STATUS                       ROLE           AGE  VERSION  CONDITIONS
+k8s-master     Ready                        control-plane  41d  v1.35.2  ok
+k8s-worker-1   NotReady,SchedulingDisabled  worker         41d  v1.35.2  NotReady
+k8s-worker-2   Ready                        worker         41d  v1.35.2  ok
+k8s-worker-1   NotReady since 25m
+  message  Kubelet stopped posting node status.
+.fi
+.RE
+.PP
+The node is down or cut off from the API server. After 5 minutes by default, its pods are marked for eviction and their owners start copies on the other nodes.
+.SS A healthy node
+.PP
+.RS 4
+.nf
+$ knodes k8s-master
+NODE         STATUS  ROLE           AGE  VERSION
+k8s-master   Ready   control-plane  41d  v1.35.2
+all conditions normal
+$ echo $?
+0
+.fi
+.RE
+.SS Only the table
+.PP
+.RS 4
+.nf
+$ knodes -q
+NODE           STATUS  ROLE           AGE  VERSION  CONDITIONS
+k8s-master     Ready   control-plane  41d  v1.35.2  ok
+k8s-worker-1   Ready   worker         41d  v1.35.2  ok
+k8s-worker-2   Ready   worker         41d  v1.35.2  MemoryPressure
+.fi
+.RE
+.SS What it runs
+.PP
+.RS 4
+.nf
+$ knodes -v > /dev/null
++ kubectl get nodes -o json
++ kubectl get events -A --field-selector reason=Evicted -o json
++ kubectl top pods -A --no-headers
++ kubectl get pods -A --field-selector spec.nodeName=k8s-worker-2 -o json
+.fi
+.RE
+.PP
+The last three run only when a node is under pressure.
+.SS A typo in the node name
+.PP
+.RS 4
+.nf
+$ knodes nope
+knodes: no node nope. Nodes are k8s-master, k8s-worker-1 and k8s-worker-2
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBevicted\fR says 0 pods, but pods were evicted : Events expire after an hour by default, and some clusters keep them for less. An eviction older than that leaves only the pod itself with the status Evicted, which \fBkclean\fR lists.
+.PP
+No \fBtop\fR line : metrics\-server is not installed or not ready. \fBkres\fR says which.
+.PP
+A kind node is NotReady right after \fBkind create cluster\fR : The network plugin takes a few seconds to start. Wait and run \fBknodes\fR again.
+.SH EXIT STATUS
+.TP
+0
+Every node looked at is Ready with no pressure.
+.TP
+1
+A node is NotReady or has a problem, no such node, or kubectl failed.
+.TP
+2
+Bad usage, such as two node names.
+.TP
+3
+kubectl or jq is missing.
+.SH SEE ALSO
+.PP
+\fBkres\fR, \fBkclean\fR, \fBkwhy\fR, \fBmem\fR, \fBkubectl\-describe(1)\fR
