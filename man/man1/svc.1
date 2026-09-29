@@ -1,0 +1,279 @@
+.TH "SVC" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+svc \- systemd services in one place
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+svc [--user]
+svc [--user] NAME
+svc [--user] logs NAME [--since TIME] [-- journalctl options]
+svc [--user] start|stop|restart|enable|disable NAME [-- options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+systemd splits the work on a service between two commands. \fBsystemctl\fR starts and stops it and shows its state, and \fBjournalctl\fR shows its logs. Each one has a long list of options, and the one screen you want is spread over both. \fBsvc\fR gives you that screen, and runs the same two commands underneath.
+.PP
+\fBsvc\fR with no name lists the units that failed, system and user, each with when it failed, why, and the last error line from its log. A healthy machine prints \fBsvc: no failed units\fR. That makes \fBsvc\fR a good first command after a boot that felt wrong.
+.PP
+\fBsvc NAME\fR shows one unit on one screen. It shows the state and since when, whether it starts at boot, the main process, the memory it uses, how often it restarted, the unit file and any drop\-in files that change it, and the last 4 log lines. The drop\-ins matter. A file in \fB/etc/systemd/system/NAME.service.d/\fR can change a service without touching its unit file, and \fBsystemctl cat\fR is the only other place you would see it.
+.PP
+\fBsvc logs NAME\fR shows the unit's log, 50 lines by default, or everything since a time with \fB\-\-since\fR.
+.PP
+\fBsvc start\fR, \fBstop\fR, \fBrestart\fR, \fBenable\fR and \fBdisable\fR run \fBsystemctl\fR with sudo for system units, then read the unit back and print one line with the result. \fBsystemctl restart\fR prints nothing when it works and nothing when the service dies a second later. \fBsvc restart\fR tells you which of the two happened.
+.SH UNIT NAMES
+.PP
+A name without a type means a service, so \fBsvc sshd\fR means \fBsshd.service\fR. Give the type for anything else, such as \fBsvc logs fstrim.timer\fR or \fBsvc home.mount\fR.
+.PP
+When no unit has that name, \fBsvc\fR looks for the closest name among the unit files and loaded units and suggests it. It never runs the suggestion.
+.PP
+.RS 4
+.nf
+$ svc crn
+svc: no unit named crn. Did you mean cron.service?
+.fi
+.RE
+.PP
+Debian and Ubuntu call the SSH service \fBssh\fR, while Fedora, Arch and openSUSE call it \fBsshd\fR. On Debian \fBsshd\fR is an alias of \fBssh\fR, so both names work there.
+.SH SYSTEM AND USER UNITS
+.PP
+System units run for the whole machine and start at boot. User units run for you, start when you log in, and live in \fB~/.config/systemd/user/\fR and \fB/usr/lib/systemd/user/\fR. Syncthing, pipewire and many desktop helpers are user units. \fB\-\-user\fR switches every form of \fBsvc\fR to your user units, and those never need sudo.
+.PP
+With no name, \fBsvc\fR lists failed units in both. With a name, it looks in the system units unless you pass \fB\-\-user\fR.
+.SH OPTIONS
+.TP
+\fB\-\-user\fR
+Work on your user units instead of system units.
+.TP
+\fB\-n\fR, \fB\-\-lines N\fR
+How many log lines to show. 4 with a name, 50 with \fBlogs\fR.
+.TP
+\fB\-s\fR, \fB\-\-since TIME\fR
+With \fBlogs\fR, start at TIME. \fB1h\fR, \fB30min\fR, \fB2d\fR, \fBtoday\fR, \fByesterday\fR, \fB09:00\fR and \fB2026\-09\-29 09:00\fR all work.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Do not ask before stopping ssh or the network over ssh.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the result line. With a name, one line with the state.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each \fBsystemctl\fR and \fBjournalctl\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+A bare number and unit in \fB\-\-since\fR, such as \fB1h\fR, means that long ago. \fBsvc\fR passes it to journalctl as \fB\-1h\fR. Anything else goes to journalctl as it is.
+.SH WHAT THE RESULT WORDS MEAN
+.PP
+A failed unit shows why it failed, in words, from systemd's \fBResult\fR property.
+.TP
+\fBexit\-code\fR
+What \fBsvc\fR says: \fBexit code N\fR. What happened: The program ended with an error code. Its log says why.
+.TP
+\fBsignal\fR
+What \fBsvc\fR says: \fBkilled by signal N\fR. What happened: Something killed it, often a stop that took too long.
+.TP
+\fBcore\-dump\fR
+What \fBsvc\fR says: \fBcrashed, signal N\fR. What happened: It crashed. \fBcoredumpctl list\fR has the dump.
+.TP
+\fBtimeout\fR
+What \fBsvc\fR says: \fBtimed out\fR. What happened: It took too long to start or stop.
+.TP
+\fBwatchdog\fR
+What \fBsvc\fR says: \fBwatchdog timeout\fR. What happened: It stopped answering systemd's watchdog.
+.TP
+\fBstart\-limit\-hit\fR
+What \fBsvc\fR says: \fBrestarted too often\fR. What happened: It failed and restarted so often that systemd gave up. Run \fBsudo systemctl reset\-failed NAME\fR after fixing it.
+.TP
+\fBoom\-kill\fR
+What \fBsvc\fR says: \fBkilled for using too much memory\fR. What happened: The kernel or systemd\-oomd killed it. \fBmem\fR shows the kill.
+.TP
+\fBresources\fR
+What \fBsvc\fR says: \fBcould not get its resources\fR. What happened: A folder, user or socket it needs is missing.
+.SH SAFETY
+.IP \(bu 2
+Reading never needs root. \fBsvc\fR, \fBsvc NAME\fR and \fBsvc logs NAME\fR only read.
+.IP \(bu 2
+Changes to system units go through \fBsudo systemctl\fR, so sudo asks for your password as usual.
+.IP \(bu 2
+When you are logged in over ssh and stop \fBssh\fR, \fBsshd\fR, NetworkManager, systemd\-networkd or the network service, \fBsvc\fR asks first, since that can cut off the session you are typing in. Without a terminal it refuses and exits 4, unless you pass \fB\-y\fR. \fBrestart\fR does not ask, because the service comes back and open ssh sessions survive it.
+.IP \(bu 2
+After \fBstart\fR and \fBrestart\fR, \fBsvc\fR reads the state back. A unit that failed right away makes it exit 1 with a pointer to \fBsvc NAME\fR.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to journalctl for \fBlogs\fR, and to systemctl for the actions.
+.PP
+.RS 4
+.nf
+$ svc logs nginx --since 1h -- -o short-precise --grep 'upstream'
+$ svc enable syncthing --user -- --now
+.fi
+.RE
+.PP
+\fBenable \-\- \-\-now\fR enables the unit and starts it in one step.
+.SH PER\-DISTRO NOTES
+.PP
+Debian and Ubuntu : The SSH service is \fBssh\fR. A user can read the system journal only in the \fBadm\fR or \fBsystemd\-journal\fR group.
+.PP
+Fedora, RHEL and openSUSE : The SSH service is \fBsshd\fR. Members of \fBwheel\fR, \fBadm\fR and \fBsystemd\-journal\fR can read the system journal.
+.PP
+Arch : The SSH service is \fBsshd\fR. Members of \fBwheel\fR, \fBadm\fR and \fBsystemd\-journal\fR can read the system journal.
+.PP
+Alpine, Void, Gentoo with OpenRC, and containers : There is no systemd. \fBsvc\fR exits 3 with \fBsvc: this system does not run systemd, so there are no units to show\fR. Use \fBrc\-service\fR and \fBrc\-update\fR on OpenRC.
+.PP
+WSL : WSL 2 runs systemd only when \fBsystemd=true\fR is set in \fB/etc/wsl.conf\fR.
+.SH NEEDS
+.PP
+\fBsystemctl\fR and \fBjournalctl\fR, from the \fBsystemd\fR package, on a machine that booted with systemd. \fBsudo\fR for changes to system units.
+.SH EXAMPLES
+.SS Anything broken?
+.PP
+.RS 4
+.nf
+$ svc
+failed, system
+  dnf-makecache.service   Sep 26 15:40, exit code 1
+    Curl error (6): Could not resolve host name
+failed, user
+  none
+svc: 1 failed unit. Look closer with: svc dnf-makecache
+$ echo $?
+1
+.fi
+.RE
+.PP
+The network was down when the cache refresh ran. That one fixes itself on the next run.
+.SS A healthy machine
+.PP
+.RS 4
+.nf
+$ svc
+failed, system
+  none
+failed, user
+  none
+svc: no failed units
+.fi
+.RE
+.SS One unit on one screen
+.PP
+.RS 4
+.nf
+$ sudo svc sshd
+sshd.service, OpenSSH server daemon
+state     active (running) since Sep 26 09:11, 3d 8h
+enabled   yes, vendor preset disabled
+main pid  812  /usr/sbin/sshd -D
+memory    4.2MB, restarted 0 times
+unit      /usr/lib/systemd/system/sshd.service
+drop-in   /etc/systemd/system/sshd.service.d/override.conf
+
+last 4 log lines
+Sep 29 10:02:11 sshd[48210]: Accepted publickey for khadir
+Sep 29 10:02:11 sshd[48210]: session opened
+.fi
+.RE
+.PP
+The drop\-in line shows that someone changed this service outside its unit file.
+.SS Without read access to the journal
+.PP
+.RS 4
+.nf
+$ svc cron
+cron.service, Regular background program processing daemon
+state     active (running) since 00:17 today, 17h
+enabled   yes, vendor preset enabled
+main pid  1003  /usr/sbin/cron -f
+memory    544KB, restarted 0 times
+unit      /usr/lib/systemd/system/cron.service
+
+last 4 log lines
+none you can read. Run it with sudo, or join the systemd-journal group.
+.fi
+.RE
+.SS Logs of a user unit
+.PP
+.RS 4
+.nf
+$ svc --user logs pipewire -n 3
+Sep 28 21:42:07 debian systemd[1428]: Stopped pipewire.service - PipeWire Multimedia Service.
+-- Boot ec65a11bcba54f11ba663730f12401bc --
+Sep 29 00:17:33 debian systemd[1426]: Started pipewire.service - PipeWire Multimedia Service.
+.fi
+.RE
+.SS Restart and see the result
+.PP
+.RS 4
+.nf
+$ svc -v restart sshd
++ systemctl show -p LoadState --value sshd.service
++ sudo systemctl restart sshd.service
++ systemctl is-active sshd.service
+sshd.service restarted, active (running), pid 51203
+.fi
+.RE
+.SS A restart that fails
+.PP
+.RS 4
+.nf
+$ svc start nginx
+nginx.service started, failed (failed)
+svc: nginx.service failed right after it started. See why with: svc nginx
+$ echo $?
+1
+.fi
+.RE
+.SS Start at boot, now too
+.PP
+.RS 4
+.nf
+$ svc enable syncthing --user -- --now
+syncthing.service enabled, it starts at boot
+.fi
+.RE
+.SS Stopping ssh over ssh
+.PP
+.RS 4
+.nf
+$ svc stop sshd
+You are logged in over ssh. Stopping sshd.service may cut this session off. Stop it? [y/N] n
+Nothing changed.
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBsvc: this system does not run systemd, so there are no units to show\fR : The machine booted with another init, or \fBsvc\fR runs in a container. \fBsystemctl\fR may be installed and still have no systemd to talk to.
+.PP
+\fBsvc: no unit named NAME. List them with: systemctl list\-unit\-files\fR : No unit is close to that name. Try \fBsystemctl list\-unit\-files | grep \-i PART\fR. For a user unit, add \fB\-\-user\fR.
+.PP
+\fBnone you can read. Run it with sudo, or join the systemd\-journal group.\fR : System logs are for root and a few groups. Run \fBsudo svc NAME\fR, or \fBsudo usermod \-aG systemd\-journal $USER\fR and log in again.
+.PP
+\fBHint: You are currently not seeing messages from the system.\fR : journalctl prints this over \fBsvc \-\-user logs\fR when you are not in the journal groups. The user unit's own lines still show.
+.PP
+\fBsvc: systemctl restart nginx.service failed with exit 1. See why with: svc nginx\fR : The unit failed to start. \fBsvc nginx\fR shows the last log lines, and \fBsvc logs nginx \-n 100\fR more of them.
+.PP
+\fBFailed to connect to bus\fR with \fB\-\-user\fR : No user session runs for you, as in \fBsudo \-u otheruser\fR or a cron job. Log in as that user, or run \fBloginctl enable\-linger USER\fR so their units run without a login.
+.SH EXIT STATUS
+.TP
+0
+It worked, and nothing has failed.
+.TP
+1
+A unit has failed, no unit has that name, or a \fBsystemctl\fR or \fBjournalctl\fR command failed.
+.TP
+2
+Bad usage, such as an action without a name, or \fB\-\-since\fR without \fBlogs\fR.
+.TP
+3
+No systemctl, or a system that did not boot with systemd.
+.TP
+4
+Refused. Stopping ssh or the network over ssh with no terminal to ask and no \fB\-y\fR.
+.TP
+5
+You answered no.
+.SH SEE ALSO
+.PP
+\fBproc\fR, \fBmem\fR, \fBsystemctl(1)\fR, \fBjournalctl(1)\fR, \fBsystemd.unit(5)\fR

@@ -112,6 +112,7 @@ ip             iproute2             iproute              iproute2             ip
 getconf        libc-bin             glibc-common         glibc                glibc                musl-utils
 hostname       hostname             hostname             inetutils            hostname             -
 systemd-detect-virt systemd         systemd              systemd              systemd              -
+timeout        coreutils            coreutils            coreutils            coreutils            coreutils
 readlink       coreutils            coreutils            coreutils            coreutils            coreutils
 uname          coreutils            coreutils            coreutils            coreutils            coreutils
 grep           grep                 grep                 grep                 grep                 grep

@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+# svc: systemd services in one place.
+set -uo pipefail
+TB_CMD=svc
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: svc [--user]
+       svc [--user] NAME
+       svc [--user] logs NAME [--since TIME] [-- journalctl options]
+       svc [--user] start|stop|restart|enable|disable NAME [-- options]
+
+Systemd services in one place.
+
+Options:
+  --user              your user units instead of system units
+  -n, --lines N       log lines to show, 4 with a name, 50 with logs
+  -s, --since TIME    with logs, start at TIME, such as 1h, today or 09:00
+  -y, --yes           do not ask before stopping ssh or the network
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to journalctl for logs, and to systemctl for
+  start, stop, restart, enable and disable.
+
+Examples:
+  svc
+  svc sshd
+  svc logs nginx --since 1h
+  svc restart nginx
+  svc enable syncthing --user -- --now
+
+Needs: systemctl and journalctl. See man svc.
+Exit: 0 ok, 1 failed or a unit has failed, 2 bad usage, 3 no systemd,
+      4 refused, 5 answered no.
+EOF
+}
+
+# Tests point this at a fake tree with run/systemd/system in it.
+ROOT=${TB_ROOTFS:-}
+
+check_systemd() {
+    tb_need systemctl
+    [[ -d $ROOT/run/systemd/system ]] ||
+        tb_die "$E_TOOL" "this system does not run systemd, so there are no units to show"
+}
+
+# systemctl for the chosen scope.
+sc() { systemctl ${SCOPE[@]+"${SCOPE[@]}"} "$@"; }
+
+# The journalctl option that picks one unit in the chosen scope.
+journal_unit() {
+    if (( user )); then JU=(--user-unit "$1"); else JU=(-u "$1"); fi
+}
+
+# "sshd" becomes "sshd.service". Names with a unit type keep it.
+unit_name() {
+    case $1 in
+        *.service|*.socket|*.timer|*.mount|*.automount|*.target|*.path|*.slice|*.scope|*.swap|*.device)
+            echo "$1" ;;
+        *) echo "$1.service" ;;
+    esac
+}
+
+# The closest unit names to a typo, from the unit files and loaded units.
+suggest() {
+    local want=${1%.service}
+    {
+        sc list-unit-files --no-legend --plain --no-pager 2>/dev/null
+        sc list-units --all --no-legend --plain --no-pager 2>/dev/null
+    } | awk -v w="$want" '
+        function dist(a, b,    i, j, la, lb, d, c, x, y, z) {
+            la = length(a); lb = length(b)
+            for (i = 0; i <= la; i++) d[i, 0] = i
+            for (j = 0; j <= lb; j++) d[0, j] = j
+            for (i = 1; i <= la; i++)
+                for (j = 1; j <= lb; j++) {
+                    c = (substr(a, i, 1) == substr(b, j, 1)) ? 0 : 1
+                    x = d[i - 1, j] + 1; y = d[i, j - 1] + 1; z = d[i - 1, j - 1] + c
+                    d[i, j] = (x < y ? (x < z ? x : z) : (y < z ? y : z))
+                }
+            return d[la, lb]
+        }
+        $1 !~ /\./ { next }
+        {
+            name = $1; base = name; sub(/\.[a-z]+$/, "", base)
+            if (seen[name]++) next
+            k = dist(w, base)
+            if (k < best || best == "") { best = k; pick = name }
+        }
+        END { if (best != "" && best <= 2 + int(length(w) / 6)) print pick }'
+}
+
+# Stop with a clear message when a unit does not exist.
+resolve() {
+    local want=$1 load hint
+    UNIT=$(unit_name "$want")
+    tb_show systemctl ${SCOPE[@]+"${SCOPE[@]}"} show -p LoadState --value "$UNIT"
+    load=$(sc show -p LoadState --value -- "$UNIT" 2>/dev/null)
+    if [[ $load == not-found || -z $load ]]; then
+        hint=$(suggest "$want")
+        if [[ -n $hint ]]; then
+            tb_die 1 "no unit named $want. Did you mean $hint?"
+        fi
+        local u=""
+        (( user )) && u=" --user"
+        tb_die 1 "no unit named $want. List them with: systemctl$u list-unit-files"
+    fi
+}
+
+# A systemctl timestamp such as "Tue 2026-09-29 15:40:02 IST" as
+# "15:40 today" or "Sep 26 09:11", in TS_TEXT, and in seconds in TS_EPOCH.
+fmt_ts() {
+    local day time
+    read -r _ day time _ <<<"$1"
+    TS_EPOCH=$(date -d "$day $time" +%s 2>/dev/null) || TS_EPOCH=""
+    if [[ $day == "$(date +%F)" ]]; then
+        TS_TEXT="${time%:*} today"
+    elif [[ -n $TS_EPOCH ]]; then
+        TS_TEXT=$(date -d "@$TS_EPOCH" '+%b %d %H:%M')
+    else
+        TS_TEXT="$day ${time%:*}"
+    fi
+}
+
+# Why a unit failed, in words.
+result_text() {
+    local result=$1 status=$2
+    case $result in
+        exit-code)       echo "exit code $status" ;;
+        signal)          echo "killed by signal $status" ;;
+        core-dump)       echo "crashed, signal $status" ;;
+        timeout)         echo "timed out" ;;
+        watchdog)        echo "watchdog timeout" ;;
+        start-limit-hit) echo "restarted too often" ;;
+        oom-kill)        echo "killed for using too much memory" ;;
+        resources)       echo "could not get its resources" ;;
+        success|"")      echo "failed" ;;
+        *)               echo "${result//-/ }" ;;
+    esac
+}
+
+# The command line of a pid, one line.
+cmdline() {
+    local line
+    line=$(tr '\0\n' '  ' <"/proc/$1/cmdline" 2>/dev/null)
+    echo "${line% }"
+}
+
+# Journal lines without the host name, which is the same on every line.
+strip_host() {
+    sed -E 's/^([A-Z][a-z]{2} [ 0-9]{2} [0-9:]{8}) [^ ]+ /\1 /'
+}
+
+list_failed() {
+    local scopes=(system user) s units u props total=0 first="" first_scope="" k v result status ts line
+    (( user )) && scopes=(user)
+    for s in "${scopes[@]}"; do
+        if [[ $s == user ]]; then SCOPE=(--user); user=1; else SCOPE=(); user=0; fi
+        (( TB_QUIET )) || echo "failed, $s"
+        tb_show systemctl ${SCOPE[@]+"${SCOPE[@]}"} list-units --state=failed --no-legend --plain --no-pager
+        if ! units=$(sc list-units --state=failed --no-legend --plain --no-pager 2>/dev/null); then
+            (( TB_QUIET )) || echo "  no $s manager to ask"
+            continue
+        fi
+        units=$(awk '$1 ~ /\./ { print $1 }' <<<"$units")
+        if [[ -z $units ]]; then
+            (( TB_QUIET )) || echo "  none"
+            continue
+        fi
+        while read -r u; do
+            ((total++))
+            [[ -z $first ]] && { first=$u; first_scope=$s; }
+            (( TB_QUIET )) && continue
+            result="" status="" ts=""
+            props=$(sc show -p Result -p ExecMainStatus -p StateChangeTimestamp -- "$u" 2>/dev/null)
+            while IFS='=' read -r k v; do
+                case $k in
+                    Result) result=$v ;;
+                    ExecMainStatus) status=$v ;;
+                    StateChangeTimestamp) ts=$v ;;
+                esac
+            done <<<"$props"
+            if [[ -n $ts ]]; then
+                fmt_ts "$ts"
+                printf '  %-22s  %s, %s\n' "$u" "$TS_TEXT" "$(result_text "$result" "$status")"
+            else
+                printf '  %-22s  %s\n' "$u" "$(result_text "$result" "$status")"
+            fi
+            if tb_has journalctl; then
+                journal_unit "$u"
+                line=$(journalctl "${JU[@]}" -n 1 -p 3 -q --no-pager -o cat 2>/dev/null | tail -n 1)
+                [[ -n $line ]] || line=$(journalctl "${JU[@]}" -n 1 -q --no-pager -o cat 2>/dev/null | tail -n 1)
+                (( ${#line} > 72 )) && line="${line:0:69}..."
+                [[ -n $line ]] && echo "    $line"
+            fi
+        done <<<"$units"
+    done
+    if (( total == 0 )); then
+        echo "svc: no failed units"
+        return 0
+    fi
+    local u_opt=""
+    [[ $first_scope == user ]] && u_opt="--user "
+    echo "svc: $(tb_plural "$total" "failed unit"). Look closer with: svc $u_opt${first%.service}"
+    return 1
+}
+
+show_unit() {
+    local props k v state since ts enabled mem n
+    declare -A P=()
+    resolve "$name"
+    tb_show systemctl ${SCOPE[@]+"${SCOPE[@]}"} show "$UNIT"
+    props=$(sc show -p Id -p Description -p ActiveState -p SubState -p ActiveEnterTimestamp \
+        -p InactiveEnterTimestamp -p UnitFileState -p UnitFilePreset -p MainPID -p MemoryCurrent \
+        -p NRestarts -p FragmentPath -p DropInPaths -p Result -p ExecMainStatus -- "$UNIT" 2>/dev/null)
+    while IFS='=' read -r k v; do
+        [[ -n $k ]] && P[$k]=$v
+    done <<<"$props"
+    state="${P[ActiveState]:-unknown} (${P[SubState]:-unknown})"
+    if (( TB_QUIET )); then
+        echo "$UNIT $state"
+        return 0
+    fi
+    if [[ -n ${P[Description]:-} && ${P[Description]} != "$UNIT" ]]; then
+        echo "$UNIT, ${P[Description]}"
+    else
+        echo "$UNIT"
+    fi
+    if [[ ${P[ActiveState]:-} == active ]]; then ts=${P[ActiveEnterTimestamp]:-}; else ts=${P[InactiveEnterTimestamp]:-}; fi
+    since=""
+    if [[ -n $ts && $ts != n/a ]]; then
+        fmt_ts "$ts"
+        since=" since $TS_TEXT"
+        [[ -n $TS_EPOCH ]] && since+=", $(tb_age $(( $(date +%s) - TS_EPOCH )))"
+    fi
+    [[ ${P[ActiveState]:-} == failed ]] && since+=", $(result_text "${P[Result]:-}" "${P[ExecMainStatus]:-}")"
+    printf '%-9s %s\n' state "$state$since"
+    case ${P[UnitFileState]:-} in
+        enabled|enabled-runtime) enabled=yes ;;
+        disabled)  enabled=no ;;
+        static)    enabled="static, another unit starts it" ;;
+        masked*)   enabled="masked, it cannot start" ;;
+        indirect)  enabled="indirect, through another unit" ;;
+        generated) enabled="generated at boot" ;;
+        "")        enabled="" ;;
+        *)         enabled=${P[UnitFileState]} ;;
+    esac
+    [[ -n $enabled && -n ${P[UnitFilePreset]:-} ]] && enabled+=", vendor preset ${P[UnitFilePreset]}"
+    [[ -n $enabled ]] && printf '%-9s %s\n' enabled "$enabled"
+    if [[ ${P[MainPID]:-0} =~ ^[0-9]+$ ]] && (( ${P[MainPID]:-0} > 0 )); then
+        printf '%-9s %s  %s\n' "main pid" "${P[MainPID]}" "$(cmdline "${P[MainPID]}")"
+    fi
+    mem=${P[MemoryCurrent]:-}
+    n=${P[NRestarts]:-}
+    if [[ $mem =~ ^[0-9]+$ ]] && (( ${#mem} < 19 )); then
+        printf '%-9s %s\n' memory "$(tb_human "$mem")${n:+, restarted $(tb_plural "$n" time)}"
+    elif [[ -n $n ]]; then
+        printf '%-9s %s\n' restarts "$(tb_plural "$n" time)"
+    fi
+    [[ -n ${P[FragmentPath]:-} ]] && printf '%-9s %s\n' unit "${P[FragmentPath]}"
+    for v in ${P[DropInPaths]:-}; do
+        printf '%-9s %s\n' drop-in "$v"
+    done
+    tb_has journalctl || return 0
+    journal_unit "$UNIT"
+    echo
+    echo "last $(tb_plural "$lines" "log line")"
+    tb_show journalctl "${JU[@]}" -n "$lines" -q --no-pager -o short
+    v=$(journalctl "${JU[@]}" -n "$lines" -q --no-pager -o short 2>/dev/null | strip_host)
+    if [[ -n $v ]]; then
+        echo "$v"
+    elif (( ! user && EUID != 0 )); then
+        echo "none you can read. Run it with sudo, or join the systemd-journal group."
+    else
+        echo "none"
+    fi
+    return 0
+}
+
+show_logs() {
+    local args=() s
+    resolve "$name"
+    tb_need journalctl
+    journal_unit "$UNIT"
+    args=("${JU[@]}")
+    if [[ -n $since ]]; then
+        s=$since
+        # "1h" means one hour ago, which journalctl writes as -1h.
+        [[ $s =~ ^[0-9]+(s|min|m|h|d|w)$ ]] && s="-$s"
+        args+=("--since=$s")
+        [[ -n $lines_set ]] && args+=(-n "$lines")
+    else
+        args+=(-n "${lines_set:-50}")
+    fi
+    tb_run journalctl "${args[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"}
+    local rc=$?
+    (( rc == 0 )) || tb_die 1 "journalctl stopped with exit $rc"
+}
+
+# Units that cut a remote session off when they stop.
+risky_stop() {
+    [[ -n ${SSH_CONNECTION:-${SSH_CLIENT:-}} ]] || return 1
+    case $1 in
+        ssh.service|sshd.service|ssh.socket|sshd.socket|NetworkManager.service|\
+        systemd-networkd.service|networking.service|network.service|wicked.service) return 0 ;;
+    esac
+    return 1
+}
+
+do_action() {
+    local sudo=() rc state pid past enabled
+    resolve "$name"
+    if [[ $action == stop ]] && (( ! user )) && risky_stop "$UNIT"; then
+        tb_confirm "You are logged in over ssh. Stopping $UNIT may cut this session off. Stop it?"
+    fi
+    (( user || EUID == 0 )) || { tb_need sudo; sudo=(sudo); }
+    tb_run "${sudo[@]}" systemctl ${SCOPE[@]+"${SCOPE[@]}"} "$action" ${TB_PASS[@]+"${TB_PASS[@]}"} "$UNIT"
+    rc=$?
+    local u_opt=""
+    (( user )) && u_opt="--user "
+    (( rc == 0 )) || tb_die 1 "systemctl $action $UNIT failed with exit $rc. See why with: svc $u_opt${UNIT%.service}"
+    case $action in
+        start)   past=started ;;
+        stop)    past=stopped ;;
+        restart) past=restarted ;;
+        enable)  past=enabled ;;
+        disable) past=disabled ;;
+    esac
+    case $action in
+        enable|disable)
+            tb_show systemctl ${SCOPE[@]+"${SCOPE[@]}"} is-enabled "$UNIT"
+            enabled=$(sc is-enabled -- "$UNIT" 2>/dev/null)
+            case $enabled in
+                enabled) echo "$UNIT $past, it starts at boot" ;;
+                disabled) echo "$UNIT $past, it does not start at boot" ;;
+                *) echo "$UNIT $past, now ${enabled:-unknown}" ;;
+            esac ;;
+        *)
+            tb_show systemctl ${SCOPE[@]+"${SCOPE[@]}"} is-active "$UNIT"
+            state=$(sc show -p ActiveState --value -- "$UNIT" 2>/dev/null)
+            local sub
+            sub=$(sc show -p SubState --value -- "$UNIT" 2>/dev/null)
+            pid=$(sc show -p MainPID --value -- "$UNIT" 2>/dev/null)
+            local text="$UNIT $past, ${state:-unknown}${sub:+ ($sub)}"
+            [[ $pid =~ ^[0-9]+$ ]] && (( pid > 0 )) && text+=", pid $pid"
+            echo "$text"
+            if [[ $action != stop && $state == failed ]]; then
+                tb_err "$UNIT failed right after it started. See why with: svc $u_opt${UNIT%.service}"
+                return 1
+            fi ;;
+    esac
+    return 0
+}
+
+main() {
+    SCOPE=()
+    (( user )) && SCOPE=(--user)
+    check_systemd
+    if [[ -n $since && $action != logs ]]; then
+        tb_usage_error "--since works with logs, such as: svc logs ${name:-NAME} --since 1h"
+    fi
+    if (( ${#TB_PASS[@]} )) && [[ -z $action || $action == status ]]; then
+        tb_usage_error "options after -- work with logs and the actions"
+    fi
+    if [[ -n $action && $action != status && -z $name ]]; then
+        tb_usage_error "$action needs a unit name, such as: svc $action sshd"
+    fi
+    if [[ -z $action && -z $name ]]; then
+        list_failed
+        return
+    fi
+    case ${action:-status} in
+        status) show_unit ;;
+        logs)   show_logs ;;
+        *)      do_action ;;
+    esac
+}
+
+user=0
+action=""
+name=""
+since=""
+lines=4
+lines_set=""
+tb_expand "ns" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --user)      user=1 ;;
+        -n|--lines)  tb_optarg "$@"
+                     [[ $2 =~ ^[0-9]+$ ]] && (( $2 >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                     lines=$2 lines_set=$2; shift ;;
+        -s|--since)  tb_optarg "$@"; since=$2; shift ;;
+        --)          shift; TB_PASS=("$@"); break ;;
+        -*)          tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)
+            if [[ -z $action && -z $name ]]; then
+                case $1 in
+                    logs|start|stop|restart|enable|disable|status) action=$1 ;;
+                    *) name=$1 ;;
+                esac
+            elif [[ -z $name ]]; then
+                name=$1
+            else
+                tb_usage_error "one unit at a time, not ${name} and $1"
+            fi ;;
+    esac
+    shift
+done
+
+main
+exit $?
