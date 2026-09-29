@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+# sshfwd: SSH tunnels without remembering -L, -R and -D.
+set -uo pipefail
+TB_CMD=sshfwd
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: sshfwd [options] HOST [TARGET:]PORT ... [-- ssh options]
+       sshfwd [options] -R HOST PORT [-- ssh options]
+       sshfwd [options] -D HOST [PORT] [-- ssh options]
+       sshfwd --list | --stop ID | --stop all
+
+SSH tunnels without remembering -L, -R and -D.
+
+Options:
+  -R, --remote        open PORT on the host, leading back to your PORT
+  -D, --socks         a SOCKS proxy through the host, port 1080 by default
+  -l, --local PORT    use this local port, not the same number
+  -b, --background    keep the tunnel after the command ends
+  --list              list background tunnels
+  --stop ID           close a background tunnel, or all of them
+  -q, --quiet         only errors, and the tunnel ID with -b
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to ssh, such as -i KEY or -p 2222.
+
+Examples:
+  sshfwd k8s-master 8080
+  sshfwd -b bastion.example.com db.example.com:5432
+  sshfwd -D bastion.example.com
+  sshfwd --stop 1
+
+Needs: ssh from OpenSSH. It reads ~/.ssh/config, so host aliases work.
+       See man sshfwd.
+Exit: 0 ok, 1 ssh failed or the tunnel dropped, 2 bad usage,
+      3 missing tool.
+EOF
+}
+
+SOCK=""
+SSH_HOST=""
+CLOSED=0
+
+state_dir() {
+    local d
+    d=$(tb_state_dir)/sshfwd
+    mkdir -p "$d" && chmod 700 "$d" && echo "$d"
+}
+
+# The program that listens on a local TCP port, as "name (pid N)".
+holder_of() {
+    local line
+    tb_has ss || { echo "another program"; return; }
+    line=$(ss -H -tlnp "sport = :$1" 2>/dev/null | head -n1)
+    if [[ $line =~ \(\(\"([^\"]*)\",pid=([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]} (pid ${BASH_REMATCH[2]})"
+    else
+        echo "another program"
+    fi
+}
+
+# Pick the local port for a wanted one. Ports below 1024 need root, so they
+# move to port + 8000. A taken port moves to the next free one.
+local_port() {
+    local want=$1 fixed=$2 p
+    if (( want < 1024 && EUID != 0 )) && (( ! fixed )); then
+        p=$(( want + 8000 ))
+        tb_info "local $want needs root, using $p"
+        want=$p
+    fi
+    if tb_port_used "$want"; then
+        (( fixed )) && tb_die 1 "local $want is taken by $(holder_of "$want"). Leave out -l to take a free port"
+        p=$(tb_free_port $(( want + 1 ))) || tb_die 1 "no free local port above $want"
+        tb_info "local $want is taken by $(holder_of "$want"), using $p"
+        want=$p
+    fi
+    echo "$want"
+}
+
+# A URL to open, for ports that usually speak HTTP.
+web_url() {
+    local rport=$1 lport=$2
+    case $rport in
+        443|6443|8443|9443) echo "https://localhost:$lport" ;;
+        80|3000|3001|4200|5000|5173|8000|8008|8080|8081|8088|8888|9000|9090|9091|15672) echo "http://localhost:$lport" ;;
+    esac
+}
+
+# The pid of the master connection behind a control socket.
+master_pid() {
+    ssh -S "$1" -O check "$2" 2>&1 | sed -n 's/.*(pid=\([0-9]*\)).*/\1/p'
+}
+
+close_master() {
+    local sock=$1 host=$2 pid=${3:-}
+    ssh -S "$sock" -O exit "$host" >/dev/null 2>&1
+    # The socket should be gone now. When ssh does not answer, stop the pid,
+    # but only when it is the ssh that owns this socket.
+    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+        if tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -qF -- "$sock"; then
+            kill "$pid" 2>/dev/null
+        fi
+    fi
+    rm -f "$sock"
+}
+
+# Close the foreground tunnel on Ctrl+C or when sshfwd exits.
+close_foreground() {
+    (( CLOSED )) && return 0
+    CLOSED=1
+    [[ -n $SOCK && -n $SSH_HOST ]] && close_master "$SOCK" "$SSH_HOST" "${FG_PID:-}"
+    return 0
+}
+
+# The smallest free tunnel ID.
+next_id() {
+    local d=$1 n=1
+    while [[ -e $d/$n.info || -e $d/$n.sock ]]; do ((n++)); done
+    echo "$n"
+}
+
+open_tunnel() {
+    local host=$1 id="" dir log err pid i lines=() forward=() spec p t tp lp fixed url
+    tb_need ssh
+    # Build the forwards, and the lines that describe them.
+    case $mode in
+        local)
+            for spec in "${ports[@]}"; do
+                if [[ $spec =~ ^[0-9]+$ ]]; then
+                    t=localhost tp=$spec
+                elif [[ $spec =~ ^\[(.+)\]:([0-9]+)$ || $spec =~ ^([^:]+):([0-9]+)$ ]]; then
+                    t=${BASH_REMATCH[1]} tp=${BASH_REMATCH[2]}
+                else
+                    tb_usage_error "a forward is PORT or TARGET:PORT, got $spec"
+                fi
+                check_port "$tp"
+                fixed=0
+                lp=$tp
+                if [[ -n $opt_local ]]; then
+                    lp=$opt_local
+                    fixed=1
+                fi
+                lp=$(local_port "$lp" "$fixed") || exit $?
+                forward+=(-L "127.0.0.1:$lp:$t:$tp")
+                if [[ $t == localhost ]]; then
+                    lines+=("localhost:$lp to port $tp on $host")
+                else
+                    lines+=("localhost:$lp to $t:$tp" "through $host")
+                fi
+                url=$(web_url "$tp" "$lp")
+                [[ -n $url ]] && urls+=("$url")
+            done
+            ;;
+        remote)
+            p=${ports[0]}
+            forward+=(-R "$p:localhost:$p")
+            lines+=("port $p on $host leads to localhost:$p")
+            tb_port_used "$p" || tb_warn "nothing listens on local $p yet, so the remote port leads nowhere until it does"
+            ;;
+        socks)
+            p=${ports[0]:-1080}
+            fixed=0
+            if [[ -n $opt_local ]]; then
+                p=$opt_local
+                fixed=1
+            fi
+            p=$(local_port "$p" "$fixed") || exit $?
+            forward+=(-D "127.0.0.1:$p")
+            lines+=("127.0.0.1:$p through $host")
+            socks_port=$p
+            ;;
+    esac
+
+    if (( background )); then
+        dir=$(state_dir) || tb_die 1 "could not make the state folder"
+        id=$(next_id "$dir")
+        SOCK=$dir/$id.sock
+        log=$dir/$id.log
+    else
+        tb_tmpdir dir || tb_die 1 "could not make a temp folder"
+        SOCK=$dir/ctl.sock
+        log=$dir/ssh.log
+    fi
+    local cmd=(ssh -f -N "${forward[@]}" -o ExitOnForwardFailure=yes -o ServerAliveInterval=30
+        -o ServerAliveCountMax=3 -o ControlMaster=yes -o "ControlPath=$SOCK" -o ControlPersist=no
+        ${TB_PASS[@]+"${TB_PASS[@]}"} "$host")
+    tb_show "${cmd[@]}"
+    SSH_HOST=$host
+    trap 'close_foreground; tb_cleanup' EXIT
+    if (( ! background )); then
+        trap 'printf "\n" >&2; exit 0' INT
+    fi
+    if ! "${cmd[@]}" 2>"$log"; then
+        err=$(grep -v '^Warning: Permanently added' "$log" | tail -n1 | sed 's/^[^ ]*@[^ ]*: //')
+        rm -f "$SOCK" "$log"
+        SOCK=""
+        tb_die 1 "ssh to $host failed. ${err:-Run it with -v to see the command}"
+    fi
+    pid=$(master_pid "$SOCK" "$host")
+    [[ -n $pid ]] || tb_die 1 "ssh to $host started, but its control socket does not answer"
+
+    if (( background )); then
+        {
+            echo "$host"
+            echo "$mode"
+            describe
+            echo "$pid"
+            date +%s
+        } > "$dir/$id.info"
+        CLOSED=1
+        if (( TB_QUIET )); then
+            echo "$id"
+            return 0
+        fi
+        printf 'tunnel %-3s%s\n' "$id" "${lines[0]}"
+        for ((i = 1; i < ${#lines[@]}; i++)); do
+            printf '%*s%s\n' $(( 10 )) "" "${lines[i]}"
+        done
+        echo "in the background, pid $pid. Close it with: sshfwd --stop $id"
+        return 0
+    fi
+
+    FG_PID=$pid
+    if (( ! TB_QUIET )); then
+        local label=tunnel
+        [[ $mode == remote ]] && label=remote
+        [[ $mode == socks ]] && label=socks
+        for ((i = 0; i < ${#lines[@]}; i++)); do
+            if [[ ${lines[i]} == through* && $mode == local ]]; then
+                printf '%-8s%s\n' "" "${lines[i]}"
+            else
+                printf '%-8s%s\n' "$label" "${lines[i]}"
+            fi
+        done
+        for url in ${urls[@]+"${urls[@]}"}; do
+            printf '%-8s%s\n' open "$url"
+        done
+        [[ $mode == socks ]] && printf '%-8s%s\n' "try it" "curl --socks5-hostname 127.0.0.1:$socks_port https://example.com"
+        echo "Ctrl+C closes it."
+    fi
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+    done
+    CLOSED=1
+    rm -f "$SOCK"
+    err=$(tail -n1 "$log" 2>/dev/null)
+    tb_die 1 "the tunnel to $host dropped${err:+. $err}"
+}
+
+# One line for the record: every forward, without the "through" lines.
+describe() {
+    local l out=""
+    for l in "${lines[@]}"; do
+        [[ $l == through* ]] && continue
+        out+="${out:+, }$l"
+    done
+    echo "$out"
+}
+
+# Read one record into the info array. False when it is gone.
+read_info() {
+    local f=$1
+    [[ -f $f ]] || return 1
+    mapfile -t info < "$f"
+    (( ${#info[@]} >= 5 ))
+}
+
+list_tunnels() {
+    local dir f id host pid up any=0 now
+    local -a info
+    dir=$(state_dir) || tb_die 1 "could not make the state folder"
+    now=$(date +%s)
+    for f in "$dir"/*.info; do
+        [[ -e $f ]] || continue
+        id=$(basename "$f" .info)
+        read_info "$f" || continue
+        host=${info[0]}
+        pid=${info[3]}
+        if ! kill -0 "$pid" 2>/dev/null; then
+            tb_info "tunnel $id to $host had stopped, removed it"
+            rm -f "$f" "$dir/$id.sock" "$dir/$id.log"
+            continue
+        fi
+        if (( ! any )); then
+            printf '%-4s%-9s%-7s%s\n' ID PID UP TUNNEL
+            any=1
+        fi
+        up=$(tb_age $(( now - info[4] )))
+        printf '%-4s%-9s%-7s%s' "$id" "$pid" "$up" "${info[2]}"
+        [[ ${info[1]} == local && ${info[2]} != *" on $host" ]] && printf ', through %s' "$host"
+        [[ ${info[1]} == socks ]] && printf ' (socks)'
+        printf '\n'
+    done
+    if (( ! any )); then
+        tb_info "no background tunnels. Start one with: sshfwd -b HOST PORT"
+    fi
+    return 0
+}
+
+stop_tunnels() {
+    local which=$1 dir f id found=0
+    local -a info
+    dir=$(state_dir) || tb_die 1 "could not make the state folder"
+    if [[ $which == all ]]; then
+        for f in "$dir"/*.info; do
+            [[ -e $f ]] || continue
+            stop_one "$dir" "$(basename "$f" .info)"
+            found=1
+        done
+        (( found )) || tb_info "no background tunnels to close"
+        return 0
+    fi
+    [[ -f $dir/$which.info ]] || tb_die 1 "no tunnel $which. List them with: sshfwd --list"
+    stop_one "$dir" "$which"
+}
+
+stop_one() {
+    local dir=$1 id=$2
+    local -a info
+    read_info "$dir/$id.info" || return 0
+    tb_show ssh -S "$dir/$id.sock" -O exit "${info[0]}"
+    close_master "$dir/$id.sock" "${info[0]}" "${info[3]}"
+    rm -f "$dir/$id.info" "$dir/$id.log"
+    tb_info "closed tunnel $id, ${info[2]}"
+}
+
+check_port() {
+    [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )) || tb_usage_error "a port is a number from 1 to 65535, got $1"
+}
+
+main() {
+    if (( do_list )); then
+        list_tunnels
+        return
+    fi
+    if [[ -n $stop_id ]]; then
+        stop_tunnels "$stop_id"
+        return
+    fi
+    (( ${#args[@]} )) || tb_usage_error "name a host to tunnel through"
+    local host=${args[0]}
+    ports=("${args[@]:1}")
+    case $mode in
+        local)
+            (( ${#ports[@]} )) || tb_usage_error "name a port to forward, such as: sshfwd $host 8080"
+            [[ -n $opt_local ]] && (( ${#ports[@]} > 1 )) && tb_usage_error "-l sets one local port, and there are ${#ports[@]} forwards"
+            ;;
+        remote)
+            (( ${#ports[@]} == 1 )) || tb_usage_error "-R takes one port, such as: sshfwd -R $host 8080"
+            check_port "${ports[0]}"
+            [[ -n $opt_local ]] && tb_usage_error "-l goes with a local forward or -D, not -R"
+            ;;
+        socks)
+            (( ${#ports[@]} <= 1 )) || tb_usage_error "-D takes one port at most"
+            (( ${#ports[@]} )) && check_port "${ports[0]}"
+            ;;
+    esac
+    [[ -n $opt_local ]] && check_port "$opt_local"
+    open_tunnel "$host"
+}
+
+args=()
+ports=()
+urls=()
+mode=local
+opt_local=""
+background=0
+do_list=0
+stop_id=""
+socks_port=""
+FG_PID=""
+tb_expand "l" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -R|--remote)     [[ $mode == socks ]] && tb_usage_error "-R and -D do not go together"; mode=remote ;;
+        -D|--socks)      [[ $mode == remote ]] && tb_usage_error "-R and -D do not go together"; mode=socks ;;
+        -l|--local)      tb_optarg "$@"; opt_local=$2; shift ;;
+        -b|--background) background=1 ;;
+        --list)          do_list=1 ;;
+        --stop)          tb_optarg "$@"; stop_id=$2; shift ;;
+        --)              shift; TB_PASS=("$@"); break ;;
+        -*)              tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)               args+=("$1") ;;
+    esac
+    shift
+done
+if (( do_list )) || [[ -n $stop_id ]]; then
+    (( ${#args[@]} == 0 )) || tb_usage_error "--list and --stop take no host"
+    (( do_list )) && [[ -n $stop_id ]] && tb_usage_error "--list and --stop do not go together"
+    if [[ -n $stop_id && $stop_id != all && ! $stop_id =~ ^[0-9]+$ ]]; then
+        tb_usage_error "--stop needs a tunnel ID from sshfwd --list, or all"
+    fi
+fi
+
+main
+exit $?
