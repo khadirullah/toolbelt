@@ -7,6 +7,8 @@ bats_require_minimum_version 1.5.0
 
 setup_file() {
     local d=$BATS_FILE_TMPDIR
+    # Only the certificate and key tests need these, and they skip without openssl.
+    command -v openssl >/dev/null || return 0
     openssl req -x509 -newkey rsa:2048 -nodes -keyout "$d/k.pem" -out "$d/c.pem" -days 80 \
         -subj /CN=shop.example.com 2>/dev/null
     openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$d/ec.pem" 2>/dev/null
@@ -113,6 +115,7 @@ SH
 }
 
 @test "certificates show name and expiry, private keys stay hidden" {
+    tb_needs openssl
     run ksecret shop-tls
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "secret shop/shop-tls, type kubernetes.io/tls, 2 keys" ]
@@ -124,6 +127,7 @@ SH
 }
 
 @test "--show-keys prints private keys" {
+    tb_needs openssl
     run ksecret --show-keys shop-tls
     [ "$status" -eq 0 ]
     [[ $output == *"tls.key  -----BEGIN PRIVATE KEY-----"* ]]

@@ -26,6 +26,7 @@ make_cert() {
 
 setup() {
     tb_setup
+    tb_needs openssl
     REAL_OPENSSL=$(command -v openssl)
     export REAL_OPENSSL
     export CALLS=$BATS_TEST_TMPDIR/calls
