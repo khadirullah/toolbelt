@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# certcheck: days until a TLS certificate expires.
+set -uo pipefail
+TB_CMD=certcheck
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: certcheck [options] HOST[:PORT] | FILE ... [-- s_client options]
+       certcheck [options] -f LIST
+
+Days until a TLS certificate expires.
+
+Options:
+  -w, --warn DAYS     exit 1 when fewer days are left, 30 by default
+  -f, --file LIST     read hosts and files from LIST, one per line, - for stdin
+  -t, --timeout SECS  give up on a host after SECS seconds, 5 by default
+  -q, --quiet         only the problems and the summary line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+A HOST may be a URL. The port is 443 unless you give one.
+
+Pass-through:
+  Options after -- go to openssl s_client, for hosts only.
+
+Examples:
+  certcheck example.com
+  certcheck -w 14 -f hosts.txt
+  certcheck ./site.pem
+  certcheck smtp.example.com:587 -- -starttls smtp
+
+Needs: openssl. See man certcheck.
+Exit: 0 ok, 1 a certificate expires soon, has expired or cannot be read,
+      2 bad usage, 3 missing tool.
+EOF
+}
+
+# ---------------------------------------------------------------- targets
+
+# Split HOST[:PORT] or a URL into HOST and PORT.
+split_host() {
+    local t=$1
+    t=${t#*://}
+    t=${t%%/*}
+    t=${t##*@}
+    PORT=443
+    if [[ $t =~ ^\[([^]]+)\](:([0-9]+))?$ ]]; then
+        HOST=${BASH_REMATCH[1]}
+        [[ -n ${BASH_REMATCH[3]} ]] && PORT=${BASH_REMATCH[3]}
+    elif [[ $t == *:*:* ]]; then
+        HOST=$t        # a bare IPv6 address
+    elif [[ $t == *:* ]]; then
+        HOST=${t%:*}
+        PORT=${t##*:}
+    else
+        HOST=$t
+    fi
+    [[ -n $HOST ]] || return 1
+    [[ $PORT =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 ))
+}
+
+# True when a target names a local file rather than a host.
+is_file() {
+    [[ -f $1 ]] && return 0
+    [[ $1 == */* && $1 != *://* ]] && return 0
+    [[ $1 =~ \.(pem|crt|cer|der)$ ]]
+}
+
+# ---------------------------------------------------------------- reading
+
+# Fetch the certificate of HOST:PORT into a PEM file. Sets ERR on failure.
+fetch() {
+    local host=$1 port=$2 out=$3 connect sni=() rc err
+    ERR="" SHORT=""
+    if [[ $host == *:* ]]; then connect="[$host]:$port"; else connect="$host:$port"; fi
+    # SNI takes a name, never an address.
+    [[ $host =~ ^[0-9.]+$ || $host == *:* ]] || sni=(-servername "$host")
+    local cmd=(openssl s_client -connect "$connect" "${sni[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"})
+    tb_show "${cmd[@]}"
+    if tb_has timeout; then cmd=(timeout "$secs" "${cmd[@]}"); fi
+    "${cmd[@]}" </dev/null >"$tmp/raw" 2>"$tmp/err"
+    rc=$?
+    if (( rc == 124 )); then
+        SHORT="timed out after ${secs}s"
+        ERR="cannot connect to $connect, $SHORT"
+        return 1
+    fi
+    if openssl x509 -outform PEM <"$tmp/raw" >"$out" 2>/dev/null; then
+        return 0
+    fi
+    err=$(cat "$tmp/err" "$tmp/raw" 2>/dev/null)
+    case $err in
+        *"Connection refused"*)
+            SHORT="connection refused"
+            ERR="cannot connect to $connect, $SHORT" ;;
+        *"Name or service not known"*|*"nodename nor servname"*|*"No address associated"*|\
+        *"Temporary failure in name resolution"*|*"BIO_lookup"*)
+            SHORT="not found in DNS"
+            ERR="cannot find $host in DNS" ;;
+        *"Network is unreachable"*|*"No route to host"*)
+            SHORT="no route to the host"
+            ERR="cannot connect to $connect, $SHORT" ;;
+        *"wrong version number"*|*"packet length too long"*|*"record layer failure"*)
+            SHORT="no TLS on this port"
+            ERR="$connect does not speak TLS here. For a mail port try: certcheck $connect -- -starttls smtp" ;;
+        *"no peer certificate"*)
+            SHORT="sent no certificate"
+            ERR="$connect sent no certificate" ;;
+        *)
+            SHORT="no certificate read"
+            err=$(grep -m 1 -iE 'error|errno|unable' "$tmp/err" 2>/dev/null)
+            ERR="cannot read a certificate from $connect${err:+, ${err##*:}}" ;;
+    esac
+    return 1
+}
+
+# "Oct  9 15:04:16 2026 GMT" in seconds since the epoch.
+to_epoch() {
+    local mon day time year m
+    read -r mon day time year _ <<<"$1"
+    case $mon in
+        Jan) m=01 ;; Feb) m=02 ;; Mar) m=03 ;; Apr) m=04 ;; May) m=05 ;; Jun) m=06 ;;
+        Jul) m=07 ;; Aug) m=08 ;; Sep) m=09 ;; Oct) m=10 ;; Nov) m=11 ;; Dec) m=12 ;;
+        *) return 1 ;;
+    esac
+    date -u -d "$year-$m-$(printf '%02d' "$((10#$day))") $time" +%s 2>/dev/null
+}
+
+# Read a certificate file. Sets END, EXPIRES, ISSUER and NAMES.
+read_cert() {
+    local file=$1 info inform=() line section="" o="" cn="" scn="" sans="" n=0 more=0 name
+    tb_show openssl x509 -in "$file" -noout -enddate -issuer -subject -ext subjectAltName -nameopt multiline
+    if ! info=$(openssl x509 -in "$file" -noout -enddate -issuer -subject -ext subjectAltName \
+            -nameopt multiline 2>/dev/null); then
+        inform=(-inform DER)
+        info=$(openssl x509 "${inform[@]}" -in "$file" -noout -enddate -issuer -subject \
+            -ext subjectAltName -nameopt multiline 2>/dev/null) || return 1
+    fi
+    END="" sans=""
+    while IFS= read -r line; do
+        case $line in
+            notAfter=*) END=$(to_epoch "${line#notAfter=}") ;;
+            issuer=*) section=issuer ;;
+            subject=*) section=subject ;;
+            "X509v3 Subject Alternative Name"*) section=san ;;
+            "    organizationName"*) [[ $section == issuer ]] && o=${line#*= } ;;
+            "    commonName"*)
+                if [[ $section == issuer ]]; then cn=${line#*= }; elif [[ $section == subject ]]; then scn=${line#*= }; fi ;;
+            "    "*) [[ $section == san ]] && sans+="${line#    }, " ;;
+            *) section="" ;;
+        esac
+    done <<<"$info"
+    [[ -n $END ]] || return 1
+    EXPIRES=$(date -u -d "@$END" +%Y-%m-%d)
+    # "Let's Encrypt" and "E7" read as "Let's Encrypt E7". A name that already
+    # says who made it, such as "Amazon RSA 2048 M02", stands alone.
+    if [[ -z $cn ]]; then ISSUER=$o
+    elif [[ -z $o || $cn == *"${o%% *}"* ]]; then ISSUER=$cn
+    else ISSUER="$o $cn"; fi
+    [[ -n $ISSUER ]] || ISSUER=unknown
+    NAMES=""
+    local IFS=,
+    for name in $sans; do
+        name=${name# }
+        name=${name#DNS:}
+        name=${name#IP Address:}
+        [[ -z $name ]] && continue
+        if (( n < 4 )); then NAMES+="${NAMES:+ }$name"; else ((more++)); fi
+        ((n++))
+    done
+    (( more )) && NAMES+=" +$more more"
+    [[ -n $NAMES ]] || NAMES=${scn:-no names}
+    return 0
+}
+
+# Days from now until an epoch, to the nearest day. Negative once it is past.
+days_left() {
+    local diff=$(( $1 - NOW ))
+    if (( diff >= 0 )); then echo $(( (diff + 43200) / 86400 )); else echo $(( -((-diff + 43200) / 86400) )); fi
+}
+
+# ---------------------------------------------------------------- checking
+
+# Check one target. Appends a row of tab-separated fields: label, days,
+# issuer, expiry date, state, then the names, or for an error the full
+# message and a short one for the table.
+check_one() {
+    local target=$1 label file days state
+    if is_file "$target"; then
+        label=$target
+        [[ -e $target ]] || { ROWS+=("$label"$'\t-\t-\t-\terror\t'"$label: no such file"$'\tno such file'); return; }
+        [[ -r $target ]] || { ROWS+=("$label"$'\t-\t-\t-\terror\t'"cannot read $label, check its permissions"$'\tcannot read the file'); return; }
+        file=$target
+        tb_say "reading $target"
+    else
+        if ! split_host "$target"; then
+            ROWS+=("$target"$'\t-\t-\t-\terror\t'"$target is not a host, a host:port or a file"$'\tnot a host or a file')
+            return
+        fi
+        label=$HOST
+        (( PORT != 443 )) && label="$HOST:$PORT"
+        file=$tmp/cert.pem
+        tb_say "connecting to $HOST port $PORT"
+        if ! fetch "$HOST" "$PORT" "$file"; then
+            ROWS+=("$label"$'\t-\t-\t-\terror\t'"$ERR"$'\t'"$SHORT")
+            return
+        fi
+    fi
+    if ! read_cert "$file"; then
+        ROWS+=("$label"$'\t-\t-\t-\terror\t'"$label is not a certificate, openssl x509 cannot read it"$'\tnot a certificate')
+        return
+    fi
+    days=$(days_left "$END")
+    if (( END <= NOW )); then state=expired
+    elif (( days < warn )); then state=warn
+    else state=ok; fi
+    ROWS+=("$label"$'\t'"$days"$'\t'"$ISSUER"$'\t'"$EXPIRES"$'\t'"$state"$'\t'"$NAMES")
+}
+
+day_word() { if (( $1 == 1 || $1 == -1 )); then echo "$1 day"; else echo "$1 days"; fi; }
+
+colour_state() {
+    case $1 in
+        warn) printf '%s%s%s' "$C_YEL" "$1" "$C_OFF" ;;
+        expired|error) printf '%s%s%s' "$C_RED" "$1" "$C_OFF" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# One target: one line on stdout, and a warning or error on stderr.
+print_single() {
+    local label days issuer expires state rest short
+    IFS=$'\t' read -r label days issuer expires state rest short <<<"${ROWS[0]}"
+    case $state in
+        error)
+            tb_err "$rest"
+            return 1 ;;
+    esac
+    printf '%s  %s  %s  %s\n' "$label" "$(day_word "$days")" "$issuer" "$rest"
+    case $state in
+        warn)    tb_warn "$label expires on $expires, inside the $warn day warning window"; return 1 ;;
+        expired) tb_warn "$label expired $(day_word $(( -days ))) ago, on $expires"; return 1 ;;
+    esac
+    return 0
+}
+
+# Several targets: a table and a summary line.
+print_table() {
+    local row label days issuer expires state rest short wl=4 wi=6 total=0 nwarn=0 nexp=0 nerr=0 hosts=0 files=0 what
+    local out=()
+    for row in "${ROWS[@]}"; do
+        IFS=$'\t' read -r label days issuer expires state rest <<<"$row"
+        (( ${#issuer} > 28 )) && issuer="${issuer:0:25}..."
+        (( ${#label} > wl )) && wl=${#label}
+        [[ $state != error ]] && (( ${#issuer} > wi )) && wi=${#issuer}
+    done
+    tb_color_stdout
+    (( TB_QUIET )) || printf '%-*s  %4s  %-*s  %s\n' "$wl" HOST DAYS "$wi" ISSUER EXPIRES
+    for row in "${ROWS[@]}"; do
+        IFS=$'\t' read -r label days issuer expires state rest short <<<"$row"
+        (( ${#issuer} > 28 )) && issuer="${issuer:0:25}..."
+        ((total++))
+        if is_file "$label"; then ((files++)); else ((hosts++)); fi
+        case $state in
+            warn) ((nwarn++)) ;;
+            expired) ((nexp++)) ;;
+            error) ((nerr++)) ;;
+        esac
+        [[ $state == ok ]] && (( TB_QUIET )) && continue
+        if [[ $state == error ]]; then
+            printf '%-*s  %4s  %-*s  %-10s  %s\n' "$wl" "$label" - "$wi" - - "$(colour_state error), $short"
+        elif [[ $state == ok ]]; then
+            printf '%-*s  %4s  %-*s  %s\n' "$wl" "$label" "$days" "$wi" "$issuer" "$expires"
+        else
+            printf '%-*s  %4s  %-*s  %s  %s\n' "$wl" "$label" "$days" "$wi" "$issuer" "$expires" "$(colour_state "$state")"
+        fi
+    done
+    if (( files == 0 )); then what=host; elif (( hosts == 0 )); then what=file; else what=certificate; fi
+    local sum
+    sum=$(tb_plural "$total" "$what")
+    (( nwarn )) && sum+=", $nwarn warn"
+    (( nexp )) && sum+=", $nexp expired"
+    (( nerr )) && sum+=", $nerr failed"
+    (( nwarn + nexp + nerr )) || sum+=", all good for $(day_word "$warn") or more"
+    echo "$sum"
+    (( nwarn + nexp + nerr == 0 ))
+}
+
+main() {
+    local t line
+    tb_need openssl
+    if [[ -n $list ]]; then
+        if [[ $list == - ]]; then
+            list=/dev/stdin
+        elif [[ ! -r $list ]]; then
+            tb_die 1 "cannot read the list $list"
+        fi
+        while IFS= read -r line || [[ -n $line ]]; do
+            line=${line%%#*}
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -n $line ]] && targets+=("$line")
+        done <"$list"
+        (( ${#targets[@]} )) || tb_die 1 "the list $list names no hosts"
+    fi
+    (( ${#targets[@]} )) || tb_usage_error "give a host, a file or -f LIST"
+    tb_tmpdir tmp || tb_die 1 "cannot make a temp folder"
+    NOW=$(date +%s)
+    ROWS=()
+    for t in "${targets[@]}"; do
+        check_one "$t"
+    done
+    if (( ${#ROWS[@]} == 1 )) && [[ -z $list ]]; then
+        print_single
+    else
+        print_table
+    fi
+}
+
+warn=30
+secs=5
+list=""
+targets=()
+tb_expand "wft" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -w|--warn)    tb_optarg "$@"
+                      [[ $2 =~ ^[0-9]+$ ]] || tb_usage_error "--warn needs a number of days"
+                      warn=$((10#$2)); shift ;;
+        -f|--file)    tb_optarg "$@"; list=$2; shift ;;
+        -t|--timeout) tb_optarg "$@"
+                      [[ $2 =~ ^[0-9]+$ ]] && (( $2 >= 1 )) || tb_usage_error "--timeout needs a number of seconds"
+                      secs=$((10#$2)); shift ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            targets+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?
