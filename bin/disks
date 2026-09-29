@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# disks: drives, partitions, space and health together.
+set -uo pipefail
+TB_CMD=disks
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: disks [options] [-- smartctl options]
+
+Drives, partitions, space and health together.
+
+Options:
+  -a, --all           also loop devices, tmpfs and network mounts
+  -H, --health        SMART health for each drive, it needs root
+      --warn PERCENT  exit 1 when a mount is fuller than PERCENT
+  -q, --quiet         only the table, or with --warn only the full mounts
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  With --health, options after -- go to smartctl, such as -d sat.
+
+Examples:
+  disks
+  disks -a
+  disks --health
+  disks -q --warn 90
+
+Needs: lsblk, findmnt and df. smartctl for --health. See man disks.
+Exit: 0 ok, 1 a mount over --warn or a drive fails SMART, 2 bad usage,
+      3 missing tool.
+EOF
+}
+
+# The low mark, and the --warn level when one was given.
+LOW=85
+
+# Sizes the way lsblk prints them, such as 238G or 7.6G.
+short() {
+    local h
+    h=$(tb_human "$1")
+    [[ $h == *B && $h != *[0-9]B ]] && h=${h%B}
+    echo "$h"
+}
+
+# Tree characters, plain ASCII when the terminal cannot show others.
+set_tree_chars() {
+    local cs=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
+    if [[ ${cs^^} == *UTF-8* || ${cs^^} == *UTF8* ]]; then
+        T_MID="├ " T_END="└ " T_BAR="│ "
+    else
+        T_MID="|-" T_END="\`-" T_BAR="| "
+    fi
+}
+
+# Read lsblk into arrays: one entry per device, in tree order.
+read_devices() {
+    local line NAME KNAME PKNAME TYPE SIZE FSTYPE MOUNTPOINT MODEL DPATH TRAN i
+    N=0
+    local cmd=(lsblk -P -b -o NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL,PATH,TRAN)
+    tb_show "${cmd[@]}"
+    while IFS= read -r line; do
+        NAME="" KNAME="" PKNAME="" TYPE="" SIZE=0 FSTYPE="" MOUNTPOINT="" MODEL="" DPATH="" TRAN=""
+        # lsblk -P prints KEY="value" pairs with shell-safe quoting.
+        while [[ $line =~ ^[[:space:]]*([A-Z:]+)=\"([^\"]*)\"(.*)$ ]]; do
+            case ${BASH_REMATCH[1]} in
+                NAME) NAME=${BASH_REMATCH[2]} ;; KNAME) KNAME=${BASH_REMATCH[2]} ;;
+                PKNAME) PKNAME=${BASH_REMATCH[2]} ;; TYPE) TYPE=${BASH_REMATCH[2]} ;;
+                SIZE) SIZE=${BASH_REMATCH[2]} ;; FSTYPE) FSTYPE=${BASH_REMATCH[2]} ;;
+                MOUNTPOINT) MOUNTPOINT=${BASH_REMATCH[2]} ;; MODEL) MODEL=${BASH_REMATCH[2]} ;;
+                PATH) DPATH=${BASH_REMATCH[2]} ;; TRAN) TRAN=${BASH_REMATCH[2]} ;;
+            esac
+            line=${BASH_REMATCH[3]}
+        done
+        [[ -n $KNAME ]] || continue
+        i=$N
+        d_name[i]=$NAME d_kname[i]=$KNAME d_parent[i]=$PKNAME d_type[i]=$TYPE
+        d_size[i]=${SIZE:-0} d_fs[i]=$FSTYPE d_mnt[i]=$MOUNTPOINT d_model[i]=$MODEL
+        d_path[i]=${DPATH:-/dev/$KNAME} d_tran[i]=$TRAN
+        N=$(( N + 1 ))
+    done < <("${cmd[@]}" 2>/dev/null)
+}
+
+# The mount points of each source device, from findmnt, in MOUNTS[path].
+read_mounts() {
+    local src target fstype
+    declare -gA MOUNTS=()
+    OTHER=()
+    tb_show findmnt -rn -o SOURCE,TARGET,FSTYPE
+    while read -r src target fstype; do
+        target=$(printf '%b' "${target//\\x/\\x}")
+        src=${src%%\[*}
+        case $fstype in
+            tmpfs|nfs|nfs4|cifs|smb3|virtiofs|9p|fuse.sshfs|fuse.rclone|ceph|glusterfs)
+                OTHER+=("$src|$target|$fstype")
+                continue ;;
+        esac
+        [[ $src == /dev/* ]] || continue
+        if [[ -n ${MOUNTS[$src]:-} ]]; then MOUNTS[$src]+="|$target"; else MOUNTS[$src]=$target; fi
+    done < <(findmnt -rn -o SOURCE,TARGET,FSTYPE 2>/dev/null)
+}
+
+# Used and free kilobytes and the use percent of mount points, in DF[mount].
+read_usage() {
+    local mounts=("$@") fs size used avail pct target
+    declare -gA DF=()
+    (( ${#mounts[@]} )) || return 0
+    tb_show df -Pk -- "${mounts[@]}"
+    while read -r fs size used avail pct target; do
+        [[ $size =~ ^[0-9]+$ ]] || continue
+        DF[$target]="$used $avail ${pct%\%}"
+    done < <(df -Pk -- "${mounts[@]}" 2>/dev/null)
+}
+
+# Should this device show at all?
+visible() {
+    local i=$1
+    case ${d_type[i]} in
+        loop) (( all )) ;;
+        rom) (( all )) || [[ -n ${d_mnt[i]} ]] ;;
+        *) [[ ${d_name[i]} != ram* ]] || (( all )) ;;
+    esac
+}
+
+# Print one table row. The mount column wraps when it is too long.
+row() {
+    local dev=$1 size=$2 fs=$3 mnt=$4 used=${5:-} free=${6:-} pct=${7:-} mark=${8:-} pad line
+    # Tree characters take one column each, whatever their bytes.
+    pad=$(( 12 - ${#dev} + ${ROW_EXTRA:-0} ))
+    ROW_EXTRA=0
+    (( pad < 1 )) && pad=1
+    case $fs in
+        crypto_LUKS) fs=luks ;;
+        LVM2_member) fs=lvm ;;
+        linux_raid_member) fs=raid ;;
+    esac
+    printf -v line '%s%*s%5s  %-8s %s' "$dev" "$pad" "" "$size" "$fs" "$mnt"
+    if [[ -z $used ]]; then
+        printf '%s\n' "${line%"${line##*[! ]}"}"
+        return
+    fi
+    printf '%s' "${line%"$mnt"}"
+    if (( ${#mnt} > 13 )); then
+        printf '%s\n%41s' "$mnt" ""
+    else
+        printf '%-13s' "$mnt"
+    fi
+    printf '%5s  %5s  %3s%%%s\n' "$used" "$free" "$pct" "${mark:+ $mark}"
+}
+
+# The tree prefix for a device: bars for open parents, then its own branch.
+prefix_for() {
+    local i=$1 p="" j=$1 chain=()
+    while [[ -n ${d_parent[j]} ]]; do
+        chain=("$j" ${chain[@]+"${chain[@]}"})
+        j=${index_of[${d_parent[j]}]:-}
+        [[ -n $j ]] || break
+    done
+    local k n=${#chain[@]}
+    for (( k = 0; k < n; k++ )); do
+        if (( k == n - 1 )); then
+            if (( is_last[chain[k]] )); then p+=$T_END; else p+=$T_MID; fi
+        else
+            if (( is_last[chain[k]] )); then p+="  "; else p+=$T_BAR; fi
+        fi
+    done
+    PREFIX=$p
+    # In a C locale ${#p} counts bytes. Each segment shows as two columns.
+    ROW_EXTRA=$(( ${#p} - 2 * n ))
+}
+
+show_table() {
+    local i j mnts m used avail pct mark first seen="" list=() over=()
+    declare -gA index_of=()
+    declare -ga is_last=()
+    for (( i = 0; i < N; i++ )); do index_of[${d_kname[i]}]=$i; done
+    # A device is the last child when no later device has the same parent.
+    for (( i = 0; i < N; i++ )); do
+        is_last[i]=1
+        for (( j = i + 1; j < N; j++ )); do
+            if [[ ${d_parent[j]} == "${d_parent[i]}" ]] && visible "$j"; then is_last[i]=0; break; fi
+        done
+    done
+    for (( i = 0; i < N; i++ )); do
+        m=${MOUNTS[${d_path[i]}]:-${MOUNTS[/dev/${d_kname[i]}]:-}}
+        [[ -z $m && -n ${d_mnt[i]} ]] && m=${d_mnt[i]}
+        d_mnts[i]=$m
+        first=${m%%|*}
+        [[ -n $first && $first == /* ]] && list+=("$first")
+    done
+    if (( all )); then
+        local o
+        for o in ${OTHER[@]+"${OTHER[@]}"}; do
+            IFS='|' read -r _ m _ <<<"$o"
+            list+=("$m")
+        done
+    fi
+    read_usage ${list[@]+"${list[@]}"}
+
+    if (( ! (TB_QUIET && warn_given) )); then
+        printf '%s%-12s%5s  %-8s %-13s%5s  %5s  %4s%s\n' "$C_BOLD" DEVICE SIZE FS "MOUNTED ON" USED FREE USE "$C_OFF"
+    fi
+    for (( i = 0; i < N; i++ )); do
+        visible "$i" || continue
+        local dev size fs
+        prefix_for "$i"
+        dev="$PREFIX${d_name[i]}"
+        size=$(short "${d_size[i]}")
+        fs=${d_fs[i]}
+        mnts=${d_mnts[i]}
+        first=${mnts%%|*}
+        if [[ -z ${d_parent[i]} && -z $mnts && -z $fs ]]; then
+            (( TB_QUIET && warn_given )) || row "$dev" "$size" "" "${d_model[i]}"
+            continue
+        fi
+        if [[ -n $first && -n ${DF[$first]:-} ]]; then
+            read -r used avail pct <<<"${DF[$first]}"
+            mark=""
+            if (( pct > limit )); then
+                mark=low
+                [[ " $seen " == *" $first "* ]] || over+=("$first|$pct|$avail")
+                seen+=" $first"
+            fi
+            (( TB_QUIET && warn_given )) ||
+                row "$dev" "$size" "$fs" "${mnts//|/, }" "$(short $(( used * 1024 )))" "$(short $(( avail * 1024 )))" "$pct" "${mark:+${C_YEL}$mark${C_OFF}}"
+        else
+            (( TB_QUIET && warn_given )) || row "$dev" "$size" "$fs" "${mnts//|/, }"
+        fi
+    done
+    if (( all )); then
+        local o src fstype
+        for o in ${OTHER[@]+"${OTHER[@]}"}; do
+            IFS='|' read -r src m fstype <<<"$o"
+            [[ -n ${DF[$m]:-} ]] || continue
+            read -r used avail pct <<<"${DF[$m]}"
+            mark=""
+            if [[ $fstype != tmpfs ]] && (( pct > limit )); then
+                mark=low
+                over+=("$m|$pct|$avail")
+            fi
+            (( TB_QUIET && warn_given )) ||
+                row "$src" "$(short $(( (used + avail) * 1024 )))" "$fstype" "$m" "$(short $(( used * 1024 )))" "$(short $(( avail * 1024 )))" "$pct" "$mark"
+        done
+    fi
+    OVER=(${over[@]+"${over[@]}"})
+}
+
+# ---------------------------------------------------------------- health
+
+# The drives SMART can read: whole disks, not zram, loop or RAM disks.
+smart_drives() {
+    local i
+    for (( i = 0; i < N; i++ )); do
+        [[ ${d_type[i]} == disk ]] || continue
+        [[ ${d_name[i]} == zram* || ${d_name[i]} == ram* || ${d_name[i]} == loop* ]] && continue
+        echo "$i"
+    done
+}
+
+# Run smartctl for one drive, as root, through sudo when needed.
+run_smartctl() {
+    local cmd=(smartctl -H -i -A ${TB_PASS[@]+"${TB_PASS[@]}"} "$1")
+    if (( EUID != 0 )); then
+        if tb_is_tty; then cmd=(sudo "${cmd[@]}"); else cmd=(sudo -n "${cmd[@]}"); fi
+    fi
+    tb_show "${cmd[@]}"
+    "${cmd[@]}" 2>&1
+}
+
+# Pull the lines disks shows out of smartctl's text output.
+parse_smart() {
+    awk '
+    function num(s) { gsub(/[^0-9]/, "", s); return s + 0 }
+    function after(s) { sub(/^[^:]*:[ \t]*/, "", s); return s }
+    /self-assessment test result:/ { h = $NF }
+    /^SMART Health Status:/ { h = after($0) }
+    /^Percentage Used:/ { wear = num(after($0)) "% used" }
+    /^Power On Hours:/ { hours = after($0) }
+    /^Data Units Written:/ { w = $0; if (match(w, /\[[^]]*\]/)) written = substr(w, RSTART + 1, RLENGTH - 2) }
+    /^Temperature:/ { temp = num($2) " C" }
+    /^Media and Data Integrity Errors:/ { media = after($0) }
+    /^Unsafe Shutdowns:/ { unsafe = after($0) }
+    /^ *[0-9]+ [A-Za-z_-]+ +0x[0-9a-f]+ / {
+        name = $2; raw = $10
+        if (name == "Power_On_Hours") hours = num(raw)
+        else if (name == "Temperature_Celsius" || (name == "Airflow_Temperature_Cel" && temp == "")) temp = (raw + 0) " C"
+        else if (name == "Wear_Leveling_Count" || name == "Percent_Lifetime_Remain" || name == "Media_Wearout_Indicator" || name == "SSD_Life_Left")
+            wear = (100 - $4) "% used"
+        else if (name == "Reallocated_Sector_Ct") realloc = raw
+        else if (name == "Current_Pending_Sector") pending = raw
+        else if (name == "Total_LBAs_Written") lbas = raw
+        else if (name == "Power-Off_Retract_Count" || name == "Unexpected_Power_Loss_Ct") unsafe = raw
+    }
+    /USB bridge/ { usb = 1 }
+    /password is required|a terminal is required/ { pw = 1 }
+    END {
+        if (pw) { print "needroot"; exit }
+        if (h == "") { print "none\t" (usb ? "not available over this USB bridge" : "not available on this drive"); exit }
+        print "smart\t" h
+        if (wear != "") print "wear\t" wear
+        if (hours != "") print "power on\t" hours " hours"
+        if (written != "") print "written\t" written
+        else if (lbas != "") print "lbas\t" lbas
+        if (temp != "") print "temperature\t" temp
+        if (media != "") print "media errors\t" media
+        if (realloc != "") print "reallocated\t" realloc " sectors"
+        if (pending != "") print "pending\t" pending " sectors"
+        if (unsafe != "") print "unsafe shutdowns\t" unsafe
+    }'
+}
+
+show_health() {
+    local i out key val bad=0 any=0 hours
+    tb_need smartctl
+    for i in $(smart_drives); do
+        any=1
+        printf '%-9s %s\n' "${d_name[i]}" "${d_model[i]}"
+        out=$(run_smartctl "${d_path[i]}" | parse_smart)
+        if [[ $out == needroot ]]; then
+            tb_die 1 "--health needs root. Run it in a terminal so sudo can ask, or as root"
+        fi
+        while IFS=$'\t' read -r key val; do
+            case $key in
+                none) printf '  %-17s %s\n' smart "$val"; continue ;;
+                smart)
+                    if [[ $val == PASSED || $val == OK ]]; then
+                        val="${C_GRN}$val${C_OFF}"
+                    else
+                        val="${C_RED}$val${C_OFF}"
+                        bad=1
+                    fi ;;
+                power\ on)
+                    hours=${val% hours}
+                    hours=${hours//,/}
+                    [[ $hours =~ ^[0-9]+$ ]] && val="$(tb_commas "$hours") hours" ;;
+                lbas) key=written; val=$(tb_human $(( ${val//,/} * 512 )) " ") ;;
+            esac
+            printf '  %-17s %s\n' "$key" "$val"
+        done <<<"$out"
+    done
+    (( any )) || tb_info "disks: no drive here has SMART data"
+    return "$bad"
+}
+
+main() {
+    local rc=0 o m pct avail
+    tb_need lsblk findmnt df
+    set_tree_chars
+    read_devices
+    (( N )) || tb_die 1 "lsblk found no block devices"
+    if (( health )); then
+        show_health || rc=1
+        return "$rc"
+    fi
+    (( ${#TB_PASS[@]} == 0 )) || tb_usage_error "options after -- go to smartctl, so they need --health"
+    read_mounts
+    show_table
+    if (( warn_given )); then
+        for o in ${OVER[@]+"${OVER[@]}"}; do
+            IFS='|' read -r m pct avail <<<"$o"
+            echo "$m is $pct% full, $(short $(( avail * 1024 ))) free"
+            rc=1
+        done
+    elif (( ! TB_QUIET )); then
+        tb_info "health  run disks --health, it needs sudo"
+    fi
+    return "$rc"
+}
+
+all=0
+health=0
+warn_given=0
+limit=$LOW
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -a|--all)    all=1 ;;
+        -H|--health) health=1 ;;
+        --warn)      tb_optarg "$@"; limit=${2%\%}; shift
+                     [[ $limit =~ ^[0-9]+$ ]] && (( limit <= 100 )) || tb_usage_error "--warn needs a percent from 0 to 100, not $limit"
+                     warn_given=1 ;;
+        --)          shift; TB_PASS=("$@"); break ;;
+        -*)          tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)           tb_usage_error "disks takes no names, it shows every drive" ;;
+    esac
+    shift
+done
+(( ${#TB_PASS[@]} == 0 || health )) || tb_usage_error "options after -- go to smartctl, so they need --health"
+tb_color_stdout
+
+main
+exit $?

@@ -1,0 +1,286 @@
+.TH "DISKS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+disks \- drives, partitions, space and health together
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+disks [options] [-- smartctl options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBdisks\fR shows every drive in the machine as a tree. Each drive has its partitions under it, and each partition shows its size, its filesystem, where it is mounted, and how much space is used and free. One command replaces \fBlsblk\fR, \fBdf \-h\fR and \fBfindmnt\fR, and lines up their answers so you do not have to match device names by eye.
+.PP
+With \fB\-\-health\fR, it asks each drive about its own condition through SMART, the self\-test data every modern drive keeps. That shows wear on an SSD, power\-on hours, temperature, and the error counters that warn of a drive about to fail.
+.PP
+\fBdisks\fR only reads. It never mounts, unmounts, formats, partitions or writes to any device. The SMART query in \fB\-\-health\fR reads the drive's counters and starts no self\-test.
+.SS How it builds the table
+.PP
+\fBdisks\fR runs three read\-only commands and joins what they say.
+.IP \(bu 2
+\fBlsblk\fR lists every block device with its size, type, filesystem, model and parent. The parent link makes the tree.
+.IP \(bu 2
+\fBfindmnt\fR lists every mount, including the ones \fBlsblk\fR shows only once, such as a btrfs partition mounted at both \fB/\fR and \fB/home\fR.
+.IP \(bu 2
+\fBdf\fR gives used and free space for each mount.
+.PP
+A partition mounted in more than one place shows all its mount points, separated by commas, as in \fB/, /home\fR. Used and free space come from the first one, since every mount of one filesystem shares the same space.
+.PP
+A drive with no partitions and no filesystem shows its model name in the mount column, so you can tell two drives of the same size apart.
+.SS Sizes
+.PP
+Sizes use the same short units as \fBlsblk\fR, in powers of 1024. \fB600M\fR is 600 mebibytes, \fB239G\fR is 239 gibibytes. A drive sold as 256 GB shows as about 239G, because the maker counts in powers of 1000.
+.SS The low mark
+.PP
+A mount that is more than 85% full gets the word \fBlow\fR at the end of its row. \fB\-\-warn\fR changes that level. tmpfs mounts never get the mark, because they live in memory and fill and empty on their own.
+.PP
+At 85%, most filesystems still work well. Past about 95%, ext4 and xfs slow down, btrfs can refuse writes even with free space left, and package updates fail halfway. The mark gives you time to clean up first. \fBcleanup\fR and \fBbigfiles\fR help with that.
+.SS What it hides
+.PP
+By default \fBdisks\fR shows real drives and what is on them. It hides these, which \fB\-a\fR brings back.
+.TP
+loop devices
+Each snap package and each mounted disk image is a loop device. A desktop with snaps has dozens.
+.TP
+empty optical drives
+A DVD drive with no disc has nothing to show. With a disc in it, it shows.
+.TP
+RAM disks
+\fBram0\fR to \fBram15\fR exist on some kernels whether used or not.
+.TP
+tmpfs mounts
+\fB/run\fR, \fB/dev/shm\fR, \fB/tmp\fR on some distros. They live in memory, not on a drive.
+.TP
+network mounts
+NFS, SMB, sshfs and virtiofs shares. They take space on another machine.
+.PP
+zram swap stays visible, because it takes real memory and shows up in \fBfree\fR and \fBmem\fR.
+.SS Tree drawing
+.PP
+In a UTF\-8 terminal the tree uses line drawing characters, \fB├\fR and \fB└\fR. In a plain C or POSIX locale it uses \fB|\-\fR and `\fB \fR\- `` instead, so the output stays readable over a serial console or in an old terminal.
+.SS SMART health
+.PP
+\fB\-\-health\fR runs \fBsmartctl \-H \-i \-A\fR on each whole drive. The query needs root, because it talks to the drive directly. When you are not root, \fBdisks\fR runs smartctl through \fBsudo\fR, which asks for your password in a terminal. With no terminal, it uses \fBsudo \-n\fR, which fails at once instead of waiting for a password that cannot come.
+.PP
+For each drive it shows the lines that matter and skips the rest of smartctl's long report.
+.TP
+\fBsmart\fR
+The drive's own verdict. PASSED means the drive sees no reason to fail. FAILED means replace it now.
+.TP
+\fBwear\fR
+On an SSD, how much of its rated write life is used. 100% used does not mean dead, but it is past its rating.
+.TP
+\fBpower on\fR
+Hours the drive has been powered. 8,760 hours is one year of running all day.
+.TP
+\fBwritten\fR
+Data written over the drive's life. Compare it with the TBW rating on the maker's data sheet.
+.TP
+\fBtemperature\fR
+The drive's own temperature now. Most drives are happy under 60 C.
+.TP
+\fBmedia errors\fR
+NVMe errors the drive could not correct. Anything above 0 is worth a backup today.
+.TP
+\fBreallocated\fR
+Sectors a hard drive has swapped for spares. A number that grows means the surface is failing.
+.TP
+\fBpending\fR
+Sectors a hard drive could not read and wants to swap. Any number above 0 is a warning.
+.TP
+\fBunsafe shutdowns\fR
+Power losses without a clean shutdown. High counts on a laptop are normal.
+.PP
+Drives behind many USB adapters cannot answer SMART at all. \fBdisks\fR says \fBnot available over this USB bridge\fR for those. Some adapters answer when told the protocol, with \fBdisks \-\-health \-\- \-d sat\fR.
+.PP
+zram, loop and RAM devices are not real drives and have no SMART data, so \fB\-\-health\fR skips them.
+.SH OPTIONS
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Also show loop devices, empty optical drives, RAM disks, tmpfs and network mounts.
+.TP
+\fB\-H\fR, \fB\-\-health\fR
+Show SMART health for each drive instead of the space table. Needs root, through sudo when you are not root.
+.TP
+\fB\-\-warn PERCENT\fR
+Mark mounts fuller than PERCENT as low, list each one after the table, and exit 1 when there is one. PERCENT is 0 to 100, with or without a \fB%\fR sign.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Only the table, without the health hint. With \fB\-\-warn\fR, only the lines for full mounts, and nothing when all is well.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show every step, and each command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+\fBdisks\fR takes no device names. It always shows every drive, because a problem is often on the drive you did not think to look at. Use \fBlsblk /dev/sda\fR for one device.
+.SH PASS\-THROUGH
+.PP
+With \fB\-\-health\fR, options after \fB\-\-\fR go to smartctl, before the device name. The common ones are these.
+.TP
+\fB\-d sat\fR
+A USB adapter that passes ATA commands through, as most recent ones do.
+.TP
+\fB\-d sntrealtek\fR, \fB\-d sntjmicron\fR, \fB\-d sntasmedia\fR
+An NVMe drive in a USB enclosure with that chip.
+.TP
+\fB\-d nvme\fR
+Force NVMe when smartctl guesses wrong.
+.TP
+\fB\-T permissive\fR
+Keep going when the drive reports a partial answer.
+.PP
+The same options go to every drive, so pass\-through is most useful with one drive attached. Without \fB\-\-health\fR, \fB\-\-\fR is a usage error.
+.SH PER\-DISTRO NOTES
+.IP \(bu 2
+\fBDebian and Ubuntu.\fR smartctl is in the \fBsmartmontools\fR package. Installing it also starts \fBsmartd\fR, which checks drives in the background and mails root about problems.
+.IP \(bu 2
+\fBFedora and RHEL.\fR The package is \fBsmartmontools\fR. Whether \fBsmartd\fR starts on its own depends on the release. Check with \fBsvc smartd\fR, and turn it on with \fBsudo systemctl enable \-\-now smartd\fR.
+.IP \(bu 2
+\fBArch.\fR The package is \fBsmartmontools\fR.
+.IP \(bu 2
+\fBopenSUSE.\fR The package is \fBsmartmontools\fR.
+.IP \(bu 2
+\fBAlpine.\fR lsblk and findmnt are in \fBlsblk\fR and \fBfindmnt\fR packages, not in busybox. smartctl is in \fBsmartmontools\fR.
+.IP \(bu 2
+\fBVirtual machines.\fR Virtual drives such as \fBvda\fR have no SMART data. \fB\-\-health\fR says so for each one. The host's drives are the ones to check.
+.IP \(bu 2
+\fBbtrfs.\fR One partition often holds several subvolumes mounted in different places. They share one pool of space, which \fBdisks\fR shows once, with every mount point on the row.
+.IP \(bu 2
+\fBLVM and LUKS.\fR A partition that holds LVM or an encrypted volume shows as \fBlvm\fR or \fBluks\fR in the FS column, with the logical or opened volumes under it in the tree.
+.SH NEEDS
+.IP \(bu 2
+\fBlsblk\fR and \fBfindmnt\fR, from util\-linux. Every distro has them except minimal Alpine.
+.IP \(bu 2
+\fBdf\fR, from coreutils.
+.IP \(bu 2
+\fBsmartctl\fR, from smartmontools, for \fB\-\-health\fR only.
+.IP \(bu 2
+\fBsudo\fR, for \fB\-\-health\fR when you are not root.
+.SH EXAMPLES
+.SS A laptop with a USB stick in it
+.PP
+.RS 4
+.nf
+$ disks
+DEVICE       SIZE  FS       MOUNTED ON    USED   FREE   USE
+nvme0n1      239G           SAMSUNG MZVLB256HAHQ-000L7
+├ nvme0n1p1  600M  vfat     /boot/efi      19M   581M    4%
+├ nvme0n1p2    1G  ext4     /boot         412M   478M   47%
+└ nvme0n1p3  237G  btrfs    /, /home      214G    23G   91% low
+sda           58G           SanDisk Ultra
+└ sda1        58G  exfat    /run/media/khadir/USB
+                                           31G    27G   54%
+zram0        7.6G  swap     [SWAP]
+health  run disks --health, it needs sudo
+.fi
+.RE
+.PP
+The root filesystem is 91% full, past the low mark. A mount point too long for its column moves the numbers to the next line.
+.SS A virtual machine
+.PP
+.RS 4
+.nf
+$ disks
+DEVICE       SIZE  FS       MOUNTED ON    USED   FREE   USE
+vda           50G
+└ vda1        50G  ext4     /              44G   2.5G   95% low
+health  run disks --health, it needs sudo
+.fi
+.RE
+.SS Everything, with shares and memory filesystems
+.PP
+.RS 4
+.nf
+$ disks -a
+DEVICE       SIZE  FS       MOUNTED ON    USED   FREE   USE
+sr0            1G           QEMU DVD-ROM
+vda           50G
+└ vda1        50G  ext4     /              44G   2.5G   95% low
+tmpfs        795M  tmpfs    /run          1.2M   794M    1%
+tmpfs        3.9G  tmpfs    /dev/shm      120M   3.8G    4%
+tmpfs          5M  tmpfs    /run/lock       8K     5M    1%
+tmpfs        3.9G  tmpfs    /tmp          3.2G   703M   83%
+host_share   229G  virtiofs /mnt/host     210G    19G   92% low
+.fi
+.RE
+.PP
+The shared folder from the host is 92% full too. That space belongs to the host's drive.
+.SS Drive health
+.PP
+.RS 4
+.nf
+$ disks --health
+[sudo] password for khadir:
+nvme0n1   SAMSUNG MZVLB256HAHQ-000L7
+  smart             PASSED
+  wear              11% used
+  power on          9,412 hours
+  written           48.2 TB
+  temperature       38 C
+  media errors      0
+  unsafe shutdowns  71
+sda       SanDisk Ultra
+  smart             not available over this USB bridge
+.fi
+.RE
+.PP
+This SSD has used 11% of its rated life in a little over a year of running time, and has no media errors.
+.SS A check for a cron job or a script
+.PP
+.RS 4
+.nf
+$ disks -q --warn 90
+/ is 95% full, 2.5G free
+$ echo $?
+1
+.fi
+.RE
+.PP
+With \fB\-q\fR and \fB\-\-warn\fR, \fBdisks\fR prints only the full mounts, and nothing at all when every mount is under the level. The exit status tells the script which case it is.
+.SS A USB drive that needs a protocol hint
+.PP
+.RS 4
+.nf
+$ disks --health -- -d sat
+nvme0n1   SAMSUNG MZVLB256HAHQ-000L7
+  smart             not available on this drive
+sda       SanDisk Ultra
+  smart             PASSED
+  power on          112 hours
+  temperature       30 C
+.fi
+.RE
+.PP
+\fB\-d sat\fR made the USB adapter pass SMART through, but it also went to the NVMe drive, which does not speak that protocol. Run the command once with the stick attached and once without.
+.SH TROUBLESHOOTING
+.PP
+\fB`disks: \-\-health needs root. Run it in a terminal so sudo can ask, or as root`\fR There was no terminal for sudo to ask for a password, such as in a cron job. Run \fBsudo disks \-\-health\fR instead, or add a sudo rule for \fBsmartctl\fR only.
+.PP
+\fB`disks: needs smartctl.`\fR Install smartmontools. The message shows the install command for your distro.
+.PP
+\fB`smart  not available on this drive`\fR The drive is virtual, or SMART is off in its firmware. Try \fBsudo smartctl \-s on /dev/sdX\fR to turn it on for a real drive.
+.PP
+\fBThe numbers do not match `df \-h`.\fR \fBdf \-h\fR rounds differently and counts some reserved blocks. ext4 keeps 5% of the space for root, so a full ext4 shows 95% in some tools and 100% in others. \fBdisks\fR uses \fBdf\fR's own percentage.
+.PP
+\fBA mounted drive is missing.\fR It is a loop device, a network share or a tmpfs. Run \fBdisks \-a\fR.
+.PP
+\fB`low` on a mount you cannot clean.\fR A drive meant to be full, such as a backup disk, can go over the mark on purpose. Use \fB\-\-warn 98\fR in scripts that watch it.
+.SH EXIT STATUS
+.TP
+0
+It worked, no mount is over \fB\-\-warn\fR, and every drive with SMART data passed.
+.TP
+1
+A mount is fuller than \fB\-\-warn\fR, a drive failed its SMART check, or \fB\-\-health\fR could not get root.
+.TP
+2
+Bad usage, such as a device name, \fB\-\-warn\fR without a number, or \fB\-\-\fR without \fB\-\-health\fR.
+.TP
+3
+lsblk, findmnt or df is missing, or smartctl for \fB\-\-health\fR.
+.SH SEE ALSO
+.PP
+\fBmem\fR, \fBbigfiles\fR, \fBcleanup\fR, \fBtemps\fR, \fBlsblk(8)\fR, \fBfindmnt(8)\fR, \fBdf(1)\fR, \fBsmartctl(8)\fR
