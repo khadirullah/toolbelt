@@ -1,0 +1,199 @@
+.TH "TOGIF" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+togif \- turn a video clip into a small GIF
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+togif [options] video [-- ffmpeg options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBtogif\fR cuts a part of a video and writes it as a GIF beside the video. It suits a bug report, a README or a chat message, where a video would not play inline.
+.PP
+.RS 4
+.nf
+demo.mp4 0:12 to 0:16 -> demo.gif (1.7MB, 48 frames, 480px, 2.1s)
+.fi
+.RE
+.PP
+A GIF holds at most 256 colours per frame. Made the plain way, with \fBffmpeg \-i demo.mp4 demo.gif\fR, it uses one fixed palette for everything, and the picture comes out grainy and banded. \fBtogif\fR runs ffmpeg twice instead:
+.IP \(bu 2
+The first run looks at every frame of the part you picked and builds the best 256 colours for it, with ffmpeg's \fBpalettegen\fR filter.
+.IP \(bu 2
+The second run draws each frame with that palette, with \fBpaletteuse\fR.
+.PP
+It also scales the picture down to 480 pixels wide and drops the frame rate to 12 a second. A GIF has no real compression between frames, so its size grows with the width squared, the frame rate and the length. Those two defaults keep a few seconds of screen recording near 1 or 2 MB.
+.PP
+The video itself is never changed. The GIF goes beside it as \fBname.gif\fR, or \fBname\-1.gif\fR when that name is taken.
+.SH OPTIONS
+.TP
+\fB\-s\fR, \fB\-\-start TIME\fR
+Where to start. The default is the beginning.
+.TP
+\fB\-d\fR, \fB\-\-duration SECS\fR
+How long the GIF runs, in seconds, such as \fB4\fR or \fB2.5\fR.
+.TP
+\fB\-t\fR, \fB\-\-to TIME\fR
+Where to stop, instead of \fB\-d\fR.
+.TP
+\fB\-w\fR, \fB\-\-width PX\fR
+Width in pixels, 480 by default. A narrower video keeps its own width. The height follows.
+.TP
+\fB\-f\fR, \fB\-\-fps N\fR
+Frames a second, from 1 to 50. The default is 12.
+.TP
+\fB\-\-loop\fR
+Play again and again. By default the GIF plays once and stops on the last frame.
+.TP
+\fB\-o\fR, \fB\-\-out NAME\fR
+Name the GIF yourself.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Allow a GIF longer than 60 seconds.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show both ffmpeg commands before they run.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+With no \fB\-d\fR and no \fB\-t\fR, the GIF runs to the end of the video. A length past the end stops at the end.
+.SH TIMES
+.TP
+\fB12\fR
+12 seconds in
+.TP
+\fB12.5\fR
+12 and a half seconds in
+.TP
+\fB0:12\fR
+12 seconds in, as a player shows it
+.TP
+\fB1:05\fR
+1 minute 5 seconds in
+.TP
+\fB1:02:03\fR
+1 hour, 2 minutes and 3 seconds in
+.PP
+Copy the times from the player, the way you watched the clip. \fBtogif \-s 1:05 \-t 1:09\fR gives the 4 seconds between them.
+.SH SAFETY CHECKS
+.IP \(bu 2
+A GIF over 60 seconds is refused with exit 4 unless you add \fB\-y\fR. A minute of GIF at the default settings runs to tens of MB, which is rarely what anyone wants. Pick the part you need with \fB\-s\fR and \fB\-d\fR.
+.IP \(bu 2
+\fBtogif\fR never overwrites. Without \fB\-o\fR it picks a free name. With \fB\-o\fR and a name that is taken, it stops with exit 4.
+.IP \(bu 2
+ffmpeg writes into a hidden temp folder beside the GIF. The GIF appears under its name only when both runs worked, so a failed run leaves nothing behind.
+.SH SIZE
+.PP
+A GIF has no real compression between frames, so the width counts twice. Half the width gives about a quarter of the size. The frame rate and the length count once each. Film and camera footage comes out larger than a screen recording of the same length, since every pixel changes in every frame.
+.PP
+To make a GIF smaller, lower \fB\-w\fR first, then \fB\-f\fR, then cut the part shorter.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to both ffmpeg runs, as output options. For example:
+.PP
+.RS 4
+.nf
+$ togif -d 4 demo.mp4 -- -threads 2
+.fi
+.RE
+.PP
+\fB\-threads 2\fR keeps ffmpeg from taking every core. Do not pass \fB\-vf\fR or \fB\-filter_complex\fR. \fBtogif\fR builds its own filter, and ffmpeg refuses two.
+.SH NEEDS
+.PP
+\fBffmpeg\fR, and \fBffprobe\fR from the same package. The package is \fBffmpeg\fR on Debian, Ubuntu, Arch and Alpine, \fBffmpeg\-free\fR on Fedora and \fBffmpeg\-7\fR on openSUSE.
+.SH EXAMPLES
+.SS Four seconds from the middle
+.PP
+.RS 4
+.nf
+$ togif -s 0:12 -d 4 demo.mp4
+demo.mp4 0:12 to 0:16 -> demo.gif (1.7MB, 48 frames, 480px, 2.1s)
+.fi
+.RE
+.SS From one time to another, looping
+.PP
+.RS 4
+.nf
+$ togif -s 5 -t 9.5 -w 320 -f 10 --loop demo.mp4
+demo.mp4 0:05 to 0:09.5 -> demo-1.gif (410KB, 45 frames, 320px, 1.4s)
+.fi
+.RE
+.SS The ffmpeg commands
+.PP
+.RS 4
+.nf
+$ togif -v -s 0:12 -d 4 demo.mp4
++ ffmpeg -nostdin -hide_banner -loglevel error -y -ss 0:12 -t 4 -i demo.mp4 -vf 'fps=12,scale='\e''min(480,iw)'\e'':-1:flags=lanczos,palettegen' ./.togif-0dSakf/palette.png
++ ffmpeg -nostdin -hide_banner -loglevel error -y -ss 0:12 -t 4 -i demo.mp4 -i ./.togif-0dSakf/palette.png -lavfi 'fps=12,scale='\e''min(480,iw)'\e'':-1:flags=lanczos[x];[x][1:v]paletteuse' -loop -1 ./.togif-0dSakf/out.gif
+demo.mp4 0:12 to 0:16 -> demo.gif (1.7MB, 48 frames, 480px, 2.1s)
+.fi
+.RE
+.SS A whole short clip
+.PP
+.RS 4
+.nf
+$ togif bug.webm
+bug.webm 0:00 to 0:07.2 -> bug.gif (2.4MB, 86 frames, 480px, 3.0s)
+.fi
+.RE
+.SS A long video without a part picked
+.PP
+.RS 4
+.nf
+$ togif talk.mp4
+togif: talk.mp4 from 0:00 is 9:42 long, over the 60s limit
+togif: refused. Pick a part with -s and -d, or add -y
+.fi
+.RE
+.SS A start past the end
+.PP
+.RS 4
+.nf
+$ togif -s 1:05 -d 3 demo.mp4
+togif: demo.mp4 is 0:30.5 long, so a start at 1:05 is past the end
+.fi
+.RE
+.SS A name of your own
+.PP
+.RS 4
+.nf
+$ togif -s 0:12 -d 4 -o docs/img/login-bug.gif demo.mp4
+demo.mp4 0:12 to 0:16 -> docs/img/login-bug.gif (1.7MB, 48 frames, 480px, 2.2s)
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+The GIF is too big : Lower the width first, since it counts twice. \fB\-w 320\fR is about half the size of 480. Then lower the frame rate, and cut the part shorter.
+.PP
+The GIF looks choppy : Raise \fB\-f\fR to 15 or 20. Screen recordings with a moving mouse show it most.
+.PP
+The colours band or flicker : A GIF has 256 colours per frame, and gradients and video footage need more. Shorter parts help, since the palette covers fewer scenes.
+.PP
+\fBtogif: ffmpeg could not read X. Run it with \-v to see the command\fR : Run the first command from \fB\-v\fR by hand without \fB\-loglevel error\fR to see ffmpeg's message.
+.PP
+\fBtogif: ffmpeg wrote an empty GIF, check the start and the length\fR : The part holds no video frames, often a start inside the last fraction of a second.
+.SH EXIT STATUS
+.TP
+0
+The GIF was written.
+.TP
+1
+It failed. The file is missing, the start is past the end, or ffmpeg failed.
+.TP
+2
+Bad usage, such as \fB\-d\fR and \fB\-t\fR together, or a time it cannot read.
+.TP
+3
+ffmpeg or ffprobe is missing.
+.TP
+4
+Refused. Over 60 seconds without \fB\-y\fR, or the \fB\-o\fR name is taken.
+.SH SEE ALSO
+.PP
+\fBshrink\fR, \fBffmpeg(1)\fR, \fBffprobe(1)\fR

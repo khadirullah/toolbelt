@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# togif: turn a video clip into a small GIF.
+set -uo pipefail
+TB_CMD=togif
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: togif [options] video [-- ffmpeg options]
+
+Turn a video clip into a small GIF.
+
+Options:
+  -s, --start TIME    where to start, such as 12 or 0:12
+  -d, --duration SECS how long the GIF runs
+  -t, --to TIME       where to stop, instead of -d
+  -w, --width PX      width in pixels, 480 by default
+  -f, --fps N         frames a second, 12 by default
+  --loop              play again and again, instead of once
+  -o, --out NAME      name the GIF yourself
+  -y, --yes           allow a clip over 60 seconds
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to both ffmpeg runs, as output options.
+
+Examples:
+  togif -s 0:12 -d 4 demo.mp4
+  togif -s 1:05 -t 1:09 --loop screen.webm
+  togif -w 320 -f 10 bug.mp4
+  togif -y -w 240 talk.mp4
+
+Needs: ffmpeg, and ffprobe from the same package. See man togif.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused.
+EOF
+}
+
+# 12, 12.5, 0:12, 1:02:03 as seconds. Returns 1 when it is not a time.
+parse_time() {
+    [[ $1 =~ ^([0-9]+:){0,2}[0-9]+(\.[0-9]+)?$ ]] || return 1
+    awk -v t="$1" 'BEGIN { n = split(t, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; print s + 0 }'
+}
+
+# Seconds as 0:12, 1:02:03 or 0:12.5.
+clock() {
+    awk -v s="$1" 'BEGIN {
+        w = int(s); f = s - w; h = int(w / 3600); m = int(w % 3600 / 60); x = w % 60
+        frac = (f > 0.05) ? sprintf(".%d", int(f * 10 + 0.5) % 10) : ""
+        if (h) printf "%d:%02d:%02d%s\n", h, m, x, frac; else printf "%d:%02d%s\n", m, x, frac }'
+}
+
+# True when a > b, for decimal seconds.
+gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+
+main() {
+    local in out len total="" src_w shown_w filter pal gif start_ms frames loop_val=-1 in_arg
+    (( ${#files[@]} == 1 )) || tb_usage_error "name one video"
+    in=${files[0]}
+    [[ -f $in ]] || tb_die 1 "$in: no such file"
+    in_arg=$in
+    [[ $in == -* ]] && in_arg=./$in
+    [[ -n $dur && -n $end ]] && tb_usage_error "use -d or -t, not both"
+    tb_need ffmpeg
+    if [[ -n $end ]]; then
+        gt "$end" "$start" || tb_usage_error "-t $end_arg is not after the start, $start_arg"
+        len=$(awk -v a="$end" -v b="$start" 'BEGIN { print a - b }')
+    elif [[ -n $dur ]]; then
+        len=$dur
+    fi
+    src_w=""
+    if tb_has ffprobe; then
+        total=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$in_arg" 2>/dev/null)
+        src_w=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$in_arg" 2>/dev/null)
+        [[ $total =~ ^[0-9]+(\.[0-9]+)?$ ]] || total=""
+        [[ $src_w =~ ^[0-9]+$ ]] || src_w=""
+    fi
+    if [[ -n $total ]] && ! gt "$total" "$start"; then
+        tb_die 1 "$in is $(clock "$total") long, so a start at $start_arg is past the end"
+    fi
+    if [[ -z ${len:-} ]]; then
+        [[ -n $total ]] || tb_need ffprobe
+        [[ -n $total ]] || tb_die 1 "ffprobe could not read the length of $in, give it with -d"
+        len=$(awk -v a="$total" -v b="$start" 'BEGIN { print a - b }')
+    elif [[ -n $total ]] && gt "$(awk -v a="$start" -v b="$len" 'BEGIN { print a + b }')" "$total"; then
+        len=$(awk -v a="$total" -v b="$start" 'BEGIN { print a - b }')
+    fi
+    if gt "$len" 60 && (( ! TB_YES )); then
+        tb_err "$in from $(clock "$start") is $(clock "$len") long, over the 60s limit"
+        tb_die "$E_SAFE" "refused. Pick a part with -s and -d, or add -y"
+    fi
+
+    if [[ -n $out_name ]]; then
+        out=$out_name
+        [[ -e $out || -L $out ]] && tb_die "$E_SAFE" "$out exists. Pick another name for -o"
+    else
+        out=$(tb_free_name "${in%.*}.gif" file)
+    fi
+    tb_tmpdir work "$(dirname -- "$out")" 2>/dev/null || tb_tmpdir work || tb_die 1 "could not make a temp folder"
+
+    shown_w=$width
+    [[ -n $src_w ]] && (( src_w < width )) && shown_w=$src_w
+    filter="fps=$fps,scale='min($width,iw)':-1:flags=lanczos"
+    (( loop )) && loop_val=0
+    local cut=()
+    [[ $start != 0 ]] && cut+=(-ss "$start_arg")
+    cut+=(-t "$len")
+    pal=(ffmpeg -nostdin -hide_banner -loglevel error -y "${cut[@]}" -i "$in_arg"
+        -vf "$filter,palettegen" ${TB_PASS[@]+"${TB_PASS[@]}"} "$work/palette.png")
+    gif=(ffmpeg -nostdin -hide_banner -loglevel error -y "${cut[@]}" -i "$in_arg" -i "$work/palette.png"
+        -lavfi "$filter[x];[x][1:v]paletteuse" -loop "$loop_val" ${TB_PASS[@]+"${TB_PASS[@]}"} "$work/out.gif")
+    start_ms=$(tb_now_ms)
+    tb_line "togif: building the palette"
+    tb_show "${pal[@]}"
+    if ! "${pal[@]}"; then
+        tb_line_end
+        tb_die 1 "ffmpeg could not read $in. Run it with -v to see the command"
+    fi
+    tb_line "togif: writing the GIF"
+    tb_show "${gif[@]}"
+    if ! "${gif[@]}"; then
+        tb_line_end
+        tb_die 1 "ffmpeg could not write the GIF. Run it with -v to see the command"
+    fi
+    tb_line_end
+    [[ -s $work/out.gif ]] || tb_die 1 "ffmpeg wrote an empty GIF, check the start and the length"
+    [[ -e $out ]] && tb_die "$E_SAFE" "$out appeared while togif ran. Pick another name with -o"
+    mv -- "$work/out.gif" "$out" || tb_die 1 "could not write $out"
+    frames=$(awk -v l="$len" -v f="$fps" 'BEGIN { printf "%d", l * f + 0.5 }')
+    echo "$in $(clock "$start") to $(clock "$(awk -v a="$start" -v b="$len" 'BEGIN { print a + b }')") -> $out" \
+        "($(tb_human "$(tb_bytes "$out")"), $frames frames, ${shown_w}px, $(tb_elapsed $(( $(tb_now_ms) - start_ms ))))"
+}
+
+files=()
+start=0
+start_arg=0
+dur=""
+end=""
+end_arg=""
+width=480
+fps=12
+loop=0
+out_name=""
+tb_expand "sdtwfo" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -s|--start)    tb_optarg "$@"; start_arg=$2; shift
+                       start=$(parse_time "$start_arg") || tb_usage_error "$start_arg is not a time. Use 12, 0:12 or 1:02:03"
+                       ;;
+        -d|--duration) tb_optarg "$@"; shift
+                       dur=$(parse_time "$1") || tb_usage_error "$1 is not a length. Use seconds, such as 4 or 2.5"
+                       gt "$dur" 0 || tb_usage_error "-d needs a length above 0"
+                       ;;
+        -t|--to)       tb_optarg "$@"; end_arg=$2; shift
+                       end=$(parse_time "$end_arg") || tb_usage_error "$end_arg is not a time. Use 16, 0:16 or 1:02:03"
+                       ;;
+        -w|--width)    tb_optarg "$@"; width=$2; shift
+                       [[ $width =~ ^[0-9]+$ ]] && (( width >= 16 )) || tb_usage_error "--width needs a number of pixels, 16 or more"
+                       ;;
+        -f|--fps)      tb_optarg "$@"; fps=$2; shift
+                       [[ $fps =~ ^[0-9]+$ ]] && (( fps >= 1 && fps <= 50 )) || tb_usage_error "--fps needs a number from 1 to 50"
+                       ;;
+        --loop)        loop=1 ;;
+        -o|--out)      tb_optarg "$@"; out_name=$2; shift ;;
+        --)            shift; TB_PASS=("$@"); break ;;
+        -*)            tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)             files+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?
