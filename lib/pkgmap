@@ -16,7 +16,7 @@ curl           curl                 curl                 curl                 cu
 dig            bind9-dnsutils       bind-utils           bind                 bind-utils           bind-tools
 docker         docker.io            moby-engine          docker               docker               docker
 dpkg-deb       dpkg                 dpkg                 dpkg                 dpkg                 dpkg
-ffmpeg         ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7             ffmpeg
+ffmpeg         ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7|ffmpeg-4    ffmpeg
 file           file                 file                 file                 file                 file
 flatpak        flatpak              flatpak              flatpak              flatpak              flatpak
 fzf            fzf                  fzf                  fzf                  fzf                  fzf
@@ -57,9 +57,9 @@ xclip          xclip                xclip                xclip                xc
 xz             xz-utils             xz                   xz                   xz                   xz
 zip            zip                  zip                  zip                  zip                  zip
 zstd           zstd                 zstd                 zstd                 zstd                 zstd
-yamllint       yamllint             yamllint             yamllint             yamllint             yamllint
+yamllint       yamllint             yamllint             yamllint             yamllint|python3-yamllint yamllint
 b2sum          coreutils            coreutils            coreutils            coreutils            coreutils
-b3sum          b3sum                b3sum                b3sum                b3sum                b3sum
+b3sum          b3sum                b3sum                b3sum                -                    b3sum
 chmod          coreutils            coreutils            coreutils            coreutils            coreutils
 cmp            diffutils            diffutils            diffutils            diffutils            diffutils
 cp             coreutils            coreutils            coreutils            coreutils            coreutils
@@ -72,7 +72,7 @@ jdupes         jdupes               jdupes               jdupes               jd
 md5sum         coreutils            coreutils            coreutils            coreutils            coreutils
 mv             coreutils            coreutils            coreutils            coreutils            coreutils
 ncdu           ncdu                 ncdu                 ncdu                 ncdu                 ncdu
-rdfind         rdfind               rdfind               rdfind               rdfind               rdfind
+rdfind         rdfind               rdfind               rdfind               -                    rdfind
 sed            sed                  sed                  sed                  sed                  sed
 sha1sum        coreutils            coreutils            coreutils            coreutils            coreutils
 sha256sum      coreutils            coreutils            coreutils            coreutils            coreutils
@@ -95,7 +95,7 @@ lsar           unar                 unar                 unarchiver           un
 uncompress     ncompress            ncompress            ncompress            ncompress            -
 unmkinitramfs  initramfs-tools-bin|initramfs-tools-core -                    -                    -                    -
 unrar          unrar                -                    unrar                unrar                unrar
-ffprobe        ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7             ffmpeg
+ffprobe        ffmpeg               ffmpeg-free          ffmpeg               ffmpeg-7|ffmpeg-4    ffmpeg
 shred          coreutils            coreutils            coreutils            coreutils            coreutils
 df             coreutils            coreutils            coreutils            coreutils            coreutils
 base64         coreutils            coreutils            coreutils            coreutils            coreutils
@@ -155,12 +155,12 @@ cksum          coreutils            coreutils            coreutils            co
 stty           coreutils            coreutils            coreutils            coreutils            coreutils
 drill          ldnsutils            ldns-utils           ldns                 ldns                 drill
 terraform      -                    -                    terraform            -                    -
-tofu           -                    opentofu             opentofu             opentofu             opentofu
+tofu           -                    opentofu             opentofu             -                    opentofu
 tflint         -                    -                    tflint               -                    -
 trivy          -                    trivy                trivy                trivy                -
-kubeconform    -                    -                    kubeconform          kubeconform          -
+kubeconform    -                    -                    kubeconform          -                    -
 skopeo         skopeo               skopeo               skopeo               skopeo               skopeo
-dive           -                    -                    dive                 dive                 -
+dive           -                    -                    dive                 -                    -
 kubectl        -                    -                    kubectl              kubernetes-client    kubectl
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
