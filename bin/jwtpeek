@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# jwtpeek: decode a JWT and show when it expires.
+set -uo pipefail
+TB_CMD=jwtpeek
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: jwtpeek [--json] [TOKEN]
+       command | jwtpeek [--json]
+
+Decode a JWT and show when it expires.
+
+Options:
+  --json              print the header and claims as raw JSON, for jq
+  -q, --quiet         only the expiry line
+  -v, --verbose       the size of each part as it decodes
+  -h, --help          this help
+
+It never checks the signature and never sends the token anywhere.
+A "Bearer " or "Authorization: Bearer " prefix is stripped.
+
+Examples:
+  clip -o | jwtpeek
+  jwtpeek -q "$TOKEN"
+  jwtpeek --json "$TOKEN" | jq .claims.sub
+
+Needs: base64, and jq or python3 for the table. See man jwtpeek.
+Exit: 0 ok, 1 expired or not valid yet, 2 not a JWT or bad usage,
+      3 missing tool.
+EOF
+}
+
+# Claims that hold a time in seconds since the epoch.
+TIME_CLAIMS=" exp iat nbf auth_time updated_at "
+
+# base64url text on stdin, decoded to stdout. Returns 1 when it is not base64url.
+b64url_decode() {
+    local s=$1 pad
+    [[ $s =~ ^[A-Za-z0-9_-]*=*$ ]] || return 1
+    s=${s%%=*}
+    s=${s//-/+}
+    s=${s//_//}
+    pad=$(( (4 - ${#s} % 4) % 4 ))
+    (( pad == 3 )) && return 1
+    case $pad in
+        1) s+="=" ;;
+        2) s+="==" ;;
+    esac
+    printf '%s' "$s" | base64 -d 2>/dev/null
+}
+
+# Top-level members of a JSON object as "key<TAB>value" lines. Strings are
+# shown as they are, arrays of strings joined with spaces, the rest as JSON.
+flatten() {
+    if [[ $parser == jq ]]; then
+        jq -r 'if type != "object" then error("not an object") else . end
+            | to_entries[]
+            | "\(.key)\t\(.value
+                | if type == "string" then .
+                  elif type == "array" and all(type == "string") then join(" ")
+                  else tojson end
+                | gsub("[\t\n]"; " "))"' 2>/dev/null
+    else
+        python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(d, dict):
+    sys.exit(1)
+for k, v in d.items():
+    if isinstance(v, str):
+        s = v
+    elif isinstance(v, list) and all(isinstance(x, str) for x in v):
+        s = " ".join(v)
+    elif isinstance(v, bool) or v is None:
+        s = json.dumps(v)
+    elif isinstance(v, (int, float)):
+        s = json.dumps(v)
+    else:
+        s = json.dumps(v, separators=(",", ":"))
+    print(k + "\t" + s.replace("\t", " ").replace("\n", " "))
+'
+    fi
+}
+
+# A time in seconds as "2026-09-29 13:42:10 IST".
+fmt_time() { date -d "@$1" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "$1"; }
+
+# "18m ago" or "in 42m".
+fmt_rel() {
+    local t=$1 now=$2
+    if (( t <= now )); then echo "$(tb_age $(( now - t ))) ago"; else echo "in $(tb_age $(( t - now )))"; fi
+}
+
+# Print one section of "key value" lines, keys padded to the longest.
+print_section() {
+    local title=$1 rows=$2 k v w=0 now=$3 whole
+    echo "$title"
+    while IFS=$'\t' read -r k v; do
+        (( ${#k} > w )) && w=${#k}
+    done <<<"$rows"
+    while IFS=$'\t' read -r k v; do
+        [[ -z $k ]] && continue
+        if [[ $TIME_CLAIMS == *" $k "* && $v =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            whole=${v%%.*}
+            if [[ $k == exp ]]; then
+                v=$(fmt_time "$whole")
+            else
+                v="$(fmt_time "$whole"), $(fmt_rel "$whole" "$now")"
+            fi
+        fi
+        printf '  %-*s  %s\n' "$w" "$k" "$v"
+    done <<<"$rows"
+}
+
+# Pull a numeric claim out of the flattened rows.
+claim_num() {
+    local want=$1 rows=$2 k v
+    while IFS=$'\t' read -r k v; do
+        if [[ $k == "$want" && $v =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "${v%%.*}"
+            return 0
+        fi
+    done <<<"$rows"
+    return 1
+}
+
+read_token() {
+    if [[ -n $token ]]; then
+        return 0
+    fi
+    if [[ -t 0 && ${TB_TEST_TTY:-} != 1 ]]; then
+        tb_usage_error "give a token, or pipe one in, such as: clip -o | jwtpeek"
+    fi
+    # A token is a few KB at most. Read the first 64 KB and ignore the rest.
+    token=$(head -c 65536)
+}
+
+clean_token() {
+    local t=$1
+    # Drop surrounding space, newlines and quotes, and an Authorization header.
+    t=${t//$'\r'/}
+    t=${t//$'\n'/}
+    t="${t#"${t%%[![:space:]]*}"}"
+    t="${t%"${t##*[![:space:]]}"}"
+    [[ $t == [Aa]uthorization:* ]] && t=${t#*:}
+    t="${t#"${t%%[![:space:]]*}"}"
+    [[ $t == [Bb]earer[[:space:]]* ]] && t=${t#* }
+    t="${t#"${t%%[![:space:]]*}"}"
+    t=${t#\"}
+    t=${t%\"}
+    echo "$t"
+}
+
+main() {
+    local t dots n head_b64 claims_b64 sig header claims hrows crows now exp nbf rc=0
+    tb_need base64
+    read_token
+    t=$(clean_token "$token")
+    [[ -n $t ]] || tb_die "$E_USAGE" "no token given"
+    dots=${t//[^.]/}
+    n=$(( ${#dots} + 1 ))
+    if (( n == 5 )); then
+        tb_die "$E_USAGE" "this is an encrypted token (JWE, 5 parts), its claims cannot be read without the key"
+    fi
+    (( n == 3 )) || tb_die "$E_USAGE" "not a JWT, expected 3 parts separated by dots, found $n"
+    head_b64=${t%%.*}
+    claims_b64=${t#*.}
+    claims_b64=${claims_b64%%.*}
+    sig=${t##*.}
+    header=$(b64url_decode "$head_b64") || tb_die "$E_USAGE" "not a JWT, the header is not base64url"
+    claims=$(b64url_decode "$claims_b64") || tb_die "$E_USAGE" "not a JWT, the claims are not base64url"
+    tb_say "header ${#header} bytes, claims ${#claims} bytes, signature ${#sig} characters"
+    [[ $header == *"{"* ]] || tb_die "$E_USAGE" "not a JWT, the header is not JSON"
+
+    if (( json )); then
+        # Check the JSON when a parser is there. Without one, print it as it is.
+        if tb_has jq; then parser=jq; elif tb_has python3; then parser=python3; fi
+        if [[ -n $parser ]]; then
+            flatten <<<"$header" >/dev/null || tb_die "$E_USAGE" "not a JWT, the header is not a JSON object"
+            flatten <<<"$claims" >/dev/null || tb_die "$E_USAGE" "not a JWT, the claims are not a JSON object"
+        fi
+        printf '{"header":%s,"claims":%s}\n' "$header" "$claims"
+        return 0
+    fi
+
+    tb_need_any parser jq python3
+    hrows=$(flatten <<<"$header") || tb_die "$E_USAGE" "not a JWT, the header is not a JSON object"
+    crows=$(flatten <<<"$claims") || tb_die "$E_USAGE" "not a JWT, the claims are not a JSON object"
+    now=$(date +%s)
+
+    if (( ! TB_QUIET )); then
+        print_section header "$hrows" "$now"
+        print_section claims "$crows" "$now"
+    fi
+
+    if nbf=$(claim_num nbf "$crows") && (( nbf > now )); then
+        echo "not valid until $(fmt_time "$nbf"), $(fmt_rel "$nbf" "$now")"
+        rc=1
+    fi
+    if exp=$(claim_num exp "$crows"); then
+        if (( exp <= now )); then
+            echo "expired $(fmt_rel "$exp" "$now"), at $(fmt_time "$exp")"
+            rc=1
+        elif (( ! TB_QUIET || rc == 0 )); then
+            echo "expires $(fmt_rel "$exp" "$now")"
+        fi
+    else
+        echo "no exp claim, it never expires"
+    fi
+    if [[ -z $sig ]]; then
+        tb_info "no signature, alg none. Never accept a token like this"
+    else
+        tb_info "signature not checked"
+    fi
+    return "$rc"
+}
+
+json=0
+token=""
+parser=""
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        --json) json=1 ;;
+        --)     shift; (( $# )) && { [[ -z $token ]] || tb_usage_error "one token at a time"; token=$1; shift; }
+                (( $# )) && tb_usage_error "one token at a time"
+                break ;;
+        -*)     tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)      [[ -z $token ]] || tb_usage_error "one token at a time"; token=$1 ;;
+    esac
+    shift
+done
+
+main
+exit $?

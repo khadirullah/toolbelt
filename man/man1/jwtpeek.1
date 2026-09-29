@@ -1,0 +1,195 @@
+.TH "JWTPEEK" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+jwtpeek \- decode a JWT and show when it expires
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+jwtpeek [--json] [TOKEN]
+command | jwtpeek [--json]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+A JSON Web Token, or JWT, is the long \fBeyJ...\fR string that an API gets in its \fBAuthorization: Bearer\fR header. It has three parts joined by dots. The first two are JSON written in base64url, the header and the claims. The third is the signature. \fBjwtpeek\fR decodes the first two and prints them as a table, with every time claim turned into a local date and how long ago or how long from now that is. The last line says whether the token has expired.
+.PP
+\fBjwtpeek\fR reads the token from its argument, or from standard input when there is no argument. It strips spaces, newlines, quotes, a \fBBearer \fR prefix and a whole \fBAuthorization: Bearer \fR header line, so you can paste what your browser's network tab or a \fBcurl \-v\fR log shows.
+.PP
+It never checks the signature. That needs the issuer's key, and a tool that decodes without it can only tell you what the token claims, not whether the claims are true. It also never sends the token anywhere. Decoding is local work with \fBbase64\fR, and the table comes from \fBjq\fR or \fBpython3\fR.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Print the header and claims as one JSON object, \fB{"header":{...},"claims":{...}}\fR, for \fBjq\fR.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the expiry line, such as \fBexpires in 42m\fR or \fBexpired 20h ago, at ...\fR.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Say how many bytes each part decoded to, before the table.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH HOW IT READS THE CLAIMS
+.PP
+Top\-level claims print one per line, in the order the token has them. Strings print as they are. A list of strings, such as \fBaud\fR or \fBgroups\fR, prints joined with spaces. Numbers, \fBtrue\fR, \fBfalse\fR and \fBnull\fR print as JSON. A nested object prints as compact JSON on one line, so \fBrealm_access\fR from Keycloak shows as \fB{"roles":["admin","dev"]}\fR. Use \fB\-\-json\fR with \fBjq\fR to dig into nested claims.
+.PP
+These claims hold a time in seconds since 1970 and print as a local date: \fBexp\fR, \fBiat\fR, \fBnbf\fR, \fBauth_time\fR and \fBupdated_at\fR. \fBiat\fR, \fBnbf\fR and the others also get how long ago or how long ahead that is. \fBexp\fR gets its own line at the end.
+.TP
+\fBexp\fR
+Meaning: Expires at. What \fBjwtpeek\fR does with it: The last line says \fBexpires in 42m\fR, or \fBexpired 20h ago\fR and exit 1.
+.TP
+\fBnbf\fR
+Meaning: Not valid before. What \fBjwtpeek\fR does with it: When it is in the future, prints \fBnot valid until ...\fR and exits 1.
+.TP
+\fBiat\fR
+Meaning: Issued at. What \fBjwtpeek\fR does with it: Shown with how long ago.
+.TP
+\fBiss\fR
+Meaning: Issuer. What \fBjwtpeek\fR does with it: Shown. The URL of the login server that made the token.
+.TP
+\fBsub\fR
+Meaning: Subject. What \fBjwtpeek\fR does with it: Shown. The user or service the token is for.
+.TP
+\fBaud\fR
+Meaning: Audience. What \fBjwtpeek\fR does with it: Shown. The API the token is meant for. A token for another API is refused there.
+.PP
+A token with no \fBexp\fR claim prints \fBno exp claim, it never expires\fR. That is legal, and worth knowing about.
+.SH SAFETY
+.IP \(bu 2
+Tokens are passwords while they are valid. Pass one on standard input, as in \fBclip \-o | jwtpeek\fR, rather than as an argument. An argument ends up in your shell history and in \fBps\fR output for other users on the machine.
+.IP \(bu 2
+\fBjwtpeek\fR reads at most 64 KB from standard input, so a wrong pipe cannot fill memory.
+.IP \(bu 2
+A token with an empty signature and \fBalg\fR set to \fBnone\fR gets the note \fBno signature, alg none. Never accept a token like this\fR. An API that accepts such a token lets anyone write their own claims.
+.IP \(bu 2
+An encrypted token, a JWE with 5 parts, cannot be read without the key. \fBjwtpeek\fR says so and exits 2.
+.SH PASS\-THROUGH
+.PP
+None. Decoding needs only \fBbase64\fR.
+.SH NEEDS
+.PP
+\fBbase64\fR from coreutils, installed everywhere. The table needs \fBjq\fR or \fBpython3\fR, and uses the first one it finds. \fB\-\-json\fR needs neither, and checks the JSON when one of them is there. Install \fBjq\fR with \fBsudo apt install jq\fR, \fBsudo dnf install jq\fR, \fBsudo pacman \-S jq\fR, \fBsudo zypper install jq\fR or \fBsudo apk add jq\fR.
+.SH EXAMPLES
+.SS What is in this token?
+.PP
+.RS 4
+.nf
+$ clip -o | jwtpeek
+header
+  alg  RS256
+  typ  JWT
+  kid  7f3c1a9e
+claims
+  iss    https://auth.example.com/
+  sub    user_8412
+  aud    api.example.com
+  scope  orders:read orders:write
+  iat    2026-09-29 20:15:32 IST, 18m ago
+  exp    2026-09-29 21:16:02 IST
+expires in 42m
+signature not checked
+.fi
+.RE
+.PP
+\fBkid\fR names the key the issuer signed with. The issuer publishes its keys at a URL such as \fBhttps://auth.example.com/.well\-known/jwks.json\fR.
+.SS Why does the API say 401?
+.PP
+.RS 4
+.nf
+$ echo "$TOKEN" | jwtpeek -q
+expired 20h ago, at 2026-09-29 00:33:32 IST
+$ echo $?
+1
+.fi
+.RE
+.SS Stop a script before it uses an old token
+.PP
+.RS 4
+.nf
+if ! printf '%s' "$TOKEN" | jwtpeek -q >/dev/null; then
+    TOKEN=$(get-new-token)
+fi
+.fi
+.RE
+.SS Nested claims and a token that is not valid yet
+.PP
+.RS 4
+.nf
+$ jwtpeek "$TOKEN"
+header
+  alg  ES256
+  typ  JWT
+claims
+  sub             42
+  realm_access    {"roles":["admin","dev"]}
+  groups          ops sre
+  email_verified  true
+  nbf             2026-09-29 20:44:02 IST, in 10m
+  exp             2026-09-29 21:34:02 IST
+not valid until 2026-09-29 20:44:02 IST, in 10m
+expires in 1h
+signature not checked
+.fi
+.RE
+.PP
+When \fBnbf\fR is a few seconds or minutes ahead, the clock of the machine that made the token and the clock of this machine disagree. Check both with \fBtimedatectl\fR.
+.SS Raw JSON for jq
+.PP
+.RS 4
+.nf
+$ jwtpeek --json "$TOKEN"
+{"header":{"alg":"HS256","typ":"JWT"},"claims":{"sub":"ci-bot","exp":1790622212}}
+$ jwtpeek --json "$TOKEN" | jq -r '.claims.realm_access.roles[]'
+admin
+dev
+.fi
+.RE
+.SS A token with no signature
+.PP
+.RS 4
+.nf
+$ jwtpeek "$TOKEN"
+header
+  alg  none
+claims
+  sub   admin
+  role  admin
+no exp claim, it never expires
+no signature, alg none. Never accept a token like this
+.fi
+.RE
+.SS Something that is not a JWT
+.PP
+.RS 4
+.nf
+$ jwtpeek hello.world
+jwtpeek: not a JWT, expected 3 parts separated by dots, found 2
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBjwtpeek: not a JWT, expected 3 parts separated by dots, found 1\fR : The text has no dots. You may have copied an opaque access token, which is a random string that only the issuer can look up, or a refresh token. Only JWTs can be decoded.
+.PP
+\fBjwtpeek: not a JWT, the header is not base64url\fR : The copy picked up extra characters, such as a trailing comma from a JSON file. Copy the token again, from \fBeyJ\fR to the last character before the closing quote.
+.PP
+\fBjwtpeek: this is an encrypted token (JWE, 5 parts), its claims cannot be read without the key\fR : The claims are encrypted for the API that reads them. Ask the issuer, or decode it where the key lives.
+.PP
+\fBjwtpeek: needs jq. Install it with: ...\fR : Neither \fBjq\fR nor \fBpython3\fR is installed. Install one, or use \fB\-\-json\fR, which needs neither.
+.PP
+Times look an hour or more off : \fBjwtpeek\fR prints local time from the \fBTZ\fR variable and \fB/etc/localtime\fR. Run \fBTZ=UTC jwtpeek\fR to compare with a log in UTC.
+.SH EXIT STATUS
+.TP
+0
+The token decoded and has not expired, or has no \fBexp\fR claim.
+.TP
+1
+The token has expired, or its \fBnbf\fR time is still ahead.
+.TP
+2
+Bad usage, no token, or the text is not a JWT that can be read.
+.TP
+3
+Neither \fBjq\fR nor \fBpython3\fR is installed, for the table.
+.SH SEE ALSO
+.PP
+\fBclip\fR, \fBepoch\fR, \fBjq(1)\fR, \fBbase64(1)\fR, RFC 7519
