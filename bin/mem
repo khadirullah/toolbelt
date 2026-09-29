@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# mem: who uses the memory, and who goes first when it runs out.
+set -uo pipefail
+TB_CMD=mem
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: mem [-n COUNT] [-o] [-w [SECONDS]]
+
+Who uses the memory, and who goes first when it runs out.
+
+Options:
+  -n, --top COUNT     show COUNT processes, 6 by default
+  -o, --oom           rank by OOM score, with the oom_score_adj column
+  -w, --watch [SEC]   redraw every SEC seconds, 2 by default, Ctrl+C stops
+  -q, --quiet         one line with used, available and swap
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Examples:
+  mem
+  mem --oom -n 3
+  mem -w 5
+  mem -q
+
+Needs: /proc. journalctl is optional, for the last OOM kill.
+See man mem.
+Exit: 0 ok, 1 failed, 2 bad usage.
+EOF
+}
+
+# Tests point this at a fake tree with proc/ and sys/ in it.
+ROOT=${TB_ROOTFS:-}
+
+# Kilobytes as a size.
+kb() { tb_human $(( ${1:-0} * 1024 )); }
+
+# MemTotal, MemAvailable, SwapTotal and SwapFree, in kilobytes.
+read_meminfo() {
+    local k v _
+    mem_total=0 mem_avail=0 swap_total=0 swap_free=0
+    tb_say "reading $ROOT/proc/meminfo"
+    [[ -r $ROOT/proc/meminfo ]] || tb_die 1 "cannot read $ROOT/proc/meminfo, is /proc mounted?"
+    while read -r k v _; do
+        case $k in
+            MemTotal:)     mem_total=$v ;;
+            MemAvailable:) mem_avail=$v ;;
+            SwapTotal:)    swap_total=$v ;;
+            SwapFree:)     swap_free=$v ;;
+        esac
+    done <"$ROOT/proc/meminfo"
+    mem_used=$(( mem_total - mem_avail ))
+    swap_used=$(( swap_total - swap_free ))
+}
+
+# "pressure 38% (10s)" from the kernel's pressure stall info, when it has it.
+pressure() {
+    local f=$ROOT/proc/pressure/memory kind avg _
+    [[ -r $f ]] || return 0
+    while read -r kind avg _; do
+        if [[ $kind == some ]]; then
+            avg=${avg#avg10=}
+            printf ', pressure %s%% (10s)' "${avg%%.*}"
+            return 0
+        fi
+    done <"$f"
+}
+
+# One line per zram device in use.
+zram_lines() {
+    local d name algo orig compr used _ ratio
+    for d in "$ROOT"/sys/block/zram*; do
+        [[ -r $d/mm_stat ]] || continue
+        name=${d##*/}
+        read -r orig compr used _ <"$d/mm_stat" || continue
+        (( orig > 0 )) || continue
+        algo=$(<"$d/comp_algorithm")
+        [[ $algo =~ \[([^]]+)\] ]] && algo=${BASH_REMATCH[1]}
+        ratio=$(awk -v o="$orig" -v u="$used" 'BEGIN { if (u > 0) printf "%.1f", o / u; else print "0" }')
+        printf 'zram    %s %s, %s of pages stored in %s of RAM, %sx\n' \
+            "$name" "$algo" "$(tb_human "$orig")" "$(tb_human "$used")" "$ratio"
+    done
+}
+
+# One line per swap area, from /proc/swaps.
+swap_lines() {
+    local f=$ROOT/proc/swaps file _type size used prio first=1 name label
+    local names=() rows=() width=0 i
+    if [[ -r $f ]]; then
+        while read -r file _type size used prio; do
+            [[ $file == Filename ]] && continue
+            name=$file
+            [[ $name == /dev/* ]] && name=${name#/dev/}
+            names+=("$name")
+            rows+=("$(kb "$used") of $(kb "$size")   priority $prio")
+            (( ${#name} > width )) && width=${#name}
+        done <"$f"
+    fi
+    if (( ${#names[@]} == 0 )); then
+        echo "swap    none"
+        return 0
+    fi
+    for i in "${!names[@]}"; do
+        if (( first )); then label="swap    "; first=0; else label="        "; fi
+        printf '%s%-*s  %s\n' "$label" "$width" "${names[i]}" "${rows[i]}"
+    done
+}
+
+# A line about systemd-oomd when it runs. It acts on pressure before the
+# kernel runs out, so it is the one that usually kills first.
+oomd_line() {
+    local limit=60% dur=30s f line
+    tb_has systemctl || return 0
+    systemctl is-active --quiet systemd-oomd 2>/dev/null || return 0
+    for f in "$ROOT"/etc/systemd/oomd.conf "$ROOT"/etc/systemd/oomd.conf.d/*.conf; do
+        [[ -r $f ]] || continue
+        while IFS= read -r line; do
+            case $line in
+                DefaultMemoryPressureLimit=*)       limit=${line#*=} ;;
+                DefaultMemoryPressureDurationSec=*) dur=${line#*=} ;;
+            esac
+        done <"$f"
+    done
+    echo "oomd    systemd-oomd on, kills in a watched slice at $limit pressure for $dur"
+}
+
+# "rss swap score adj pid name" for every process with memory, in kilobytes.
+# grep -s skips processes that end while we read.
+proc_rows() {
+    {
+        grep -s -H -E '^(Name|VmRSS|VmSwap):' "$ROOT"/proc/[0-9]*/status
+        grep -s -H . "$ROOT"/proc/[0-9]*/oom_score "$ROOT"/proc/[0-9]*/oom_score_adj
+    } | awk '
+        {
+            i = index($0, ":")
+            f = substr($0, 1, i - 1)
+            rest = substr($0, i + 1)
+            n = split(f, p, "/")
+            pid = p[n - 1]
+            file = p[n]
+            if (file == "status") {
+                j = index(rest, ":")
+                key = substr(rest, 1, j - 1)
+                val = substr(rest, j + 1)
+                sub(/^[ \t]+/, "", val)
+                if (key == "Name") name[pid] = val
+                else if (key == "VmRSS") rss[pid] = val + 0
+                else swp[pid] = val + 0
+            } else if (file == "oom_score") score[pid] = rest + 0
+            else if (file == "oom_score_adj") adj[pid] = rest + 0
+        }
+        END {
+            for (q in rss)
+                if (rss[q] > 0)
+                    printf "%d %d %d %d %d %s\n", rss[q], swp[q] + 0, score[q] + 0, adj[q] + 0, q, name[q]
+        }'
+}
+
+# The last kernel OOM kill and the last systemd-oomd kill of the past day.
+last_kills() {
+    local line t msg
+    tb_has journalctl || return 0
+    tb_show journalctl -k -q --no-pager --since=-24h -o short-unix
+    line=$(journalctl -k -q --no-pager --since=-24h -o short-unix 2>/dev/null |
+        grep -E 'Out of memory: Killed process|oom-kill:' | grep 'Killed process' | tail -n 1)
+    if [[ -n $line ]]; then
+        t=${line%%[. ]*}
+        msg=${line#*kernel: }
+        echo "last kill  $(when "$t"), from the kernel log"
+        echo "  ${msg%% total-vm*}"
+        if [[ $msg == *total-vm* ]]; then
+            awk '{
+                out = ""
+                for (i = 1; i <= NF; i++) if ($i ~ /^(total-vm|anon-rss|oom_score_adj):/) {
+                    v = $i; sub(/,$/, "", v); out = out (out == "" ? "" : ", ") v
+                }
+                print "  " out
+            }' <<<"$msg"
+        fi
+    fi
+    tb_has systemctl && systemctl is-active --quiet systemd-oomd 2>/dev/null || return 0
+    line=$(journalctl -u systemd-oomd -q --no-pager --since=-24h -o short-unix 2>/dev/null |
+        grep 'Killed ' | tail -n 1)
+    if [[ -n $line ]]; then
+        t=${line%%[. ]*}
+        msg=${line#*]: }
+        echo "oomd kill  $(when "$t"), from systemd-oomd"
+        echo "  ${msg%% due to *}"
+    fi
+}
+
+# An epoch time as "14:02 today" or "Sep 28 14:02".
+when() {
+    if [[ $(date -d "@$1" +%F 2>/dev/null) == "$(date +%F)" ]]; then
+        echo "$(date -d "@$1" +%H:%M) today"
+    else
+        date -d "@$1" '+%b %d %H:%M' 2>/dev/null || echo "at $1"
+    fi
+}
+
+show() {
+    local rows top first line rss swp score adj pid name
+    read_meminfo
+    if (( TB_QUIET )); then
+        echo "$(kb "$mem_used") of $(kb "$mem_total") used, $(kb "$mem_avail") available, swap $(kb "$swap_used") of $(kb "$swap_total")"
+        return 0
+    fi
+    echo "memory  $(kb "$mem_used") used of $(kb "$mem_total"), $(kb "$mem_avail") available$(pressure)"
+    zram_lines
+    swap_lines
+    oomd_line
+    echo
+
+    tb_say "reading $ROOT/proc/*/status and oom_score"
+    rows=$(proc_rows)
+    if [[ -z $rows ]]; then
+        echo "No processes to show."
+        return 0
+    fi
+    if (( by_oom )); then
+        top=$(sort -k3,3nr -k1,1nr <<<"$rows" | head -n "$count")
+        printf '%5s %4s %7s %7s %7s  %s\n' OOM ADJ RSS SWAP PID COMMAND
+        while read -r rss swp score adj pid name; do
+            printf '%5s %4s %7s %7s %7s  %s\n' "$score" "$adj" "$(kb "$rss")" "$(kb "$swp")" "$pid" "$name"
+        done <<<"$top"
+    else
+        top=$(sort -k1,1nr <<<"$rows" | head -n "$count")
+        printf '%7s %7s %5s %7s  %s\n' RSS SWAP OOM PID COMMAND
+        while read -r rss swp score adj pid name; do
+            printf '%7s %7s %5s %7s  %s\n' "$(kb "$rss")" "$(kb "$swp")" "$score" "$pid" "$name"
+        done <<<"$top"
+    fi
+
+    first=$(sort -k3,3nr -k1,1nr <<<"$rows" | head -n 1)
+    read -r rss swp score adj pid name <<<"$first"
+    echo
+    echo "oom first  $name, pid $pid, score $score, frees about $(kb $(( rss + swp )))"
+    line=$(last_kills)
+    [[ -n $line ]] && echo "$line"
+    return 0
+}
+
+main() {
+    if (( ! watch )); then
+        show
+        return
+    fi
+    tb_info "mem: every ${interval}s, Ctrl+C stops"
+    while true; do
+        [[ -t 1 ]] && printf '\e[H\e[2J'
+        show
+        sleep "$interval" || return 1
+        [[ -t 1 ]] || echo
+    done
+}
+
+count=6
+by_oom=0
+watch=0
+interval=2
+tb_expand "nw" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--top)   tb_optarg "$@"; count=$2; shift
+                    [[ $count =~ ^[0-9]+$ ]] && (( count >= 1 )) || tb_usage_error "-n needs a number of 1 or more"
+                    ;;
+        -o|--oom)   by_oom=1 ;;
+        -w|--watch) watch=1
+                    # The number of seconds is optional.
+                    if [[ ${2:-} =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                        interval=$2
+                        shift
+                    fi
+                    [[ $interval =~ ^0*(\.0*)?$ ]] && tb_usage_error "-w needs a number of seconds above 0"
+                    ;;
+        --)         shift; (( $# )) && tb_usage_error "mem passes nothing to another tool, drop the options after --"; break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          tb_usage_error "mem takes no arguments, not $1" ;;
+    esac
+    shift
+done
+
+main
+exit $?
