@@ -141,5 +141,8 @@ apk            -                    -                    -                    - 
 tail           coreutils            coreutils            coreutils            coreutils            coreutils
 basename       coreutils            coreutils            coreutils            coreutils            coreutils
 sleep          coreutils            coreutils            coreutils            coreutils            coreutils
+nmcli          network-manager      NetworkManager       networkmanager       NetworkManager       networkmanager-cli
+iw             iw                   iw                   iw                   iw                   iw
+resolvectl     systemd-resolved     systemd-resolved     systemd              systemd-resolved|systemd-network -
 fold           coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils

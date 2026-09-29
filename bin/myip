@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# myip: local and public IP addresses, gateway and DNS.
+set -uo pipefail
+TB_CMD=myip
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: myip [options] [-- curl options]
+
+Local and public IP addresses, gateway and DNS.
+
+Options:
+  -4                  only IPv4
+  -6                  only IPv6
+  --local             skip the public IP, so nothing leaves the machine
+  --public            only the public IP
+  -q, --quiet         only the address of the default route, or with
+                      --public only the public IP
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to curl, for the public IP.
+
+Examples:
+  myip
+  myip -q
+  myip --public -- --interface tailscale0
+
+Needs: ip. curl or dig for the public IP. See man myip.
+Exit: 0 ok, 1 no public IP, 2 bad usage, 3 missing tool.
+EOF
+}
+
+SYS=/sys/class/net
+PUBLIC_URL=https://ifconfig.me
+
+# What an interface is, in a few words. Empty when it is plain.
+iface_kind() {
+    local i=$1 d=$SYS/$1 ssid
+    case $i in
+        wg*|tailscale*|tun*|tap*|ppp*|zt*|nordlynx*|proton*|mullvad*|vpn*) echo VPN; return ;;
+        virbr*) echo "libvirt bridge"; return ;;
+        docker*|br-*) echo "Docker bridge"; return ;;
+        podman*|cni-podman*) echo "podman bridge"; return ;;
+        cni*|cali*|flannel*|cilium*|kube*|vxlan*) echo "Kubernetes network"; return ;;
+    esac
+    if [[ -e $d/tun_flags ]] || [[ $(cat "$d/type" 2>/dev/null) == 65534 ]]; then
+        echo VPN
+        return
+    fi
+    if [[ -d $d/wireless || -e $d/phy80211 || ( ! -e $d && $i == wl* ) ]]; then
+        ssid=$(wifi_name "$i")
+        echo "Wi-Fi${ssid:+ $ssid}"
+        return
+    fi
+    if [[ -d $d/bridge ]]; then
+        echo bridge
+        return
+    fi
+    if [[ -e $d/device || ( ! -e $d && $i == e* ) ]]; then
+        if [[ ${NOCARRIER[$i]:-0} == 1 ]]; then echo "no cable"; else echo wired; fi
+    fi
+}
+
+# The Wi-Fi network name of an interface, from NetworkManager or iw.
+wifi_name() {
+    local name=""
+    if tb_has nmcli; then
+        name=$(nmcli -t -g GENERAL.CONNECTION device show "$1" 2>/dev/null | head -n1)
+    elif tb_has iw; then
+        name=$(iw dev "$1" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p' | head -n1)
+    fi
+    [[ $name == -- ]] && name=""
+    echo "$name"
+}
+
+# The interfaces that are up, without lo and without the host end of
+# container links, as "name flags" lines.
+up_ifaces() {
+    tb_show ip -o link show up
+    ip -o link show up 2>/dev/null | awk -F': ' '{ n = $2; sub(/@.*/, "", n); split($3, f, " "); print n, f[1] }' |
+        grep -v -e '^lo ' -e '^veth'
+}
+
+# "iface addr/prefix" lines for every address.
+addresses() {
+    local fam=()
+    [[ -n $family ]] && fam=("-$family")
+    tb_show ip -o "${fam[@]}" addr show
+    ip -o "${fam[@]}" addr show 2>/dev/null | awk '{ print $2, $4 }'
+}
+
+# The source address this machine uses for the internet, without sending
+# anything. Empty when there is no route.
+route_src() {
+    local target=1.1.1.1 six=()
+    if [[ $family == 6 ]]; then
+        target=2606:4700:4700::1111
+        six=(-6)
+    fi
+    tb_show ip "${six[@]}" route get "$target"
+    ip "${six[@]}" route get "$target" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}
+
+# "gateway dev" for the default route.
+gateway() {
+    local six=()
+    [[ $family == 6 ]] && six=(-6)
+    tb_show ip "${six[@]}" route show default
+    ip "${six[@]}" route show default 2>/dev/null |
+        awk '{ g = ""; d = ""; for (i = 1; i < NF; i++) { if ($i == "via") g = $(i + 1); if ($i == "dev") d = $(i + 1) } if (g != "") { print g, d; exit } }'
+}
+
+# The DNS servers, and how they are reached.
+dns_line() {
+    local servers how=""
+    servers=$(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null | paste -sd, - | sed 's/,/, /g')
+    if [[ $servers == 127.0.0.53* ]]; then
+        how=" through systemd-resolved"
+        if tb_has resolvectl; then
+            tb_show resolvectl dns
+            local real
+            real=$(resolvectl dns 2>/dev/null | sed -n 's/^[^:]*: *//p' | tr ' ' '\n' | grep . | awk '!seen[$0]++' |
+                paste -sd, - | sed 's/,/, /g')
+            [[ -n $real ]] && servers=$real
+        fi
+    fi
+    [[ -n $servers ]] || servers="none set in /etc/resolv.conf"
+    echo "$servers$how"
+}
+
+# True for text that looks like an IPv4 or IPv6 address.
+is_ip() {
+    [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || $1 =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:.]*$ ]]
+}
+
+# The public IP, from ifconfig.me with curl, or OpenDNS with dig.
+public_ip() {
+    local ip="" fam=()
+    [[ -n $family ]] && fam=("-$family")
+    if tb_has curl; then
+        tb_show curl -s --max-time 5 "${fam[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} "$PUBLIC_URL"
+        ip=$(curl -s --max-time 5 "${fam[@]}" ${TB_PASS[@]+"${TB_PASS[@]}"} "$PUBLIC_URL" 2>/dev/null | head -c 64)
+        if is_ip "$ip"; then
+            echo "$ip"
+            return 0
+        fi
+        tb_say "no address from $PUBLIC_URL, trying OpenDNS"
+    fi
+    if tb_has dig; then
+        local q=(+short +time=3 +tries=1 myip.opendns.com @resolver1.opendns.com)
+        [[ $family == 6 ]] && q=(-6 +short +time=3 +tries=1 AAAA myip.opendns.com @resolver1.opendns.com)
+        tb_show dig "${q[@]}"
+        ip=$(dig "${q[@]}" 2>/dev/null | tail -n1)
+        if is_ip "$ip"; then
+            echo "$ip"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# The error for a public IP that did not come.
+public_fail() {
+    if tb_has curl; then
+        tb_err "no answer from ifconfig.me in 5s. Check the link with: netcheck"
+    else
+        tb_err "no answer from OpenDNS. Check the link with: netcheck"
+    fi
+}
+
+show_public_only() {
+    tb_has curl || tb_has dig || tb_need curl
+    local ip
+    ip=$(public_ip) || { public_fail; return 1; }
+    echo "$ip"
+}
+
+show_all() {
+    local ifaces=() addrs i a first kind w=7 gw dev rc=0 ip flags
+    declare -gA NOCARRIER=()
+    while read -r i flags; do
+        [[ -n $i ]] || continue
+        ifaces+=("$i")
+        [[ $flags == *NO-CARRIER* ]] && NOCARRIER[$i]=1
+        (( ${#i} > w )) && w=${#i}
+    done < <(up_ifaces)
+    addrs=$(addresses)
+    w=$(( w + 2 ))
+    for i in ${ifaces[@]+"${ifaces[@]}"}; do
+        kind=$(iface_kind "$i")
+        first=1
+        while read -r _ a; do
+            if (( first )); then
+                row "$w" "$i" "$a" "$kind"
+                first=0
+            else
+                row "$w" "" "$a" ""
+            fi
+        done < <(awk -v n="$i" '$1 == n' <<<"$addrs")
+        if (( first )); then
+            # Skip bridges and VPNs with no address of this family.
+            [[ -n $family && $kind != wired && $kind != "no cable" && $kind != Wi-Fi* ]] && continue
+            row "$w" "$i" "no address" "$kind"
+        fi
+    done
+    read -r gw dev <<<"$(gateway)"
+    if [[ -n $gw ]]; then
+        row "$w" gateway "$gw on $dev" ""
+    else
+        row "$w" gateway "none, no default route" ""
+    fi
+    row "$w" dns "$(dns_line)" ""
+    (( local_only )) && return 0
+    if ! tb_has curl && ! tb_has dig; then
+        tb_hint curl "the public IP needs curl or dig"
+        return 0
+    fi
+    if ip=$(public_ip); then
+        row "$w" public "$ip" ""
+    else
+        public_fail
+        rc=1
+    fi
+    return "$rc"
+}
+
+# One output line: name, address, and what it is, without trailing spaces.
+row() {
+    local line addr=$3
+    (( ${#addr} >= 22 )) && addr+="  "
+    line=$(printf '%-*s%-22s%s' "$1" "$2" "$addr" "$4")
+    line=${line%"${line##*[! ]}"}
+    echo "$line"
+}
+
+main() {
+    tb_need ip
+    if (( public_only )); then
+        show_public_only
+        return $?
+    fi
+    if (( TB_QUIET )); then
+        local src
+        src=$(route_src)
+        [[ -n $src ]] || tb_die 1 "no default route, so no address carries traffic out"
+        echo "$src"
+        return 0
+    fi
+    show_all
+}
+
+family=""
+local_only=0
+public_only=0
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -4)        family=4 ;;
+        -6)        family=6 ;;
+        --local)   local_only=1 ;;
+        --public)  public_only=1 ;;
+        --)        shift; TB_PASS=("$@"); break ;;
+        -*)        tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)         tb_usage_error "myip takes no arguments, got $1" ;;
+    esac
+    shift
+done
+(( local_only && public_only )) && tb_usage_error "--local and --public cannot go together"
+
+main
+exit $?

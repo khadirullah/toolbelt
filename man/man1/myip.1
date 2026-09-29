@@ -1,0 +1,216 @@
+.TH "MYIP" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+myip \- local and public IP addresses, gateway and DNS
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+myip [options] [-- curl options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBmyip\fR shows every address this machine has, on one screen, with a few words on what each network interface is. It answers "what is my IP" for the three different things that question can mean:
+.IP \(bu 2
+The local address, the one other machines on your network use to reach you, such as \fB192.168.1.24\fR.
+.IP \(bu 2
+The gateway, the router that carries your traffic out, such as \fB192.168.1.1\fR.
+.IP \(bu 2
+The public address, the one websites see. At home it belongs to your router, and many machines share it.
+.PP
+.RS 4
+.nf
+wlp3s0      192.168.1.24/24       Wi-Fi Home-5G
+            fe80::6c3d:9a1f:4b20:e17c/64
+enp0s31f6   no address            no cable
+virbr0      192.168.122.1/24      libvirt bridge
+tailscale0  100.101.7.52/32       VPN
+gateway     192.168.1.1 on wlp3s0
+dns         192.168.1.1 through systemd-resolved
+public      203.0.113.47
+.fi
+.RE
+.PP
+The number after the slash is the prefix length. \fB/24\fR means the first three numbers name the network, so every address from \fB192.168.1.1\fR to \fB192.168.1.254\fR is on the same local network as you.
+.SS Which interfaces it lists
+.PP
+\fBmyip\fR lists every interface that is switched on, which is what \fBip link show up\fR prints. It leaves out two kinds:
+.IP \(bu 2
+\fBlo\fR, the loopback interface, which is always \fB127.0.0.1\fR.
+.IP \(bu 2
+\fBveth\fR interfaces. Docker, podman and Kubernetes make one per container, as the host end of the container's network cable. They have no address of their own and would fill the screen.
+.PP
+An interface that is on but has no address shows \fBno address\fR. With \fB\-4\fR or \fB\-6\fR, a bridge or VPN with no address of that family is left out, since it would only add noise.
+.SS What each interface is
+.PP
+The third column comes from the interface name and from \fB/sys/class/net\fR:
+.TP
+\fBWi\-Fi Home\-5G\fR
+The interface has a \fBwireless\fR folder in \fB/sys/class/net\fR. The network name comes from \fBnmcli\fR, or from \fBiw\fR when NetworkManager is not running.
+.TP
+\fBwired\fR
+A real network card, with a cable in.
+.TP
+\fBno cable\fR
+A real network card whose link flags say \fBNO\-CARRIER\fR.
+.TP
+\fBVPN\fR
+A name such as \fBwg0\fR, \fBtun0\fR, \fBtailscale0\fR or \fBppp0\fR, or a tun device.
+.TP
+\fBlibvirt bridge\fR
+\fBvirbr0\fR and friends, made by libvirt for virtual machines.
+.TP
+\fBDocker bridge\fR
+\fBdocker0\fR and \fBbr\-...\fR, made by Docker.
+.TP
+\fBpodman bridge\fR
+\fBpodman0\fR, made by podman.
+.TP
+\fBKubernetes network\fR
+\fBcni0\fR, \fBflannel.1\fR, \fBcali...\fR and similar.
+.TP
+\fBbridge\fR
+Any other bridge.
+.SS Gateway and DNS
+.PP
+The gateway comes from the default route in \fBip route\fR. When there is none, \fBmyip\fR says \fBnone, no default route\fR, which means this machine cannot reach anything outside its own network.
+.PP
+The DNS servers come from \fB/etc/resolv.conf\fR. On Ubuntu, Fedora and other distros that run systemd\-resolved, that file only names \fB127.0.0.53\fR, a small resolver on this machine that passes questions on. \fBmyip\fR then asks \fBresolvectl dns\fR for the real servers and adds \fBthrough systemd\-resolved\fR.
+.SS The public IP
+.PP
+\fBmyip\fR asks \fBhttps://ifconfig.me\fR with curl, with a 5 second limit. When curl is missing or gets no address back, it asks OpenDNS with dig, which answers the question \fBmyip.opendns.com\fR with the address it saw. Use \fB\-\-local\fR when nothing should leave the machine, for example on a network where you do not want to be seen asking.
+.SH OPTIONS
+.TP
+\fB\-4\fR
+Only IPv4 addresses and the IPv4 gateway and public IP.
+.TP
+\fB\-6\fR
+Only IPv6 addresses and the IPv6 gateway and public IP.
+.TP
+\fB\-\-local\fR
+Skip the public IP. \fBmyip\fR sends nothing over the network.
+.TP
+\fB\-\-public\fR
+Print only the public IP.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the address that carries the default route. With \fB\-\-public\fR, only the public IP.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each \fBip\fR, \fBcurl\fR and \fBdig\fR command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH IN SCRIPTS
+.PP
+\fBmyip \-q\fR prints one address and nothing else. It is the address this machine uses when it talks to the internet, found with \fBip route get 1.1.1.1\fR, which asks the kernel for the route without sending a packet. That is the address to put in a config file or a URL for other machines on your network.
+.PP
+.RS 4
+.nf
+$ echo "open http://$(myip -q):8000/ on your phone"
+open http://192.168.1.24:8000/ on your phone
+.fi
+.RE
+.PP
+\fBmyip \-\-public\fR prints only the public address, for a firewall rule or an allow list:
+.PP
+.RS 4
+.nf
+$ myip --public
+203.0.113.47
+.fi
+.RE
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to curl when it fetches the public IP. Use them to ask through one interface or a proxy:
+.PP
+.RS 4
+.nf
+$ myip --public -- --interface tailscale0
+$ myip --public -- --proxy socks5h://127.0.0.1:1080
+.fi
+.RE
+.SH NEEDS
+.PP
+\fBip\fR from \fBiproute2\fR (\fBiproute\fR on Fedora), which every mainstream distro installs. For the public IP, \fBcurl\fR, or \fBdig\fR from \fBbind9\-dnsutils\fR on Debian and Ubuntu, \fBbind\-utils\fR on Fedora and openSUSE, \fBbind\fR on Arch and \fBbind\-tools\fR on Alpine. \fBnmcli\fR from NetworkManager or \fBiw\fR adds the Wi\-Fi name. \fBresolvectl\fR adds the real DNS servers behind systemd\-resolved.
+.SH EXAMPLES
+.SS Everything
+.PP
+.RS 4
+.nf
+$ myip
+enp2s0           192.168.122.210/24    wired
+                 fe80::16f1:c176:5d39:c1fb/64
+docker0          172.17.0.1/16         Docker bridge
+br-e91152e75d94  172.18.0.1/16         Docker bridge
+                 fc00:f853:ccd:e793::1/64
+gateway          192.168.122.1 on enp2s0
+dns              192.168.122.1
+public           203.0.113.47
+.fi
+.RE
+.SS The address for a script
+.PP
+.RS 4
+.nf
+$ myip -q
+192.168.122.210
+.fi
+.RE
+.SS Only IPv6, and nothing sent out
+.PP
+.RS 4
+.nf
+$ myip -6 --local
+enp2s0           fe80::16f1:c176:5d39:c1fb/64  wired
+br-e91152e75d94  fc00:f853:ccd:e793::1/64  Docker bridge
+gateway          none, no default route
+dns              192.168.122.1
+.fi
+.RE
+.PP
+No IPv6 default route means this machine has no IPv6 internet. The \fBfe80::\fR address works only on the local link.
+.SS See the commands
+.PP
+.RS 4
+.nf
+$ myip -v --public
++ curl -s --max-time 5 https://ifconfig.me
+203.0.113.47
+.fi
+.RE
+.SS No internet
+.PP
+.RS 4
+.nf
+$ myip --public
+myip: no answer from ifconfig.me in 5s. Check the link with: netcheck
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBmyip: no answer from ifconfig.me in 5s\fR : The machine cannot reach the internet, or DNS does not work. Run \fBnetcheck\fR to find the step that fails.
+.PP
+\fBgateway none, no default route\fR : The machine is not connected, or DHCP gave no router. On NetworkManager systems, \fBnmcli device\fR shows the state of each interface.
+.PP
+An address starts with \fB169.254.\fR : The interface asked DHCP for an address and got no answer, so it made one up. Nothing outside the cable can reach it. Check the router, or run \fBnetcheck\fR.
+.PP
+The public IP is not the one your router shows : Your provider may use carrier\-grade NAT, where many customers share one public address. Addresses from \fB100.64.0.0\fR to \fB100.127.255.255\fR on the router's outside mean that. Ports you forward on the router then do not reach you from the internet.
+.PP
+The Wi\-Fi name is missing : Install NetworkManager's \fBnmcli\fR, or \fBiw\fR. Without either, \fBmyip\fR shows only \fBWi\-Fi\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked.
+.TP
+1
+The public IP could not be found, or with \fB\-q\fR there is no default route. The local table still prints.
+.TP
+2
+Bad usage, such as \fB\-\-local\fR with \fB\-\-public\fR.
+.TP
+3
+\fBip\fR is missing, or \fB\-\-public\fR has neither curl nor dig.
+.SH SEE ALSO
+.PP
+\fBnetcheck\fR, \fBlan\fR, \fBip(8)\fR, \fBresolvectl(1)\fR
