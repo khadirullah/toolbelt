@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# git-whoami: show the name, email and signing key git will use here.
+set -uo pipefail
+TB_CMD=git-whoami
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: git whoami [options]
+
+Show the name, email and signing key git will use here.
+
+Options:
+  -q, --quiet         one line, Name <email>
+  -v, --verbose       every step, and each git command before it runs
+  -h, --help          this help
+
+Each line says which config file sets the value. It works outside a
+repository too, and then shows your global settings.
+
+Examples:
+  git whoami
+  git whoami -q
+  cd ~/work/api && git whoami
+
+Needs: git 2.30 or newer. See man git-whoami.
+Exit: 0 ok, 1 name or email not set, 2 bad usage, 3 no git.
+EOF
+}
+
+# A path for people: the repo's own files from its top, the home folder as ~.
+nice_path() {
+    local p=$1
+    if [[ -n $top && $p == "$top/"* ]]; then
+        p=${p#"$top/"}
+    elif [[ $p == "$HOME/"* ]]; then
+        p="~/${p#"$HOME/"}"
+    fi
+    echo "$p"
+}
+
+# Look up a key with its origin. Sets VAL and FROM, returns 1 when unset.
+lookup() {
+    local key=$1 line scope origin
+    VAL="" FROM=""
+    tb_show git config --show-scope --show-origin --get "$key"
+    line=$(git config --show-scope --show-origin --get "$key" 2>/dev/null) || return 1
+    scope=${line%%$'\t'*}
+    line=${line#*$'\t'}
+    origin=${line%%$'\t'*}
+    VAL=${line#*$'\t'}
+    case $origin in
+        file:*) FROM=$(nice_path "${origin#file:}") ;;
+        command\ line:*|command:*) FROM="git -c or GIT_CONFIG_* variables" ;;
+        blob:*) FROM="a config blob" ;;
+        *) FROM=$origin ;;
+    esac
+    case $scope in
+        local)    FROM+=", this repo only" ;;
+        worktree) FROM+=", this worktree only" ;;
+        system)   FROM+=", every user" ;;
+    esac
+    return 0
+}
+
+# One "name  value  from" line, with the value padded so the origins line up.
+row() { printf '%-8s %-*s  %s\n' "$1" "$width" "$2" "$3"; }
+
+main() {
+    local name="" name_from="" email="" email_from="" fmt key sign signing rem url missing=0 v
+    tb_need git
+    top=""
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    else
+        tb_say "not inside a repository, showing the global settings"
+    fi
+
+    # The environment wins over every config file.
+    if [[ -n ${GIT_AUTHOR_NAME:-} ]]; then
+        name=$GIT_AUTHOR_NAME name_from="the GIT_AUTHOR_NAME variable"
+    elif lookup user.name; then
+        name=$VAL name_from=$FROM
+    fi
+    if [[ -n ${GIT_AUTHOR_EMAIL:-} ]]; then
+        email=$GIT_AUTHOR_EMAIL email_from="the GIT_AUTHOR_EMAIL variable"
+    elif lookup user.email; then
+        email=$VAL email_from=$FROM
+    elif [[ -n ${EMAIL:-} ]]; then
+        email=$EMAIL email_from="the EMAIL variable"
+    fi
+
+    if (( TB_QUIET )); then
+        [[ -n $name && -n $email ]] || tb_die 1 "user.name or user.email is not set, git refuses to commit"
+        echo "$name <$email>"
+        return 0
+    fi
+
+    width=${#name}
+    (( ${#email} > width )) && width=${#email}
+    (( width < 16 )) && width=16
+    if [[ -n $name ]]; then
+        row name "$name" "$name_from"
+    else
+        echo "name     not set. Set it with: git config --global user.name \"Your Name\""
+        missing=1
+    fi
+    if [[ -n $email ]]; then
+        row email "$email" "$email_from"
+    else
+        echo "email    not set. Set it with: git config --global user.email you@example.com"
+        missing=1
+    fi
+
+    fmt=openpgp
+    lookup gpg.format && fmt=$VAL
+    key=""
+    lookup user.signingkey && key=$VAL
+    sign=false
+    if lookup commit.gpgsign; then
+        v=$(git config --type=bool --get commit.gpgsign 2>/dev/null) && sign=$v
+    fi
+    if [[ -z $key && $sign != true ]]; then
+        signing="none, commits are not signed"
+    else
+        if [[ -n $key ]]; then
+            [[ $key == "$HOME/"* ]] && key="~/${key#"$HOME/"}"
+            signing="$fmt $key"
+        else
+            signing="$fmt, the key that matches your email"
+        fi
+        if [[ $sign == true ]]; then
+            signing+=", commits are signed"
+        else
+            signing+=", commits are not signed unless you pass -S"
+        fi
+    fi
+    printf '%-8s %s\n' signing "$signing"
+
+    if [[ -n $top ]]; then
+        tb_show git remote
+        while IFS= read -r rem; do
+            [[ -n $rem ]] || continue
+            url=$(git remote get-url "$rem" 2>/dev/null) || url="no url"
+            printf '%-8s %s %s\n' remote "$rem" "$url"
+        done < <(git remote 2>/dev/null)
+    fi
+    if (( missing )); then
+        tb_err "git refuses to commit until user.name and user.email are set"
+        return 1
+    fi
+    return 0
+}
+
+tb_expand "" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -*) tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)  tb_usage_error "git whoami takes no arguments" ;;
+    esac
+    shift
+done
+
+main
+exit $?

@@ -1,0 +1,186 @@
+.TH "GIT-WHOAMI" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+git\-whoami \- show the name, email and signing key git will use here
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+git whoami [options]
+git-whoami [options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+Git takes the author of every commit from its config, and that config comes in layers. The system file, your global \fB~/.gitconfig\fR, files it includes with \fBincludeIf\fR, and the repository's own \fB.git/config\fR can all set \fBuser.email\fR, and the last one wins. The first sign of a mix\-up is a work commit pushed under your personal email, and by then it is in the history.
+.PP
+\fBgit whoami\fR shows what git will use in the folder you are in, and which file set each value.
+.IP \(bu 2
+\fBname\fR and \fBemail\fR, the author of your next commit
+.IP \(bu 2
+\fBsigning\fR, the key and format, and whether commits are signed without \fB\-S\fR
+.IP \(bu 2
+\fBremote\fR, one line per remote, with its URL
+.PP
+Run it in a new clone before the first commit, or after you change \fBincludeIf\fR rules.
+.PP
+It only reads. It works outside a repository too, and then shows the global settings and no remotes.
+.PP
+It is a script named \fBgit\-whoami\fR in toolbelt's \fBbin\fR folder. Git runs any program named \fBgit\-NAME\fR on your PATH as \fBgit NAME\fR.
+.SH OPTIONS
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+One line, \fBName <email>\fR, for scripts and prompts.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show each git command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH WHERE EACH VALUE COMES FROM
+.PP
+The third column names the file, from \fBgit config \-\-show\-origin \-\-show\-scope\fR.
+.TP
+\fB~/.gitconfig\fR
+Your global config. \fB~/.config/git/config\fR is the other place git reads it from.
+.TP
+\fB.git/config, this repo only\fR
+The repository's own config. It beats the global one here.
+.TP
+\fB.git/config.worktree, this worktree only\fR
+A worktree's own config, when \fBextensions.worktreeConfig\fR is on.
+.TP
+\fB/etc/gitconfig, every user\fR
+The system config.
+.TP
+\fB~/.gitconfig\-work\fR or another file
+A file pulled in by \fBinclude\fR or \fBincludeIf\fR.
+.TP
+\fBgit \-c or GIT_CONFIG_* variables\fR
+A value set on the command line or through the \fBGIT_CONFIG_COUNT\fR variables.
+.TP
+\fBthe GIT_AUTHOR_NAME variable\fR
+The environment. It beats every config file.
+.PP
+Git uses \fBGIT_AUTHOR_NAME\fR and \fBGIT_AUTHOR_EMAIL\fR over \fBuser.name\fR and \fBuser.email\fR when they are set, and falls back to the \fBEMAIL\fR variable when no config sets an email. \fBgit whoami\fR follows the same order.
+.SH THE SIGNING LINE
+.TP
+\fBnone, commits are not signed\fR
+No signing key and \fBcommit.gpgsign\fR is off.
+.TP
+\fBssh ~/.ssh/id_ed25519.pub, commits are signed\fR
+\fBgpg.format\fR is \fBssh\fR, the key is set and \fBcommit.gpgsign\fR is on.
+.TP
+\fBopenpgp ABCD1234, commits are not signed unless you pass \-S\fR
+A key is set, but git signs only with \fBgit commit \-S\fR.
+.TP
+\fBopenpgp, the key that matches your email\fR
+Signing is on and no key is set, so gpg picks the key for your email.
+.PP
+Turn signing on for every commit with \fBgit config \-\-global commit.gpgsign true\fR.
+.SH HELP AND THE MAN PAGE
+.PP
+\fBgit whoami \-h\fR and \fBgit\-whoami \-\-help\fR print the help. \fBgit whoami \-\-help\fR makes git open the man page \fBgit\-whoami(1)\fR, which toolbelt installs from this document.
+.SH PASS\-THROUGH
+.PP
+None. \fBgit whoami\fR runs \fBgit config \-\-get\fR for each key and \fBgit remote\fR, and \fB\-v\fR prints them.
+.SH NEEDS
+.PP
+git 2.30 or newer, from the \fBgit\fR package on every distro. \fB\-\-show\-scope\fR needs git 2.26.
+.SH EXAMPLES
+.SS In a work repository
+.PP
+.RS 4
+.nf
+$ git whoami
+name     Khadirullah                   ~/.gitconfig
+email    khadirullah@work.example.com  .git/config, this repo only
+signing  ssh ~/.ssh/id_ed25519.pub, commits are signed
+remote   origin git@github.com:khadirullah/toolbelt.git
+.fi
+.RE
+.PP
+The email comes from this repository's own config, so commits here use the work address.
+.SS Outside any repository
+.PP
+.RS 4
+.nf
+$ cd ~
+$ git whoami
+name     Khadirullah              ~/.gitconfig
+email    khadirullah@example.com  ~/.gitconfig
+signing  none, commits are not signed
+.fi
+.RE
+.SS One line for a script
+.PP
+.RS 4
+.nf
+$ git whoami -q
+Khadirullah <khadirullah@work.example.com>
+.fi
+.RE
+.SS The environment wins
+.PP
+.RS 4
+.nf
+$ GIT_AUTHOR_NAME="Build Bot" git whoami
+name     Build Bot                the GIT_AUTHOR_NAME variable
+email    khadirullah@example.com  ~/.gitconfig
+signing  none, commits are not signed
+.fi
+.RE
+.SS Nothing set yet
+.PP
+.RS 4
+.nf
+$ git whoami
+name     not set. Set it with: git config --global user.name "Your Name"
+email    not set. Set it with: git config --global user.email you@example.com
+signing  none, commits are not signed
+git-whoami: git refuses to commit until user.name and user.email are set
+$ echo $?
+1
+.fi
+.RE
+.SS See the git commands
+.PP
+.RS 4
+.nf
+$ git whoami -v
++ git config --show-scope --show-origin --get user.name
++ git config --show-scope --show-origin --get user.email
+name     Khadirullah                   ~/.gitconfig
+email    khadirullah@work.example.com  .git/config, this repo only
++ git config --show-scope --show-origin --get gpg.format
++ git config --show-scope --show-origin --get user.signingkey
++ git config --show-scope --show-origin --get commit.gpgsign
+signing  ssh ~/.ssh/id_ed25519.pub, commits are signed
++ git remote
+remote   origin git@github.com:khadirullah/toolbelt.git
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+The email is my personal one in a work repository : Set it for this repository with \fBgit config user.email you@work.example.com\fR. For every repository under one folder, add an \fBincludeIf\fR block to \fB~/.gitconfig\fR, such as \fB[includeIf "gitdir:~/work/"]\fR with \fBpath = ~/.gitconfig\-work\fR, and put the work email in that file.
+.PP
+Commits already went out with the wrong email : \fBgit whoami\fR only shows what comes next. Fixing old commits means rewriting them, which is only safe before they are pushed. \fBgit commit \-\-amend \-\-reset\-author\fR fixes the last one.
+.PP
+\fBcommits are signed\fR but GitHub shows them as unverified : GitHub needs the same public key under Settings, SSH and GPG keys, added as a signing key, and the email on the commit must be one of your verified emails.
+.PP
+\fBgit\-whoami: user.name or user.email is not set, git refuses to commit\fR : \fB\-q\fR found no name or email. Set both with \fBgit config \-\-global\fR.
+.SH EXIT STATUS
+.TP
+0
+Name and email are both set.
+.TP
+1
+The name or the email is not set, so git refuses to commit.
+.TP
+2
+Bad usage, such as an argument.
+.TP
+3
+git is not installed.
+.SH SEE ALSO
+.PP
+\fBgit\-sync\fR, \fBgit\-undo\fR, \fBgit\-config(1)\fR
