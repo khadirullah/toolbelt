@@ -196,3 +196,19 @@ SH
     [[ $output == *"cannot reach the cluster for context kind-kind"* ]]
     [[ $output == *"Try: kind get clusters"* ]]
 }
+
+@test "a stopped container shows its own log, not the one before" {
+    jq '.status.containerStatuses[0].state = {terminated: {exitCode: 1, reason: "Error", finishedAt: "2026-09-29T09:13:00Z"}}' \
+        "$FX/api.json" > "$FX/api-stopped.json"
+    sed -i 's|cat "$FX/api.json"|cat "$FX/${API:-api}.json"|' "$BATS_TEST_TMPDIR/stubs/kubectl"
+    API=api-stopped run kwhy api-5b8c9d7f6-mk4tn
+    grep 'logs api-5b8c9d7f6-mk4tn' "$CALLS" | grep -vq -- '--previous'
+    [[ $output == *"  event  Back-off restarting failed container api"$'\n'* ]]
+    [[ $output == *"    panic: missing DATABASE_URL"* ]]
+}
+
+@test "logs the node already removed get a plain message" {
+    sed -i 's|        printf .09:12:04 INFO.*|        printf "unable to retrieve container logs for containerd://abc" ;;|' "$BATS_TEST_TMPDIR/stubs/kubectl"
+    run kwhy api-5b8c9d7f6-mk4tn
+    [[ $output == *"    the node no longer keeps that container's logs"$'\n'"  hint   "* ]]
+}

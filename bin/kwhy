@@ -81,8 +81,8 @@ $p |
  elif .status.phase == "Running" then "Running \($nready)/\($ntotal)"
  else .status.phase // "Unknown" end) as $reason |
 (if $c == null then null
- elif $c.lastState.terminated != null then $c.lastState.terminated + {from: "previous"}
  elif $c.state.terminated != null then $c.state.terminated + {from: "current"}
+ elif $c.lastState.terminated != null then $c.lastState.terminated + {from: "previous"}
  elif $c.state.running != null then {from: "current"}
  else null end) as $t |
 ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False") | .message] | first) as $sched |
@@ -166,6 +166,8 @@ show_pod() {
     event=$(jq -r "$EVENT_JQ" "$TMP/ev" 2>/dev/null)
     [[ -n $event ]] || event=${sched:-${wmsg:-$smsg}}
     event=${event%% preemption: *}
+    # "Back-off restarting failed container main in pod crasher_demo(UID)" ends in noise.
+    [[ $event =~ ^(.*)\ in\ pod\ [^\ ]+\([0-9a-f-]+\)$ ]] && event=${BASH_REMATCH[1]}
     case $reason in
         *ImagePull*|*ErrImage*|InvalidImageName) [[ -n $image ]] && echo "  image  $image" ;;
     esac
@@ -195,12 +197,16 @@ show_pod() {
             if [[ -n $text ]]; then echo "  exit   $text, $what"; else echo "  logs   $what"; fi
             local args=(logs "$name" -n "$ns" -c "$c" --tail "$lines")
             [[ $from == previous ]] && args+=(--previous)
-            if kube_to "$TMP/log" "${args[@]}"; then
+            # kubectl logs exits 0 and prints this on stdout when the node has
+            # already removed the container.
+            if kube_to "$TMP/log" "${args[@]}" && ! grep -q '^unable to retrieve container logs' "$TMP/log"; then
                 if [[ -s $TMP/log ]]; then
-                    sed 's/^/    /' "$TMP/log"
+                    awk '{ print "    " $0 }' "$TMP/log"
                 else
                     echo "    (no output)"
                 fi
+            elif grep -q '^unable to retrieve container logs' "$TMP/log"; then
+                echo "    the node no longer keeps that container's logs"
             else
                 echo "    kubectl could not read the logs: $(grep -m1 . "$TMP/kerr" | sed -E 's/^(error: |Error from server( \([A-Za-z]+\))?: )//')"
             fi
