@@ -1,0 +1,471 @@
+#!/usr/bin/env bash
+# archdiff: list what changed between two archives.
+set -uo pipefail
+TB_CMD=archdiff
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: archdiff [options] old new [-- diff options]
+
+List what changed between two archives.
+
+Options:
+  -c, --content       a unified diff for each changed text file
+  --only PAT          compare only the files that match, repeat for more
+  -x, --exclude PAT   leave out the files that match, repeat for more
+  -q, --quiet         only the summary line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  With -c, options after -- go to diff, such as -- -U 5.
+
+Examples:
+  archdiff app-1.4.tgz app-1.5.tgz
+  archdiff -c --only values.yaml app-1.4.tgz app-1.5.tgz
+  archdiff site.zip site.tar.zst
+  archdiff -x '*.log' backup-mon.tar.zst backup-tue.tar.zst
+
+Needs: sha256sum, and tar, unzip or 7z for the formats. See man archdiff.
+Exit: 0 the same, 1 different, 2 bad usage or unreadable, 3 missing tool.
+EOF
+}
+
+# archdiff follows diff and cmp: 1 means the archives differ, so a failure
+# to read one is 2, the same as bad usage.
+E_READ=2
+
+# ---------------------------------------------------------------- formats
+
+# The kind of an archive: tar, tar.FAM, zip, 7z, or FAM for one compressed
+# file, where FAM is a compressor. Decided from the name, then the bytes.
+detect_kind() {
+    local f=$1 n=${1,,} fam
+    case $n in
+        *.tar)                          echo tar; return ;;
+        *.tar.gz|*.tgz|*.taz)           echo tar.gz; return ;;
+        *.tar.bz2|*.tbz2|*.tbz|*.tb2)   echo tar.bz2; return ;;
+        *.tar.xz|*.txz)                 echo tar.xz; return ;;
+        *.tar.lzma|*.tlz)               echo tar.lzma; return ;;
+        *.tar.zst|*.tzst|*.tar.zstd)    echo tar.zst; return ;;
+        *.tar.lz4)                      echo tar.lz4; return ;;
+        *.tar.lz)                       echo tar.lz; return ;;
+        *.tar.lzo|*.tzo)                echo tar.lzo; return ;;
+        *.tar.br)                       echo tar.br; return ;;
+        *.zip|*.jar|*.war|*.ear|*.whl|*.xpi|*.epub|*.apk.zip) echo zip; return ;;
+        *.7z|*.rar|*.iso|*.cab)         echo 7z; return ;;
+    esac
+    fam=$(magic_fam "$f")
+    case $fam in
+        tar|zip|7z) echo "$fam"; return ;;
+        "") ;;
+        *)
+            # A compressed stream. It holds a tar when the bytes say so.
+            if decomp_cmd "$fam" && "${DCOMP[@]}" < "$f" 2>/dev/null | head -c 512 | tail -c 255 | head -c 5 | grep -q ustar; then
+                echo "tar.$fam"
+            else
+                echo "$fam"
+            fi
+            return ;;
+    esac
+    case $n in
+        *.gz) echo gz ;; *.bz2) echo bz2 ;; *.xz) echo xz ;; *.lzma) echo lzma ;;
+        *.zst) echo zst ;; *.lz4) echo lz4 ;; *.lz) echo lz ;; *.lzo) echo lzo ;; *.br) echo br ;;
+        *) return 1 ;;
+    esac
+}
+
+# The compressor or archive type from the first bytes of a file.
+magic_fam() {
+    local hex
+    hex=$(head -c 6 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case $hex in
+        1f8b*)         echo gz ;;
+        425a68*)       echo bz2 ;;
+        fd377a585a00*) echo xz ;;
+        5d0000*)       echo lzma ;;
+        28b52ffd*)     echo zst ;;
+        04224d18*)     echo lz4 ;;
+        4c5a4950*)     echo lz ;;
+        894c5a4f*)     echo lzo ;;
+        504b0304*|504b0506*) echo zip ;;
+        377abcaf271c*) echo 7z ;;
+        526172211a07*) echo 7z ;;
+        *)
+            if [[ $(head -c 262 -- "$1" 2>/dev/null | tail -c 5) == ustar ]]; then echo tar; fi ;;
+    esac
+}
+
+# The decompressor for a family, in DCOMP. Returns 1 for a missing tool
+# without exiting, so detection can go on.
+decomp_cmd() {
+    DCOMP=()
+    case $1 in
+        gz)   if tb_has gzip; then DCOMP=(gzip -dc); elif tb_has pigz; then DCOMP=(pigz -dc); fi ;;
+        bz2)  if tb_has bzip2; then DCOMP=(bzip2 -dc); elif tb_has pbzip2; then DCOMP=(pbzip2 -dc); fi ;;
+        xz)   tb_has xz && DCOMP=(xz -dc) ;;
+        lzma) tb_has xz && DCOMP=(xz --format=lzma -dc) ;;
+        zst)  tb_has zstd && DCOMP=(zstd -dc -q) ;;
+        lz4)  tb_has lz4 && DCOMP=(lz4 -dc -q) ;;
+        lz)   if tb_has lzip; then DCOMP=(lzip -dc); elif tb_has plzip; then DCOMP=(plzip -dc); fi ;;
+        lzo)  tb_has lzop && DCOMP=(lzop -dc) ;;
+        br)   tb_has brotli && DCOMP=(brotli -dc) ;;
+    esac
+    (( ${#DCOMP[@]} ))
+}
+
+# The decompressor for a family, or exit 3 with the install line.
+need_decomp() {
+    decomp_cmd "$1" && return 0
+    case $1 in
+        gz) tb_need gzip ;; bz2) tb_need bzip2 ;; xz|lzma) tb_need xz ;; zst) tb_need zstd ;;
+        lz4) tb_need lz4 ;; lz) tb_need lzip ;; lzo) tb_need lzop ;; br) tb_need brotli ;;
+    esac
+}
+
+# Escape a name for unzip, which reads its arguments as patterns.
+unzip_quote() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\[/\\[}
+    s=${s//\*/\\*}
+    s=${s//\?/\\?}
+    printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------- listings
+
+# Print one line per regular file: name, size, sha256 or "-", and the name
+# as stored, separated by tabs. Tar streams get their hashes in the same
+# pass. zip and 7z hash later, only where the sizes match.
+list_archive() {
+    local f=$1 kind=$2 s
+    local -a st
+    case $kind in
+        tar|tar.*)
+            local hook='h=$(sha256sum) && printf "%s\t%s\t%s\n" "${h%% *}" "$TAR_SIZE" "$TAR_FILENAME"'
+            if [[ $kind == tar ]]; then
+                tb_show_text "tar -xf $(qarg "$f") --to-command=$(qarg "$hook")"
+                tar -xf "$f" --to-command="$hook"
+                st=("$?")
+            else
+                need_decomp "${kind#tar.}"
+                tb_show_text "${DCOMP[*]} < $(qarg "$f") | tar -xf - --to-command=$(qarg "$hook")"
+                "${DCOMP[@]}" < "$f" | tar -xf - --to-command="$hook"
+                st=("${PIPESTATUS[@]}")
+            fi
+            for s in "${st[@]}"; do (( s == 0 )) || return 1; done
+            ;;
+        zip)
+            if tb_has unzip; then
+                tb_show "unzip" -Z "$f"
+                unzip -Z "$f" 2>/dev/null | awk '
+                    match($0, /^[^ ]+ +[^ ]+ +[^ ]+ +[0-9]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ /) {
+                        if ($1 !~ /^[-dlbcps?]/ || length($1) < 7) next
+                        mode = substr($1, 1, 1)
+                        name = substr($0, RLENGTH + 1)
+                        if (mode == "d" || mode == "l" || name ~ /\/$/) next
+                        printf "-\t%s\t%s\n", $4, name
+                    }'
+                st=("${PIPESTATUS[@]}")
+                (( st[0] == 0 )) || return 1
+            else
+                list_7z "$f" || return 1
+            fi
+            ;;
+        7z)
+            list_7z "$f" || return 1
+            ;;
+        *)
+            # One compressed file: its only entry is the name without the extension.
+            local name size h
+            need_decomp "$kind"
+            name=$(basename -- "$f")
+            name=${name%.*}
+            tb_show_text "${DCOMP[*]} < $(qarg "$f") | sha256sum"
+            h=$("${DCOMP[@]}" < "$f" | sha256sum) || return 1
+            size=$("${DCOMP[@]}" < "$f" | wc -c) || return 1
+            printf '%s\t%s\t%s\n' "${h%% *}" "${size//[[:space:]]/}" "$name"
+            ;;
+    esac
+}
+
+list_7z() {
+    local f=$1
+    tb_need 7z
+    tb_show 7z l -slt -ba "$f"
+    7z l -slt -ba "$f" </dev/null 2>/dev/null | awk '
+        function flush() {
+            if (path != "" && !dir && !link) printf "-\t%s\t%s\n", size + 0, path
+            path = ""; size = 0; dir = 0; link = 0
+        }
+        /^Path = / { flush(); path = substr($0, 8); next }
+        /^Size = / { size = substr($0, 8); next }
+        /^Folder = \+/ { dir = 1; next }
+        /^Attributes = / { a = substr($0, 14); if (a ~ /^D/) dir = 1; if (a ~ / l/) link = 1; next }
+        END { flush() }'
+    local -a st=("${PIPESTATUS[@]}")
+    (( st[0] == 0 ))
+}
+
+qarg() {
+    if [[ $1 =~ ^[A-Za-z0-9_./:=,@%+^-]+$ ]]; then printf '%s' "$1"
+    else printf "'%s'" "${1//\'/\'\\\'\'}"; fi
+}
+
+# Hash one stored file of a zip or 7z archive.
+hash_member() {
+    local f=$1 kind=$2 orig=$3 h
+    case $kind in
+        zip)
+            if tb_has unzip; then
+                h=$(unzip -p "$f" "$(unzip_quote "$orig")" 2>/dev/null | sha256sum)
+            else
+                h=$(7z e -so -spd "$f" "$orig" 2>/dev/null </dev/null | sha256sum)
+            fi ;;
+        7z) h=$(7z e -so -spd "$f" "$orig" 2>/dev/null </dev/null | sha256sum) ;;
+    esac
+    printf '%s' "${h%% *}"
+}
+
+# Write one stored file to a path, for --content.
+extract_member() {
+    local f=$1 kind=$2 orig=$3 dest=$4
+    case $kind in
+        tar) tar -xOf "$f" -- "$orig" > "$dest" 2>/dev/null ;;
+        tar.*) need_decomp "${kind#tar.}"; "${DCOMP[@]}" < "$f" | tar -xOf - -- "$orig" > "$dest" 2>/dev/null ;;
+        zip)
+            if tb_has unzip; then unzip -p "$f" "$(unzip_quote "$orig")" > "$dest" 2>/dev/null
+            else 7z e -so -spd "$f" "$orig" </dev/null > "$dest" 2>/dev/null; fi ;;
+        7z) 7z e -so -spd "$f" "$orig" </dev/null > "$dest" 2>/dev/null ;;
+        *) need_decomp "$kind"; "${DCOMP[@]}" < "$f" > "$dest" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- filters
+
+# True when a name matches a pattern: the whole path, the last part, or a
+# folder anywhere in the path.
+matches() {
+    local name=$1 pat=${2%/}
+    # shellcheck disable=SC2053
+    [[ $name == $pat || ${name##*/} == $pat || $name == $pat/* || $name == */$pat/* || $name == */$pat ]]
+}
+
+keep_name() {
+    local name=$1 pat
+    if (( ${#ONLY[@]} )); then
+        local hit=0
+        for pat in "${ONLY[@]}"; do matches "$name" "$pat" && { hit=1; break; }; done
+        (( hit )) || return 1
+    fi
+    for pat in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+        matches "$name" "$pat" && return 1
+    done
+    return 0
+}
+
+# Read a raw listing on stdin and print it as: name, size, hash, stored
+# name, with ./ removed, a common top folder removed when STRIP is set, and
+# the filters applied.
+normalise() {
+    local strip=$1 h size orig name
+    while IFS=$'\t' read -r h size orig; do
+        name=${orig#./}
+        name=${name#/}
+        [[ -n $strip ]] && name=${name#"$strip"/}
+        [[ -n $name ]] || continue
+        keep_name "$name" || continue
+        printf '%s\t%s\t%s\t%s\n' "$name" "$size" "$h" "$orig"
+    done
+}
+
+# The one top folder every name sits in, or nothing.
+top_folder() {
+    awk -F'\t' '{ n = $3; sub(/^\.\//, "", n); sub(/^\//, "", n)
+                  i = index(n, "/"); if (i == 0) { bad = 1; exit }
+                  t = substr(n, 1, i - 1)
+                  if (top == "") top = t; else if (t != top) { bad = 1; exit } }
+                END { if (!bad && top != "") print top }'
+}
+
+# ---------------------------------------------------------------- main
+
+# Human size for a column.
+hsize() { tb_human "$1"; }
+
+main() {
+    (( ${#ARGS[@]} == 2 )) || tb_usage_error "name two archives, the old one first"
+    OLD=${ARGS[0]} NEW=${ARGS[1]}
+    local f
+    for f in "$OLD" "$NEW"; do
+        [[ -e $f ]] || { tb_err "$f: no such file"; exit "$E_READ"; }
+        [[ -f $f ]] || { tb_err "$f: not a file"; exit "$E_READ"; }
+        [[ -r $f ]] || { tb_err "$f: cannot read it"; exit "$E_READ"; }
+    done
+    if (( ${#TB_PASS[@]} )) && (( ! CONTENT )); then
+        tb_usage_error "options after -- go to diff, which runs only with -c"
+    fi
+    tb_need sha256sum
+    (( CONTENT )) && tb_need diff
+
+    local kind_old kind_new
+    kind_old=$(detect_kind "$OLD") || { tb_err "$OLD: not an archive archdiff can read"; exit "$E_READ"; }
+    kind_new=$(detect_kind "$NEW") || { tb_err "$NEW: not an archive archdiff can read"; exit "$E_READ"; }
+    tb_say "$OLD: $kind_old"
+    tb_say "$NEW: $kind_new"
+    # Check the tools here, since the listings run in subshells.
+    local k
+    for k in "$kind_old" "$kind_new"; do
+        case $k in
+            tar) tb_need tar ;;
+            tar.*) tb_need tar; need_decomp "${k#tar.}" ;;
+            zip) tb_has unzip || tb_need 7z ;;
+            7z) tb_need 7z ;;
+            *) need_decomp "$k" ;;
+        esac
+    done
+
+    local raw_old raw_new
+    raw_old=$(list_archive "$OLD" "$kind_old") || { tb_err "$OLD: could not read the archive"; exit "$E_READ"; }
+    raw_new=$(list_archive "$NEW" "$kind_new") || { tb_err "$NEW: could not read the archive"; exit "$E_READ"; }
+
+    # Strip the top folder when each archive has its own, such as app-1.4/
+    # and app-1.5/, so the same file lines up.
+    local top_old top_new strip_old="" strip_new=""
+    top_old=$(printf '%s\n' "$raw_old" | top_folder)
+    top_new=$(printf '%s\n' "$raw_new" | top_folder)
+    if [[ -n $top_old && -n $top_new && $top_old != "$top_new" ]]; then
+        strip_old=$top_old strip_new=$top_new
+        tb_say "comparing $top_old/ with $top_new/"
+    fi
+    local list_old list_new
+    list_old=$(printf '%s\n' "$raw_old" | { [[ -n $raw_old ]] && normalise "$strip_old"; } | sort -t $'\t' -k1,1)
+    list_new=$(printf '%s\n' "$raw_new" | { [[ -n $raw_new ]] && normalise "$strip_new"; } | sort -t $'\t' -k1,1)
+
+    # Join the two listings: A added, R removed, S same size, C changed size.
+    local joined
+    # Fields are split by the unit separator, since read joins empty fields
+    # between tabs.
+    joined=$(awk -F'\t' -v OFS='\037' '
+        NR == FNR { if ($1 != "") { os[$1] = $2; oh[$1] = $3; oo[$1] = $4 }; next }
+        $1 != "" {
+            seen[$1] = 1
+            if (!($1 in os)) { print "A", $1, "", $2, "", "", "", $4; next }
+            k = (os[$1] == $2) ? "S" : "C"
+            print k, $1, os[$1], $2, oh[$1], $3, oo[$1], $4
+        }
+        END { for (n in os) if (!(n in seen)) print "R", n, os[n], "", "", "", oo[n], "" }
+    ' <(printf '%s\n' "$list_old") <(printf '%s\n' "$list_new") | sort -t $'\037' -k2,2)
+
+    local same_size
+    same_size=$(grep -c '^S' <<<"$joined")
+    [[ $kind_old == zip || $kind_old == 7z || $kind_new == zip || $kind_new == 7z ]] &&
+        (( same_size )) && tb_say "$same_size files have the same size in both, comparing sha256"
+
+    local -a added=() removed=() changed=() changed_orig_old=() changed_orig_new=()
+    local k name so sn ho hn oo on same=0 width=0
+    while IFS=$'\037' read -r k name so sn ho hn oo on; do
+        [[ -n $k ]] || continue
+        case $k in
+            A) added+=("$name"$'\t'"$sn"); (( ${#name} > width )) && width=${#name} ;;
+            R) removed+=("$name"$'\t'"$so"); (( ${#name} > width )) && width=${#name} ;;
+            C) changed+=("$name"$'\t'"$so"$'\t'"$sn"); changed_orig_old+=("$oo"); changed_orig_new+=("$on")
+               (( ${#name} > width )) && width=${#name} ;;
+            S)
+                [[ $ho == - ]] && ho=$(hash_member "$OLD" "$kind_old" "$oo")
+                [[ $hn == - ]] && hn=$(hash_member "$NEW" "$kind_new" "$on")
+                if [[ $ho == "$hn" ]]; then
+                    ((same++))
+                else
+                    changed+=("$name"$'\t'"$so"$'\t'"$sn"); changed_orig_old+=("$oo"); changed_orig_new+=("$on")
+                    (( ${#name} > width )) && width=${#name}
+                fi ;;
+        esac
+    done <<<"$joined"
+    (( width > 48 )) && width=48
+
+    tb_color_stdout
+    local line n s o
+    if (( ! TB_QUIET )); then
+        for line in ${added[@]+"${added[@]}"}; do
+            IFS=$'\t' read -r n s <<<"$line"
+            printf '%s+ %-*s %8s%s\n' "$C_GRN" "$width" "$n" "$(hsize "$s")" "$C_OFF"
+        done
+        for line in ${removed[@]+"${removed[@]}"}; do
+            IFS=$'\t' read -r n s <<<"$line"
+            printf '%s- %-*s %8s%s\n' "$C_RED" "$width" "$n" "$(hsize "$s")" "$C_OFF"
+        done
+        local i=0
+        for line in ${changed[@]+"${changed[@]}"}; do
+            IFS=$'\t' read -r n o s <<<"$line"
+            printf '%s~ %-*s %8s -> %s%s\n' "$C_YEL" "$width" "$n" "$(hsize "$o")" "$(hsize "$s")" "$C_OFF"
+            if (( CONTENT )); then
+                show_content "$n" "${changed_orig_old[i]}" "${changed_orig_new[i]}" "$kind_old" "$kind_new"
+            fi
+            ((i++))
+        done
+    fi
+
+    local total=$(( ${#added[@]} + ${#removed[@]} + ${#changed[@]} ))
+    if (( total == 0 )); then
+        echo "no differences, $(tb_plural "$same" file)"
+        return 0
+    fi
+    echo "${#added[@]} added, ${#removed[@]} removed, ${#changed[@]} changed, $same the same"
+    return 1
+}
+
+# Print a unified diff of one changed file, when both sides are text.
+show_content() {
+    local name=$1 oo=$2 on=$3 ko=$4 kn=$5 a b
+    if [[ -z ${CTMP:-} ]]; then
+        tb_tmpdir CTMP || { tb_err "cannot make a temp folder for -c"; return 1; }
+        CN=0
+    fi
+    ((CN++))
+    a=$CTMP/$CN.old b=$CTMP/$CN.new
+    extract_member "$OLD" "$ko" "$oo" "$a"
+    extract_member "$NEW" "$kn" "$on" "$b"
+    if ! is_text "$a" || ! is_text "$b"; then
+        echo "  binary files differ"
+        rm -f -- "$a" "$b"
+        return 0
+    fi
+    # diff keeps the widest context it is given, so -u would beat -U 0.
+    local style=-u o
+    for o in ${TB_PASS[@]+"${TB_PASS[@]}"}; do
+        [[ $o == -U* || $o == --unified* ]] && style=""
+    done
+    local -a dargs=(${style:+"$style"} --label "$OLD/$name" --label "$NEW/$name" ${TB_PASS[@]+"${TB_PASS[@]}"})
+    tb_show diff "${dargs[@]}" old new
+    diff "${dargs[@]}" -- "$a" "$b"
+    rm -f -- "$a" "$b"
+    return 0
+}
+
+# True when a file has no NUL byte in its first 8 KB.
+is_text() {
+    local n
+    n=$(head -c 8192 -- "$1" | tr -d -c '\000' | wc -c)
+    (( n == 0 ))
+}
+
+CONTENT=0
+ONLY=() EXCLUDES=() ARGS=()
+tb_expand "x" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -c|--content) CONTENT=1 ;;
+        --only)       tb_optarg "$@"; ONLY+=("$2"); shift ;;
+        -x|--exclude) tb_optarg "$@"; EXCLUDES+=("$2"); shift ;;
+        --)           shift; TB_PASS=("$@"); break ;;
+        -*)           tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)            ARGS+=("$1") ;;
+    esac
+    shift
+done
+main

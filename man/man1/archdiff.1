@@ -1,0 +1,245 @@
+.TH "ARCHDIFF" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+archdiff \- list what changed between two archives
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+archdiff [options] old new [-- diff options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBarchdiff\fR compares the files inside two archives without unpacking them to disk. It prints one line for each file that was added, removed or changed, then a count:
+.PP
+.RS 4
+.nf
++ templates/hpa.yaml         216B
+- templates/NOTES.txt         10B
+~ Chart.yaml                  25B -> 25B
+~ templates/service.yaml     261B -> 270B
+~ values.yaml                 73B -> 73B
+1 added, 1 removed, 3 changed, 1 the same
+.fi
+.RE
+.PP
+\fB+\fR is a file only in the new archive, \fB\-\fR a file only in the old one, and \fB~\fR a file in both whose content differs, with its size in each. Files that are the same are only counted.
+.PP
+The two archives can be in different formats. A \fBtgz\fR against a \fBtar.zst\fR, or a \fBzip\fR against a \fB7z\fR, works the same as two of a kind, since \fBarchdiff\fR compares the files and not the bytes of the archive.
+.PP
+It reads, and writes nothing. The old archive goes first, like \fBdiff\fR.
+.SH OPTIONS
+.TP
+\fB\-c\fR, \fB\-\-content\fR
+Print a unified diff under each changed text file. Binary files get \fBbinary files differ\fR.
+.TP
+\fB\-\-only PAT\fR
+Compare only the files that match. Can repeat.
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave out the files that match. Can repeat.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only the count line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print each step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print the help.
+.PP
+A pattern matches a file when it matches the whole path, the file name, or any folder in the path. So \fB\-x templates\fR leaves out everything under any \fBtemplates/\fR folder, and \fB\-\-only '*.yaml'\fR keeps every YAML file at any depth. Quote each pattern so the shell does not expand it first. \fB\-\-only\fR runs first, then \fB\-x\fR removes from what is left.
+.SH HOW IT COMPARES
+.PP
+Two files are the same when their sizes and their sha256 hashes match. Names are compared as paths inside the archive, with a leading \fB./\fR removed.
+.IP \(bu 2
+\fBtar formats.\fR \fBarchdiff\fR streams each archive once through the decompressor and GNU tar. tar hands every file to \fBsha256sum\fR as it goes past, with \fB\-\-to\-command\fR, so nothing lands on disk and a large archive costs only the time to read it.
+.IP \(bu 2
+\fBzip and 7z.\fR These have an index, so \fBarchdiff\fR reads the names and sizes from it first. It hashes only the files whose sizes match on both sides, one at a time, since a different size already means a change.
+.IP \(bu 2
+\fBA single compressed file\fR, such as \fBnotes.txt.gz\fR, counts as one file named without the extension. Two of them compare as one file each.
+.PP
+Folders, symlinks and empty folders are not compared. Permissions, owners and times are not compared either, only content.
+.SS Top folder
+.PP
+Release archives often put everything under a folder named after the version, such as \fBapp\-1.4/\fR and \fBapp\-1.5/\fR. When each archive has exactly one top folder and the names differ, \fBarchdiff\fR strips them, so \fBapp\-1.4/values.yaml\fR lines up with \fBapp\-1.5/values.yaml\fR. \fB\-v\fR says when it does this.
+.SS Format detection
+.PP
+The name decides first, such as \fB.tar.zst\fR, \fB.tgz\fR, \fB.zip\fR, \fB.jar\fR, \fB.whl\fR, \fB.7z\fR or \fB.iso\fR. When the name says nothing, \fBarchdiff\fR reads the first bytes, so a renamed \fBdownload.bin\fR that is really a \fBtgz\fR still works. A compressed stream counts as a tar when the decompressed bytes carry the tar header.
+.SS Content diffs
+.PP
+With \fB\-c\fR, each changed file is pulled out of both archives into a private temporary folder, compared with \fBdiff \-u\fR, and deleted straight away. The temporary folder is gone when \fBarchdiff\fR exits, on Ctrl+C too. The diff headers name the archive and the path, as in \fB\-\-\- app\-1.4.tgz/values.yaml\fR, so the output reads well in a review or a ticket.
+.PP
+A file is text when its first 8KB hold no NUL byte.
+.SH PASS\-THROUGH
+.PP
+With \fB\-c\fR, options after \fB\-\-\fR go to \fBdiff\fR. \fB\-U 0\fR shows only the changed lines, \fB\-w\fR ignores whitespace, and \fB\-\-color=always\fR colours the output for a pager.
+.PP
+.RS 4
+.nf
+archdiff -c app-1.4.tgz app-1.5.tgz -- -U 0
+archdiff -c old.zip new.zip -- -w
+.fi
+.RE
+.PP
+Without \fB\-c\fR there is no diff to pass them to, so \fB\-\-\fR exits 2.
+.SH NEEDS
+.PP
+\fBsha256sum\fR, and the tools for the formats you compare. \fBdiff\fR for \fB\-c\fR.
+.TP
+tar formats
+Tool: tar. apt: tar. dnf: tar. pacman: tar. zypper: tar. apk: tar
+.TP
+\fB.gz\fR
+Tool: gzip. apt: gzip. dnf: gzip. pacman: gzip. zypper: gzip. apk: gzip
+.TP
+\fB.bz2\fR
+Tool: bzip2. apt: bzip2. dnf: bzip2. pacman: bzip2. zypper: bzip2. apk: bzip2
+.TP
+\fB.xz\fR, \fB.lzma\fR
+Tool: xz. apt: xz\-utils. dnf: xz. pacman: xz. zypper: xz. apk: xz
+.TP
+\fB.zst\fR
+Tool: zstd. apt: zstd. dnf: zstd. pacman: zstd. zypper: zstd. apk: zstd
+.TP
+\fB.lz4\fR
+Tool: lz4. apt: lz4. dnf: lz4. pacman: lz4. zypper: lz4. apk: lz4
+.TP
+zip
+Tool: unzip, or 7z. apt: unzip. dnf: unzip. pacman: unzip. zypper: unzip. apk: unzip
+.TP
+7z, rar, iso
+Tool: 7z. apt: 7zip. dnf: 7zip. pacman: 7zip. zypper: 7zip. apk: 7zip
+.TP
+\fB\-c\fR
+Tool: diff. apt: diffutils. dnf: diffutils. pacman: diffutils. zypper: diffutils. apk: diffutils
+.PP
+\fBarchdiff\fR needs GNU tar for \fB\-\-to\-command\fR. On Alpine, install the \fBtar\fR package, since BusyBox tar lacks it. On Debian and Ubuntu releases before \fB7zip\fR was packaged, \fBp7zip\-full\fR gives the same \fB7z\fR.
+.SH EXAMPLES
+.SS Two releases of a Helm chart
+.PP
+.RS 4
+.nf
+$ archdiff app-1.4.tgz app-1.5.tgz
++ templates/hpa.yaml         216B
+- templates/NOTES.txt         10B
+~ Chart.yaml                  25B -> 25B
+~ templates/service.yaml     261B -> 270B
+~ values.yaml                 73B -> 73B
+1 added, 1 removed, 3 changed, 1 the same
+.fi
+.RE
+.SS What changed in one file
+.PP
+.RS 4
+.nf
+$ archdiff -c --only values.yaml app-1.4.tgz app-1.5.tgz
+~ values.yaml      73B -> 73B
+--- app-1.4.tgz/values.yaml
++++ app-1.5.tgz/values.yaml
+@@ -1,6 +1,6 @@
+-replicas: 2
++replicas: 3
+ image:
+-  tag: "1.4.0"
++  tag: "1.5.0"
+ resources:
+   limits:
+-    memory: 256Mi
++    memory: 512Mi
+0 added, 0 removed, 1 changed, 0 the same
+.fi
+.RE
+.SS Only the changed lines
+.PP
+.RS 4
+.nf
+$ archdiff -c --only values.yaml app-1.4.tgz app-1.5.tgz -- -U 0
+~ values.yaml      73B -> 73B
+--- app-1.4.tgz/values.yaml
++++ app-1.5.tgz/values.yaml
+@@ -1 +1 @@
+-replicas: 2
++replicas: 3
+@@ -3 +3 @@
+-  tag: "1.4.0"
++  tag: "1.5.0"
+@@ -6 +6 @@
+-    memory: 256Mi
++    memory: 512Mi
+0 added, 0 removed, 1 changed, 0 the same
+.fi
+.RE
+.SS A zip against a tar.zst of the same folder
+.PP
+.RS 4
+.nf
+$ archdiff site.zip site.tar.zst
+no differences, 3 files
+.fi
+.RE
+.SS Leave out the templates
+.PP
+.RS 4
+.nf
+$ archdiff -x templates app-1.4.tgz app-1.5.tgz
+~ Chart.yaml       25B -> 25B
+~ values.yaml      73B -> 73B
+0 added, 0 removed, 2 changed, 0 the same
+.fi
+.RE
+.SS In a script
+.PP
+The exit status says whether anything changed, and \fB\-q\fR keeps the output to one line:
+.PP
+.RS 4
+.nf
+$ archdiff -q app-1.4.tgz app-1.5.tgz
+1 added, 1 removed, 3 changed, 1 the same
+$ echo $?
+1
+.fi
+.RE
+.SS The commands it runs
+.PP
+.RS 4
+.nf
+$ archdiff -v --only Chart.yaml app-1.4.tgz app-1.5.tgz
+archdiff: app-1.4.tgz: tar.gz
+archdiff: app-1.5.tgz: tar.gz
++ gzip -dc < app-1.4.tgz | tar -xf - --to-command='h=$(sha256sum) && printf "%s\et%s\et%s\en" "${h%% *}" "$TAR_SIZE" "$TAR_FILENAME"'
++ gzip -dc < app-1.5.tgz | tar -xf - --to-command='h=$(sha256sum) && printf "%s\et%s\et%s\en" "${h%% *}" "$TAR_SIZE" "$TAR_FILENAME"'
+archdiff: comparing app-1.4/ with app-1.5/
+~ Chart.yaml      25B -> 25B
+0 added, 0 removed, 1 changed, 0 the same
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fB"not an archive archdiff can read"\fR Neither the name nor the first bytes match a format \fBarchdiff\fR knows. Check the file with \fBfile NAME\fR. A download that stopped halfway is often an HTML error page.
+.PP
+\fB"could not read the archive"\fR The tool failed part way, and its own message is printed above. The archive is damaged or cut short. \fBunpack \-t\fR tests it on its own.
+.PP
+\fBEvery file shows as removed and added.\fR The two archives have different top folders, and one of them has more than one, so \fBarchdiff\fR cannot line them up. Compare with \fB\-\-only\fR on the part you care about, or repack one side.
+.PP
+\fBA file shows as changed but the diff is empty.\fR Only the line endings or trailing whitespace changed. Run with \fB\-c \-\- \-w\fR or \fB\-\-strip\-trailing\-cr\fR to confirm.
+.PP
+\fBIt is slow on a large zip.\fR Files with the same size on both sides get hashed, which means reading them. Narrow the list with \fB\-\-only\fR.
+.SH EXIT STATUS
+.PP
+\fBarchdiff\fR follows \fBdiff\fR.
+.TP
+0
+The archives hold the same files, after \fB\-\-only\fR and \fB\-x\fR.
+.TP
+1
+At least one file was added, removed or changed.
+.TP
+2
+Bad usage, or an archive is missing, unreadable, damaged or in no known format.
+.TP
+3
+A tool for one of the formats is missing. The message has the install line.
+.SH SEE ALSO
+.PP
+\fBsquash\fR, \fBunpack\fR, \fBarchmount\fR, \fBdiff(1)\fR, \fBtar(1)\fR
