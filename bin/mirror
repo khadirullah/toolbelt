@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# mirror: make a folder match another, showing the changes first.
+set -uo pipefail
+TB_CMD=mirror
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: mirror [options] source dest [-- rsync options]
+
+Make a folder match another, showing the changes first.
+
+Options:
+  -n, --dry-run       show the changes and stop
+  --no-delete         copy and update only, never remove from dest
+  -c, --checksum      compare file contents, not size and time
+  -x, --exclude PAT   leave out paths that match, can repeat
+  --backup-in-dest    keep replaced files in dest/.mirror-backup/DATE
+  -y, --yes           go ahead without asking
+  -q, --quiet         only the result lines
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+The trailing slash:
+  mirror photos/ /mnt/usb/photos   what is inside photos/ goes into
+                                   /mnt/usb/photos/
+  mirror photos /mnt/usb           the folder photos itself goes in,
+                                   as /mnt/usb/photos/
+
+Pass-through:
+  Options after -- go to rsync, in the dry run and the real run.
+
+Examples:
+  mirror photos/ /mnt/usb/photos
+  mirror -n ~/notes/ backup/notes
+  mirror --no-delete -x '*.tmp' src/ nas:/srv/src
+  mirror photos/ /mnt/usb/photos -- --bwlimit=20M
+
+Needs: rsync, on both ends when a side is on another host. See man mirror.
+Exit: 0 ok, 1 failed, 2 bad usage, 3 missing tool, 4 refused, 5 answered no.
+EOF
+}
+
+# True for host:path and rsync:// paths, the way rsync reads them.
+is_remote() {
+    [[ $1 == rsync://* ]] && return 0
+    [[ $1 =~ ^[^/]*: ]]
+}
+
+# The deepest part of a path that exists, so a new dest can be measured.
+existing_part() {
+    local p=$1
+    while [[ ! -e $p ]]; do
+        p=$(dirname -- "$p")
+    done
+    echo "$p"
+}
+
+# The mount point that holds a path.
+mount_of() {
+    df -P -- "$1" 2>/dev/null | awk 'NR == 2 { sub(/^([^ ]+ +){5}/, ""); print }'
+}
+
+# True when path $1 is $2 or inside it.
+is_within() {
+    [[ $1 == "$2" || $1 == "$2"/* || $2 == / ]]
+}
+
+# Pick where replaced and deleted files go, and fill BACKUP_DIR, BACKUP_SHOW,
+# TRASH_ROOT and PROTECT. Nothing is made yet, so a dry run leaves no trace.
+pick_backup() {
+    local base home_trash mnt
+    STAMP=$(date +%Y%m%d-%H%M%S)
+    TRASH_ROOT=""
+    PROTECT=()
+    if (( in_dest )) || is_remote "$dest"; then
+        backup_in_dest
+        return 0
+    fi
+    base=$(existing_part "$dest_real")
+    home_trash=${XDG_DATA_HOME:-$HOME/.local/share}/Trash
+    if [[ $(stat -c %d -- "$base" 2>/dev/null) == $(stat -c %d -- "$(existing_part "$home_trash")" 2>/dev/null) ]]; then
+        TRASH_ROOT=$home_trash
+    else
+        mnt=$(mount_of "$base")
+        [[ -n $mnt ]] && TRASH_ROOT=${mnt%/}/.Trash-$UID
+    fi
+    if [[ -z $TRASH_ROOT ]]; then
+        backup_in_dest
+        return 0
+    fi
+    BACKUP_DIR=$(tb_free_name "$TRASH_ROOT/files/mirror-$STAMP")
+    BACKUP_SHOW=$BACKUP_DIR
+    # The trash may sit inside the dest, such as /mnt/usb/.Trash-1000 when
+    # the dest is /mnt/usb. --delete must not empty it.
+    if is_within "$TRASH_ROOT" "$dest_real"; then
+        PROTECT=(--filter="P /${TRASH_ROOT#"$dest_real"/}/")
+    fi
+}
+
+# Keep old files in dest/.mirror-backup/DATE. rsync reads a relative
+# --backup-dir from the dest folder, which also works on another host.
+backup_in_dest() {
+    TRASH_ROOT=""
+    BACKUP_DIR=.mirror-backup/$STAMP
+    BACKUP_SHOW=${dest%/}/.mirror-backup/$STAMP
+}
+
+# Make the trash folders, or fall back to the dest when that fails.
+make_backup() {
+    [[ -n $TRASH_ROOT ]] || return 0
+    if (umask 077 && mkdir -p -- "$TRASH_ROOT/files" "$TRASH_ROOT/info") 2>/dev/null && [[ -w $TRASH_ROOT/files ]]; then
+        return 0
+    fi
+    tb_warn "could not use the trash in $TRASH_ROOT, keeping old files in ${dest%/}/.mirror-backup/$STAMP"
+    backup_in_dest
+}
+
+# The safety checks that need no rsync run.
+check_paths() {
+    local name dest_name src_real target
+    name=$(basename -- "${src%/}")
+    dest_name=$(basename -- "${dest%/}")
+    if [[ $src == */ ]]; then
+        tb_info "mirror: the contents of $src into ${dest%/}/"
+    else
+        tb_info "mirror: the folder $name itself into ${dest%/}/, as ${dest%/}/$name/"
+        if [[ $name == "$dest_name" ]]; then
+            tb_warn "${dest%/} already ends in $name, so this makes ${dest%/}/$name/. Write $src/ to copy what is inside it instead"
+        fi
+    fi
+    is_remote "$src" && return 0
+    [[ -e $src ]] || tb_die 1 "$src: no such file or folder"
+    is_remote "$dest" && return 0
+    src_real=$(readlink -f -- "${src%/}")
+    [[ -z $src_real ]] && src_real=/
+    target=$dest_real
+    [[ $src != */ ]] && target=${dest_real%/}/$name
+    if [[ $src_real == "$target" ]]; then
+        tb_die "$E_SAFE" "refused, $src and $dest are the same folder"
+    fi
+    if is_within "$target" "$src_real"; then
+        tb_die "$E_SAFE" "refused, $dest is inside $src, so every run would copy the copy again"
+    fi
+    if is_within "$src_real" "$target"; then
+        tb_die "$E_SAFE" "refused, $src is inside $dest, so the run would delete or overwrite its own source"
+    fi
+}
+
+# True when the source holds no files at all.
+source_empty() {
+    local n
+    if is_remote "$src"; then
+        n=$(rsync --list-only ${TB_PASS[@]+"${TB_PASS[@]}"} -- "${src%/}/" 2>/dev/null | wc -l)
+        (( n <= 1 ))
+    elif [[ -d $src ]]; then
+        [[ -z $(find "$src" -mindepth 1 -print -quit 2>/dev/null) ]]
+    else
+        return 1
+    fi
+}
+
+# Print one kind of change: its first 20 paths, then how many more.
+show_kind() {
+    local kind=$1 file=$2 n=0 size path
+    [[ -s $file ]] || return 0
+    while IFS=$'\t' read -r size path; do
+        if (( n < 20 )); then
+            printf '  %-8s %7s  %s\n' "$kind" "$(tb_human "$size")" "$path"
+        fi
+        ((n++))
+    done < "$file"
+    (( n > 20 )) && printf '  %-8s %7s  %s\n' "..." "" "$(( n - 20 )) more $kind"
+    return 0
+}
+
+# Run the dry run and fill N_NEW, N_CHANGED, N_DEL and their byte counts.
+dry_run() {
+    local line i rest len name size
+    local args=(-a --dry-run "--out-format=%i %l %n")
+    args+=("${common[@]}")
+    tb_show rsync "${args[@]}" -- "$src" "$dest"
+    tb_line "mirror: comparing $src with $dest"
+    rsync "${args[@]}" -- "$src" "$dest" > "$work/dry"
+    local rc=$?
+    tb_line_end
+    (( rc == 0 || rc == 24 )) || tb_die 1 "rsync could not compare $src with $dest, it exited with $rc"
+    N_NEW=0 N_CHANGED=0 N_DEL=0 B_NEW=0 B_CHANGED=0 B_DEL=0
+    : > "$work/new"; : > "$work/changed"; : > "$work/delete"
+    while IFS= read -r line; do
+        [[ ${#line} -gt 12 ]] || continue
+        i=${line:0:11}
+        rest=${line:12}
+        rest=${rest#"${rest%%[! ]*}"}
+        len=${rest%% *}
+        name=${rest#* }
+        [[ $len =~ ^[0-9]+$ ]] || continue
+        if [[ $i == '*deleting'* ]]; then
+            [[ $name == */ ]] && continue
+            size=0
+            if ! is_remote "$dest"; then
+                size=$(stat -c %s -- "${dest%/}/$name" 2>/dev/null || echo 0)
+            fi
+            ((N_DEL++))
+            B_DEL=$(( B_DEL + size ))
+            printf '%s\t%s\n' "$size" "$name" >> "$work/delete"
+        elif [[ ${i:1:1} == d ]]; then
+            continue
+        elif [[ ${i:2:9} == +++++++++ ]]; then
+            ((N_NEW++))
+            B_NEW=$(( B_NEW + len ))
+            printf '%s\t%s\n' "$len" "$name" >> "$work/new"
+        else
+            ((N_CHANGED++))
+            [[ ${i:0:1} == . ]] && len=0
+            B_CHANGED=$(( B_CHANGED + len ))
+            printf '%s\t%s\n' "$len" "$name" >> "$work/changed"
+        fi
+    done < "$work/dry"
+}
+
+# Mark the backup folder as a trashed item, so a file manager lists it.
+write_trashinfo() {
+    local base info
+    [[ -n $TRASH_ROOT ]] || return 0
+    base=$(basename -- "$BACKUP_DIR")
+    info=$TRASH_ROOT/info/$base.trashinfo
+    printf '[Trash Info]\nPath=%s\nDeletionDate=%s\n' "$(tb_urlencode "${dest_real%/}/$base")" \
+        "$(date +%Y-%m-%dT%H:%M:%S)" > "$info" 2>/dev/null
+}
+
+main() {
+    local start rc kept=0 args
+    (( ${#names[@]} == 2 )) || tb_usage_error "name a source and a dest"
+    src=${names[0]}
+    dest=${names[1]}
+    tb_need rsync
+    dest_real=""
+    if ! is_remote "$dest"; then
+        dest_real=$(readlink -m -- "$dest")
+    fi
+    check_paths
+    tb_tmpdir work || tb_die 1 "could not make a temp folder"
+    common=()
+    (( no_delete )) || common+=(--delete)
+    (( checksum )) && common+=(--checksum)
+    local pat
+    for pat in ${excludes[@]+"${excludes[@]}"}; do
+        common+=(--exclude="$pat")
+    done
+    # Old runs' backups in the dest are never deleted by a new run.
+    common+=(--filter="P /.mirror-backup/")
+    pick_backup
+    common+=("${PROTECT[@]}")
+    common+=(${TB_PASS[@]+"${TB_PASS[@]}"})
+
+    dry_run
+    if (( N_DEL > 0 )) && source_empty; then
+        tb_die "$E_SAFE" "refused, $src is empty, so this would delete all $(tb_plural "$N_DEL" file) in $dest. Check the path, or use --no-delete"
+    fi
+    echo "$N_NEW new ($(tb_human "$B_NEW")), $N_CHANGED changed ($(tb_human "$B_CHANGED")), $N_DEL deleted ($(tb_human "$B_DEL"))"
+    show_kind new "$work/new"
+    show_kind changed "$work/changed"
+    show_kind delete "$work/delete"
+    if (( N_NEW + N_CHANGED + N_DEL == 0 )); then
+        tb_info "Nothing to change, $dest already matches $src."
+        return 0
+    fi
+    (( dry )) && return 0
+
+    make_backup
+    local what="Deleted and replaced files" where=$BACKUP_SHOW
+    (( no_delete )) && what="Replaced files"
+    [[ -n $TRASH_ROOT ]] && where="the trash in $TRASH_ROOT"
+    tb_confirm "Go ahead? $what go to $where."
+
+    args=(-a --backup "--backup-dir=$BACKUP_DIR" "${common[@]}")
+    start=$(tb_now_ms)
+    tb_show rsync "${args[@]}" -- "$src" "$dest"
+    if tb_progress; then
+        rsync --info=progress2 "${args[@]}" -- "$src" "$dest" >&2
+    else
+        rsync "${args[@]}" -- "$src" "$dest" >/dev/null
+    fi
+    rc=$?
+    if (( rc == 24 )); then
+        tb_warn "some files vanished from $src while it ran, run it again to catch up"
+    elif (( rc != 0 )); then
+        tb_die 1 "rsync failed with exit code $rc, see its message above. Files it replaced are in $BACKUP_SHOW"
+    fi
+    if is_remote "$dest"; then
+        echo "done in $(tb_elapsed $(( $(tb_now_ms) - start ))), replaced and deleted files are in $BACKUP_SHOW"
+        return 0
+    fi
+    local bdir=$BACKUP_DIR
+    [[ $bdir == /* ]] || bdir=${dest%/}/$bdir
+    if [[ -d $bdir ]]; then
+        kept=$(find "$bdir" -type f -o -type l | wc -l)
+    fi
+    if (( kept == 0 )); then
+        [[ -d $bdir ]] && rm -rf -- "$bdir"
+        [[ $bdir == */.mirror-backup/* ]] && rmdir -- "$(dirname -- "$bdir")" 2>/dev/null
+        echo "done in $(tb_elapsed $(( $(tb_now_ms) - start ))), nothing was replaced or deleted"
+    else
+        write_trashinfo
+        echo "done in $(tb_elapsed $(( $(tb_now_ms) - start ))), $(tb_plural "$kept" "old file") kept in $BACKUP_SHOW"
+    fi
+}
+
+names=()
+excludes=()
+dry=0
+no_delete=0
+checksum=0
+in_dest=0
+tb_expand "x" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -n|--dry-run)     dry=1 ;;
+        --no-delete)      no_delete=1 ;;
+        -c|--checksum)    checksum=1 ;;
+        -x|--exclude)     tb_optarg "$@"; excludes+=("$2"); shift ;;
+        --backup-in-dest) in_dest=1 ;;
+        --)               shift; TB_PASS=("$@"); break ;;
+        -*)               tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)                names+=("$1") ;;
+    esac
+    shift
+done
+
+main
+exit $?

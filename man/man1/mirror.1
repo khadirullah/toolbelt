@@ -1,0 +1,285 @@
+.TH "MIRROR" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+mirror \- make a folder match another, showing the changes first
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+mirror [options] source dest [-- rsync options]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBmirror\fR makes \fBdest\fR an exact copy of \fBsource\fR with rsync. Files that are new in the source get copied, files that changed get updated, and files that exist only in the dest get deleted. That last part is what makes rsync dangerous. One wrong path and a backup drive is empty.
+.PP
+So \fBmirror\fR never runs rsync blind. Every run goes like this:
+.IP \(bu 2
+It says in words what it is about to do, such as \fBthe contents of photos/ into /mnt/usb/photos/\fR.
+.IP \(bu 2
+It runs rsync as a dry run, which changes nothing, and counts what would happen.
+.IP \(bu 2
+It prints a summary line with the number of new, changed and deleted files and their sizes, then the first 20 paths of each kind.
+.IP \(bu 2
+It asks \fBGo ahead?\fR. Only a \fBy\fR or \fByes\fR goes on.
+.IP \(bu 2
+It runs rsync for real. Every file the run deletes or replaces in the dest goes to a dated backup folder first, so a wrong run can be undone.
+.PP
+.RS 4
+.nf
+mirror: the contents of photos/ into usb/photos/
+2 new (7.9KB), 1 changed (14B), 1 deleted (8.5KB)
+  new        4.1KB  2026-09/IMG_4410.jpg
+  new        3.8KB  2026-09/IMG_4411.jpg
+  changed      14B  albums.txt
+  delete     8.5KB  old/export-2025.zip
+Go ahead? Deleted and replaced files go to the trash in /home/me/.local/share/Trash. [y/N] y
+done in 0.4s, 2 old files kept in /home/me/.local/share/Trash/files/mirror-20260929-171331
+.fi
+.RE
+.PP
+\fBmirror\fR copies with \fBrsync \-a\fR. That keeps the times, the permissions and the symlinks. It keeps the owner too when you run it as root.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-dry\-run\fR
+Show the summary and the paths, then stop. Nothing changes.
+.TP
+\fB\-\-no\-delete\fR
+Copy and update only. Never remove anything from the dest.
+.TP
+\fB\-c\fR, \fB\-\-checksum\fR
+Compare the content of each file, not its size and time. Slower, since it reads every file on both sides.
+.TP
+\fB\-x\fR, \fB\-\-exclude PAT\fR
+Leave out paths that match, in rsync's pattern rules. Can repeat.
+.TP
+\fB\-\-backup\-in\-dest\fR
+Keep deleted and replaced files in \fBdest/.mirror\-backup/DATE\fR instead of the trash.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Go ahead without asking. The safety checks below still apply.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Show only the summary, the paths and the result line.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show both rsync commands before they run.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.PP
+A file you leave out with \fB\-x\fR is also safe from deletion in the dest, because rsync does not delete excluded files. \fB\-x '*.tmp'\fR leaves every \fB.tmp\fR file in the dest where it is.
+.SH THE TRAILING SLASH
+.PP
+rsync reads a slash at the end of the source as "what is inside". It is the rule people trip on most.
+.TP
+\fBmirror photos/ /mnt/usb/photos\fR
+What is inside \fBphotos/\fR goes into \fB/mnt/usb/photos/\fR.
+.TP
+\fBmirror photos /mnt/usb\fR
+The folder \fBphotos\fR itself goes into \fB/mnt/usb\fR, as \fB/mnt/usb/photos/\fR.
+.TP
+\fBmirror photos /mnt/usb/photos\fR
+The folder \fBphotos\fR goes inside \fB/mnt/usb/photos\fR, as \fB/mnt/usb/photos/photos/\fR. Usually a mistake.
+.PP
+The first line of every run says which of these it is. When the source has no trailing slash and the dest already ends in the source's name, as in the last row, \fBmirror\fR warns:
+.PP
+.RS 4
+.nf
+mirror: usb/photos already ends in photos, so this makes usb/photos/photos/. Write photos/ to copy what is inside it instead
+.fi
+.RE
+.PP
+A slash at the end of the dest makes no difference.
+.SH WHERE OLD FILES GO
+.PP
+rsync's \fB\-\-backup\fR and \fB\-\-backup\-dir\fR options move each file it would delete or overwrite into a backup folder, under the same relative path. \fBmirror\fR always sets them. The folder is named after the time of the run, such as \fBmirror\-20260929\-171331\fR, and \fBmirror\fR picks it like this:
+.IP \(bu 2
+When the dest is on the same disk as your home folder, the backup folder goes in your trash, \fB~/.local/share/Trash/files/\fR. \fBmirror\fR writes a \fB.trashinfo\fR file next to it, so a file manager lists it in the trash and you empty it the usual way.
+.IP \(bu 2
+When the dest is on another disk, such as a USB drive mounted at \fB/mnt/usb\fR, it goes in that disk's own trash, \fB/mnt/usb/.Trash\-1000/files/\fR, where 1000 is your user id. That is the same place a file manager puts files you delete from that disk. It keeps the move a rename on the same disk, so it costs no copying and no space on your home disk.
+.IP \(bu 2
+With \fB\-\-backup\-in\-dest\fR, or when the dest is on another host, it goes in \fBdest/.mirror\-backup/DATE\fR.
+.IP \(bu 2
+When the disk's trash cannot be made, for example on a disk where you may only write inside the dest, \fBmirror\fR says so and uses \fBdest/.mirror\-backup/DATE\fR.
+.PP
+\fBmirror\fR never deletes the \fB.mirror\-backup\fR folder, or a trash folder that sits inside the dest, on a later run. When a run replaced and deleted nothing, \fBmirror\fR removes the empty backup folder and says so.
+.PP
+To undo a run, copy the files back from the backup folder:
+.PP
+.RS 4
+.nf
+$ rsync -a ~/.local/share/Trash/files/mirror-20260929-171331/ /mnt/usb/photos/
+.fi
+.RE
+.SH SAFETY CHECKS
+.PP
+\fBmirror\fR refuses with exit 4, before it changes anything, when:
+.IP \(bu 2
+The source is empty and the run would delete files in the dest. This is the classic accident. A network share or USB drive was not mounted, its mount point is an empty folder, and a mirror from it would wipe the backup. \fB\-y\fR does not skip this check. When you really mean to empty the dest, use \fB\-\-no\-delete\fR to see it, then delete by hand.
+.IP \(bu 2
+The source and the dest are the same folder.
+.IP \(bu 2
+The dest is inside the source, such as \fBmirror ~/ ~/backup\fR. Each run would copy the last copy again.
+.IP \(bu 2
+The source is inside the dest, such as \fBmirror /mnt/usb/photos/ /mnt/usb\fR. The run would delete the source.
+.IP \(bu 2
+There is no terminal to ask in and no \fB\-y\fR. A cron job needs \fB\-y\fR.
+.PP
+The last three checks compare real paths, after symlinks, so \fBmirror photos/ ./photos\fR is caught too. They only run when both sides are on this machine.
+.SH OTHER HOSTS
+.PP
+A path such as \fBnas:/srv/photos\fR or \fBme@nas:backups/\fR is on another host, the way rsync reads it. rsync connects through ssh, so the host needs rsync installed and you need ssh access to it. Everything works the same, with two differences:
+.IP \(bu 2
+Old files go to \fBdest/.mirror\-backup/DATE\fR on that host.
+.IP \(bu 2
+The dry run shows 0B for deleted files there, since \fBmirror\fR cannot measure them from here.
+.PP
+A local path with a colon in the name, such as \fBa:b\fR, reads as a host too. Write \fB./a:b\fR for a local one.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to rsync, in the dry run and in the real run. Some useful ones:
+.PP
+.RS 4
+.nf
+$ mirror photos/ /mnt/usb/photos -- --bwlimit=20M
+$ mirror photos/ nas:/srv/photos -- -e 'ssh -p 2222'
+$ mirror src/ /mnt/usb/src -- --exclude-from=.gitignore
+$ mirror data/ /mnt/usb/data -- -H
+.fi
+.RE
+.PP
+\fB\-\-bwlimit\fR caps the speed, \fB\-e\fR sets the ssh command, and \fB\-H\fR keeps hard links. Do not pass \fB\-\-delete\-excluded\fR unless you mean it. It lets rsync delete the files \fB\-x\fR protects.
+.SH NEEDS
+.PP
+\fBrsync\fR, and on the other host too when a side is remote, plus \fBssh\fR for that. The package is \fBrsync\fR on Debian, Ubuntu, Fedora, Arch, openSUSE and Alpine. \fBdf\fR, \fBfind\fR and \fBstat\fR come with coreutils and findutils.
+.SH EXAMPLES
+.SS See what would change
+.PP
+.RS 4
+.nf
+$ mirror -n photos/ usb/photos
+mirror: the contents of photos/ into usb/photos/
+2 new (7.9KB), 1 changed (14B), 1 deleted (8.5KB)
+  new        4.1KB  2026-09/IMG_4410.jpg
+  new        3.8KB  2026-09/IMG_4411.jpg
+  changed      14B  albums.txt
+  delete     8.5KB  old/export-2025.zip
+.fi
+.RE
+.SS Make the copy
+.PP
+.RS 4
+.nf
+$ mirror photos/ usb/photos
+mirror: the contents of photos/ into usb/photos/
+2 new (7.9KB), 1 changed (14B), 1 deleted (8.5KB)
+  new        4.1KB  2026-09/IMG_4410.jpg
+  new        3.8KB  2026-09/IMG_4411.jpg
+  changed      14B  albums.txt
+  delete     8.5KB  old/export-2025.zip
+Go ahead? Deleted and replaced files go to the trash in /home/me/.local/share/Trash. [y/N] y
+done in 0.4s, 2 old files kept in /home/me/.local/share/Trash/files/mirror-20260929-171331
+.fi
+.RE
+.SS Run it again
+.PP
+.RS 4
+.nf
+$ mirror photos/ usb/photos
+mirror: the contents of photos/ into usb/photos/
+0 new (0B), 0 changed (0B), 0 deleted (0B)
+Nothing to change, usb/photos already matches photos/.
+.fi
+.RE
+.SS The folder itself, by mistake
+.PP
+.RS 4
+.nf
+$ mirror -n photos usb/photos
+mirror: the folder photos itself into usb/photos/, as usb/photos/photos/
+mirror: usb/photos already ends in photos, so this makes usb/photos/photos/. Write photos/ to copy what is inside it instead
+3 new (7.9KB), 0 changed (0B), 0 deleted (0B)
+  new          14B  photos/albums.txt
+  new        4.1KB  photos/2026-09/IMG_4410.jpg
+  new        3.8KB  photos/2026-09/IMG_4411.jpg
+.fi
+.RE
+.SS The drive was not mounted
+.PP
+.RS 4
+.nf
+$ mirror /mnt/nas/drop/ backup/
+mirror: the contents of /mnt/nas/drop/ into backup/
+mirror: refused, /mnt/nas/drop/ is empty, so this would delete all 1204 files in backup/. Check the path, or use --no-delete
+.fi
+.RE
+.SS A backup inside the source
+.PP
+.RS 4
+.nf
+$ mirror photos/ photos/backup
+mirror: the contents of photos/ into photos/backup/
+mirror: refused, photos/backup is inside photos/, so every run would copy the copy again
+.fi
+.RE
+.SS See the rsync commands
+.PP
+.RS 4
+.nf
+$ mirror -v -y photos/ usb/photos
+mirror: the contents of photos/ into usb/photos/
++ rsync -a --dry-run '--out-format=%i %l %n' --delete '--filter=P /.mirror-backup/' -- photos/ usb/photos
+1 new (4B), 0 changed (0B), 0 deleted (0B)
+  new           4B  notes.md
++ rsync -a --backup --backup-dir=/home/me/.local/share/Trash/files/mirror-20260929-171332 --delete '--filter=P /.mirror-backup/' -- photos/ usb/photos
+done in 0.1s, nothing was replaced or deleted
+.fi
+.RE
+.SS Add only, keep old files in the dest
+.PP
+.RS 4
+.nf
+$ mirror -y --no-delete --backup-in-dest photos/ usb/photos
+mirror: the contents of photos/ into usb/photos/
+1 new (2B), 0 changed (0B), 0 deleted (0B)
+  new           2B  n.txt
+done in 0.1s, nothing was replaced or deleted
+.fi
+.RE
+.SH TROUBLESHOOTING
+.PP
+\fBmirror: refused, SRC is empty, so this would delete all N files in DEST\fR : Check that the source is mounted, with \fBls SRC\fR and \fBfindmnt SRC\fR. When you want to add files and keep the rest, use \fB\-\-no\-delete\fR.
+.PP
+\fBmirror: not asking without a terminal, pass \-\-yes to go ahead\fR : \fBmirror\fR runs from a script or cron. Add \fB\-y\fR once a dry run with \fB\-n\fR shows what you expect.
+.PP
+\fBrsync: connection unexpectedly closed\fR or \fBrsync: command not found\fR on another host : rsync must be installed on both machines. Install it on the other host, and check \fBssh host\fR works on its own.
+.PP
+\fBrsync: [generator] failed to set times\fR or \fBOperation not permitted\fR on a USB drive : FAT32 and exFAT drives cannot store Linux owners and permissions. Pass \fB\-\- \-\-no\-perms \-\-no\-owner \-\-no\-group \-\-modify\-window=2\fR, and every run after the first will stop showing every file as changed.
+.PP
+Every file shows as changed on each run : The times differ between the two sides, often on FAT drives or network shares. Use \fB\-c\fR to compare content, or \fB\-\-modify\-window=2\fR after \fB\-\-\fR as above.
+.PP
+The trash on the USB drive fills up : Empty it from the file manager, or delete \fB/mnt/usb/.Trash\-1000/files/mirror\-*\fR and the matching files in \fB/mnt/usb/.Trash\-1000/info/\fR.
+.SH EXIT STATUS
+.TP
+0
+It worked, including a dry run and a run with nothing to change.
+.TP
+1
+rsync failed. The message has its exit code, and rsync's own message is above it.
+.TP
+2
+Bad usage, such as a missing dest.
+.TP
+3
+rsync is missing.
+.TP
+4
+Refused. An empty source, nested folders, or no terminal and no \fB\-y\fR.
+.TP
+5
+You answered no.
+.PP
+When some source files vanish while rsync runs, rsync exits 24. \fBmirror\fR warns and still exits 0.
+.SH SEE ALSO
+.PP
+\fBbak\fR, \fBrsync(1)\fR, \fBcp(1)\fR
