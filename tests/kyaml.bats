@@ -96,6 +96,64 @@ spec:
 status:
   loadBalancer: {}
 YAML
+    cat > "$FX/job.yaml" <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  creationTimestamp: "2026-09-29T10:02:11Z"
+  generation: 1
+  labels:
+    batch.kubernetes.io/controller-uid: 5d1c0e2a-1b2c-4d3e-8f4a-9b0c1d2e3f4a
+    batch.kubernetes.io/job-name: once
+    controller-uid: 5d1c0e2a-1b2c-4d3e-8f4a-9b0c1d2e3f4a
+    job-name: once
+  name: once
+  namespace: shop
+spec:
+  backoffLimit: 6
+  selector:
+    matchLabels:
+      batch.kubernetes.io/controller-uid: 5d1c0e2a-1b2c-4d3e-8f4a-9b0c1d2e3f4a
+  template:
+    metadata:
+      labels:
+        batch.kubernetes.io/controller-uid: 5d1c0e2a-1b2c-4d3e-8f4a-9b0c1d2e3f4a
+        batch.kubernetes.io/job-name: once
+        controller-uid: 5d1c0e2a-1b2c-4d3e-8f4a-9b0c1d2e3f4a
+        job-name: once
+    spec:
+      containers:
+      - command:
+        - echo
+        - done
+        image: busybox:1.37
+        name: once
+      restartPolicy: Never
+status:
+  succeeded: 1
+YAML
+    cat > "$FX/pod.yaml" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: api
+  name: api-7d9c5b6f4-x2x9q
+  namespace: shop
+  ownerReferences:
+  - apiVersion: apps/v1
+    blockOwnerDeletion: true
+    controller: true
+    kind: ReplicaSet
+    name: api-7d9c5b6f4
+    uid: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+spec:
+  containers:
+  - image: registry.example.com/api:2.3.0
+    name: api
+  nodeName: worker-2
+  restartPolicy: Always
+YAML
     cat > "$BATS_TEST_TMPDIR/stubs/kubectl" <<'SH'
 #!/usr/bin/env bash
 echo "kubectl $*" >> "$CALLS"
@@ -103,6 +161,8 @@ case " $* " in
     *" config view "*) printf 'kind-kind\tshop' ;;
     *" get deploy/api "*) cat "$FX/deploy.yaml" ;;
     *" get svc/api "*) cat "$FX/svc.yaml" ;;
+    *" get job/once "*) cat "$FX/job.yaml" ;;
+    *" get pod/api-7d9c5b6f4-x2x9q "*) cat "$FX/pod.yaml" ;;
     *" get depoy/api "*) echo "error: the server doesn't have a resource type \"depoy\"" >&2; exit 1 ;;
     *) echo 'Error from server (NotFound): deployments.apps "x" not found' >&2; exit 1 ;;
 esac
@@ -166,6 +226,33 @@ SH
     run kyaml svc/api
     [ "$status" -eq 0 ]
     [[ $output == *"  clusterIP: None"*"  clusterIPs:"*"  - None"* ]]
+}
+
+@test "a job loses the selector and labels its controller made" {
+    run kyaml job/once
+    [ "$status" -eq 0 ]
+    [[ $output != *controller-uid* ]]
+    [[ $output != *job-name* ]]
+    [[ $output != *"  selector:"* ]]
+    [[ $output == *"  backoffLimit: 6"*"      restartPolicy: Never"* ]]
+    run kyaml -v job/once
+    [[ $output == *"kyaml: removed "*"selector"* ]]
+}
+
+@test "a job with manualSelector keeps its selector" {
+    sed -i 's/^  backoffLimit: 6$/  backoffLimit: 6\n  manualSelector: true/' "$FX/job.yaml"
+    run kyaml job/once
+    [ "$status" -eq 0 ]
+    [[ $output == *"  selector:"*"      batch.kubernetes.io/controller-uid: "* ]]
+}
+
+@test "a pod loses its owner and its node" {
+    run kyaml pod/api-7d9c5b6f4-x2x9q
+    [ "$status" -eq 0 ]
+    [[ $output != *ownerReferences* ]]
+    [[ $output != *ReplicaSet* ]]
+    [[ $output != *nodeName* ]]
+    [[ $output == *"  labels:"*"    app: api"*"  restartPolicy: Always"* ]]
 }
 
 @test "--status and --no-namespace" {

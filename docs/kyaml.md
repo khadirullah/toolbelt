@@ -51,7 +51,10 @@ same as two words. Any short name kubectl knows works, since `kyaml` hands it to
 | `metadata.selfLink` | Left over in objects from older clusters. |
 | `kubectl.kubernetes.io/last-applied-configuration` | A JSON copy of the object that `kubectl apply` keeps. |
 | `deployment.kubernetes.io/revision` | The Deployment controller's counter. |
-| `spec.clusterIP`, `spec.clusterIPs` of a Service | The cluster picks the address. Copying it clashes in another cluster. A headless Service keeps `clusterIP: None`. |
+| `spec.clusterIP`, `spec.clusterIPs` of a Service | The cluster picks the address. Copying it clashes in another cluster. A headless Service keeps `clusterIP: None` and `clusterIPs: [None]`. |
+| `metadata.ownerReferences` | Points at the owner's uid in this cluster. In another cluster the copy has no owner, and the garbage collector deletes it. |
+| `spec.selector` and the `controller-uid` and `job-name` labels of a Job | The Job controller made them for this Job. A copy that keeps them fails to apply. A Job with `manualSelector: true` keeps its selector. |
+| `spec.nodeName` of a Pod | Ties the copy to one node, which may not exist. Without it, the scheduler picks. |
 | `metadata.namespace` | Only with `--no-namespace`, so `kubectl apply -n OTHER` works on the file. |
 
 An `annotations:` block left empty after that goes too. Every other field stays as the cluster printed it,

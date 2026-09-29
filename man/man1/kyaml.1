@@ -70,7 +70,16 @@ A JSON copy of the object that \fBkubectl apply\fR keeps.
 The Deployment controller's counter.
 .TP
 \fBspec.clusterIP\fR, \fBspec.clusterIPs\fR of a Service
-The cluster picks the address. Copying it clashes in another cluster. A headless Service keeps \fBclusterIP: None\fR.
+The cluster picks the address. Copying it clashes in another cluster. A headless Service keeps \fBclusterIP: None\fR and \fBclusterIPs: [None]\fR.
+.TP
+\fBmetadata.ownerReferences\fR
+Points at the owner's uid in this cluster. In another cluster the copy has no owner, and the garbage collector deletes it.
+.TP
+\fBspec.selector\fR and the \fBcontroller\-uid\fR and \fBjob\-name\fR labels of a Job
+The Job controller made them for this Job. A copy that keeps them fails to apply. A Job with \fBmanualSelector: true\fR keeps its selector.
+.TP
+\fBspec.nodeName\fR of a Pod
+Ties the copy to one node, which may not exist. Without it, the scheduler picks.
 .TP
 \fBmetadata.namespace\fR
 Only with \fB\-\-no\-namespace\fR, so \fBkubectl apply \-n OTHER\fR works on the file.

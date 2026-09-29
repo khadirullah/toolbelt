@@ -51,13 +51,17 @@ function keyof(s,    i) {
     if (s ~ /:$/) return substr(s, 1, length(s) - 1)
     return ""
 }
-function drop(what, at) { skipping = 1; skipind = at; cur = what; print what > removed }
+function drop(what, at) { skipping = 1; skipind = at; cur = what; note(what) }
+function note(what) { if (!(what in noted)) { noted[what] = 1; print what > removed } }
 BEGIN {
-    split("managedFields uid resourceVersion creationTimestamp generation selfLink", m, " ")
+    split("managedFields uid resourceVersion creationTimestamp generation selfLink ownerReferences", m, " ")
     for (i in m) meta[m[i]] = 1
     if (nons) meta["namespace"] = 1
     ann["kubectl.kubernetes.io/last-applied-configuration"] = 1
     ann["deployment.kubernetes.io/revision"] = 1
+    # Labels the Job controller adds. A copy that keeps them fails to apply.
+    split("controller-uid batch.kubernetes.io/controller-uid job-name batch.kubernetes.io/job-name", j, " ")
+    for (i in j) joblabel[j[i]] = 1
 }
 {
     line = $0
@@ -91,6 +95,14 @@ BEGIN {
     if (top == "spec" && ind == 2 && kind == "Service" && (k == "clusterIP" || k == "clusterIPs") && !headless) {
         drop(k, 2); next
     }
+    # A Job's generated selector and labels, unless it sets manualSelector.
+    if (kind == "Job" && top == "spec" && ind == 2 && body == "manualSelector: true") manual = 1
+    if (kind == "Job" && !manual) {
+        if (top == "spec" && ind == 2 && k == "selector") { drop("selector", 2); next }
+        if (k in joblabel && body !~ /:$/) { note(k); next }
+    }
+    # A Pod's node, so the copy is scheduled afresh.
+    if (kind == "Pod" && top == "spec" && ind == 2 && k == "nodeName") { note("nodeName"); next }
     print line
 }
 END { if (mf) print "managedFields lines " mf > removed }
