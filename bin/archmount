@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+# archmount: open an archive as a folder without unpacking.
+set -uo pipefail
+TB_CMD=archmount
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: archmount [options] archive [dir] [-- fuse options]
+       archmount -u dir
+       archmount --list
+
+Open an archive as a folder without unpacking.
+
+Options:
+  -b, --background    stay mounted and return to the prompt
+  -w, --wait          stay in the foreground until Ctrl+C, with no shell
+  -u, --unmount DIR   unmount a folder archmount mounted
+  --list              show the archives mounted now
+  -q, --quiet         only errors
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+Pass-through:
+  Options after -- go to fuse-archive, archivemount or ratarmount.
+
+Examples:
+  archmount backup.tar.zst
+  archmount -b logs.zip /mnt/logs
+  archmount -u /mnt/logs
+  archmount --list
+
+Needs: fuse-archive, archivemount or ratarmount, and fusermount3.
+Exit: 0 ok, 1 failed or busy, 2 bad usage, 3 missing tool, 4 refused.
+EOF
+}
+
+# ---------------------------------------------------------------- mounts
+
+# The mount table. Tests point TB_TEST_MOUNTS at a file of their own.
+mounts_file() { echo "${TB_TEST_MOUNTS:-/proc/self/mounts}"; }
+
+# Undo the octal escapes the kernel uses for spaces and tabs in mount paths.
+unescape() { printf '%b' "${1//\\/\\0}"; }
+
+# True when a folder is a mount point now.
+is_mounted() {
+    local want=$1 dev mp rest
+    while read -r dev mp rest; do
+        [[ $(unescape "$mp") == "$want" ]] && return 0
+    done < "$(mounts_file)"
+    return 1
+}
+
+# The records archmount keeps: folder, archive, tool and whether it made the
+# folder, one mount per line, separated by tabs.
+records() { echo "$(tb_state_dir)/archmount.mounts"; }
+
+record_add() {
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$(records)"
+}
+
+# Print the record for a folder, or return 1.
+record_get() {
+    local f
+    f=$(records)
+    [[ -f $f ]] || return 1
+    awk -F'\t' -v d="$1" '$1 == d { print; found = 1 } END { exit !found }' "$f"
+}
+
+record_del() {
+    local f tmp
+    f=$(records)
+    [[ -f $f ]] || return 0
+    tmp=$f.new
+    awk -F'\t' -v d="$1" '$1 != d' "$f" > "$tmp" && mv -- "$tmp" "$f"
+}
+
+# An absolute path, for a folder that may not exist yet.
+abs_path() {
+    local p=$1 dir
+    if [[ -d $p ]]; then
+        (cd -- "$p" && pwd)
+    else
+        dir=$(dirname -- "$p")
+        dir=$(cd -- "$dir" 2>/dev/null && pwd) || return 1
+        echo "${dir%/}/$(basename -- "$p")"
+    fi
+}
+
+# A path as the user would write it: relative when it is below the current folder.
+show_path() {
+    local p=$1
+    if [[ $p == "$PWD"/* ]]; then echo "${p#"$PWD"/}"; else echo "$p"; fi
+}
+
+# The archive name without its archive extension, for the default folder.
+stem_of() {
+    local n=$1 e
+    for e in .tar.gz .tar.bz2 .tar.xz .tar.lzma .tar.zst .tar.lz4 .tar.lz .tar.lzo .tar.br \
+             .tgz .tbz2 .tbz .txz .tzst .tar .zip .jar .war .7z .rar .iso .cpio .gz .bz2 .xz .zst; do
+        if [[ ${n,,} == ?*"$e" ]]; then
+            echo "${n:0:${#n}-${#e}}"
+            return
+        fi
+    done
+    echo "${n%.*}"
+}
+
+# Quote one word for a line the user may copy.
+qarg() {
+    if [[ $1 =~ ^[A-Za-z0-9_./:=,@%+^-]+$ ]]; then printf '%s' "$1"
+    else printf "'%s'" "${1//\'/\'\\\'\'}"; fi
+}
+
+# ---------------------------------------------------------------- tools
+
+# Pick the FUSE tool: fuse-archive, then archivemount, then ratarmount.
+pick_tool() {
+    local t
+    for t in fuse-archive archivemount ratarmount; do
+        if tb_has "$t"; then
+            TOOL=$t
+            return 0
+        fi
+    done
+    local line
+    if line=$(tb_install_line archivemount); then
+        tb_err "needs fuse-archive, archivemount or ratarmount. Install one with: $line"
+    else
+        tb_err "needs fuse-archive, archivemount or ratarmount. Install the package that provides one"
+    fi
+    exit "$E_TOOL"
+}
+
+# Unmount a folder. Prints why when it is busy, and returns 1.
+unmount_dir() {
+    local dir=$1 um rc users
+    if tb_has fusermount3; then um=(fusermount3 -u)
+    elif tb_has fusermount; then um=(fusermount -u)
+    else um=(umount); fi
+    tb_show "${um[@]}" "$dir"
+    "${um[@]}" "$dir" 2>"$ERRFILE"
+    rc=$?
+    if (( rc != 0 )) && is_mounted "$dir"; then
+        users=$(busy_users "$dir")
+        if [[ -n $users ]]; then
+            tb_err "$(show_path "$dir") is busy, used by $users"
+        else
+            tb_err "$(show_path "$dir") could not be unmounted: $(head -n 1 "$ERRFILE")"
+        fi
+        tb_err "close it and run archmount -u $(qarg "$(show_path "$dir")") again"
+        return 1
+    fi
+    forget_dir "$dir"
+    tb_info "$TB_CMD: unmounted $(show_path "$dir")"
+    return 0
+}
+
+# Drop the record for an unmounted folder, and the folder if archmount made it.
+forget_dir() {
+    local dir=$1 rec created=0
+    if rec=$(record_get "$dir"); then
+        created=$(awk -F'\t' '{ print $4; exit }' <<<"$rec")
+        record_del "$dir"
+    fi
+    if (( created )) && [[ -d $dir ]]; then
+        rmdir -- "$dir" 2>/dev/null
+    fi
+    return 0
+}
+
+# The programs that hold files open under a folder, as "less (pid 48213)".
+busy_users() {
+    tb_has lsof || return 0
+    lsof -F pc -- "$1" 2>/dev/null | awk '
+        /^p/ { pid = substr($0, 2) }
+        /^c/ { if (n < 3) { out = out (n ? ", " : "") substr($0, 2) " (pid " pid ")"; n++ } }
+        END { print out }'
+}
+
+# ---------------------------------------------------------------- actions
+
+do_list() {
+    local f dir arch tool created shown=0
+    f=$(records)
+    tb_color_stdout
+    if [[ -f $f ]]; then
+        while IFS=$'\t' read -r dir arch tool created; do
+            [[ -n $dir ]] || continue
+            if ! is_mounted "$dir"; then
+                record_del "$dir"
+                continue
+            fi
+            (( shown )) || printf '%-32s %-12s %s\n' FOLDER TOOL ARCHIVE
+            printf '%-32s %-12s %s\n' "$dir" "$tool" "$arch"
+            shown=1
+        done < <(cat -- "$f")
+    fi
+    # Archive mounts made some other way.
+    local dev mp type rest
+    while read -r dev mp type rest; do
+        case $type in
+            fuse.fuse-archive|fuse.archivemount|fuse.ratarmount) ;;
+            *) continue ;;
+        esac
+        mp=$(unescape "$mp")
+        record_get "$mp" >/dev/null && continue
+        (( shown )) || printf '%-32s %-12s %s\n' FOLDER TOOL ARCHIVE
+        printf '%-32s %-12s %s\n' "$mp" "${type#fuse.}" "$dev"
+        shown=1
+    done < "$(mounts_file)"
+    (( shown )) || tb_info "$TB_CMD: no archives are mounted"
+    return 0
+}
+
+do_unmount() {
+    local dir
+    dir=$(abs_path "$1") || tb_die "$E_FAIL" "$1: no such folder"
+    is_mounted "$dir" || { record_del "$dir"; tb_die "$E_FAIL" "$(show_path "$dir") is not mounted"; }
+    unmount_dir "$dir" || exit "$E_FAIL"
+}
+
+# Run on exit in the foreground modes: unmount what this run mounted.
+cleanup_mount() {
+    if [[ -n ${MOUNTED:-} ]]; then
+        if is_mounted "$MOUNTED"; then
+            unmount_dir "$MOUNTED" || true
+        else
+            # Unmounted some other way, such as fusermount3 -u.
+            forget_dir "$MOUNTED"
+            tb_info "$TB_CMD: $(show_path "$MOUNTED") was unmounted"
+        fi
+    fi
+    MOUNTED=""
+    tb_cleanup
+}
+
+do_mount() {
+    local archive dir created=0 kind size t0 t1
+    [[ -e $ARCHIVE ]] || tb_die "$E_FAIL" "$ARCHIVE: no such file"
+    [[ -f $ARCHIVE ]] || tb_die "$E_FAIL" "$ARCHIVE: not a file"
+    [[ -r $ARCHIVE ]] || tb_die "$E_FAIL" "$ARCHIVE: cannot read it"
+    archive=$(abs_path "$ARCHIVE")
+
+    if [[ -n $DIR ]]; then
+        dir=$(abs_path "$DIR") || tb_die "$E_FAIL" "the folder above $DIR does not exist"
+        if [[ -e $dir && ! -d $dir ]]; then
+            tb_die "$E_SAFE" "$DIR is a file, not a folder"
+        fi
+        if is_mounted "$dir"; then
+            tb_die "$E_SAFE" "$(show_path "$dir") is already a mount point"
+        fi
+        if [[ -d $dir && -n $(ls -A -- "$dir" 2>/dev/null) ]]; then
+            tb_die "$E_SAFE" "$(show_path "$dir") is not empty, and mounting would hide its files. Pick an empty folder"
+        fi
+    else
+        dir=${archive%/*}/$(stem_of "${archive##*/}")
+        if [[ -e $dir ]] && { [[ ! -d $dir ]] || [[ -n $(ls -A -- "$dir" 2>/dev/null) ]] || is_mounted "$dir"; }; then
+            dir=$(tb_free_name "$dir")
+        fi
+    fi
+    if [[ ! -d $dir ]]; then
+        mkdir -p -- "$dir" || tb_die "$E_FAIL" "cannot make the folder $(show_path "$dir")"
+        created=1
+    fi
+
+    pick_tool
+    local -a cmd
+    case $TOOL in
+        fuse-archive) cmd=(fuse-archive) ;;
+        archivemount) cmd=(archivemount -o readonly) ;;
+        ratarmount)   cmd=(ratarmount) ;;
+    esac
+    cmd+=(${TB_PASS[@]+"${TB_PASS[@]}"} "$archive" "$dir")
+
+    case ${archive,,} in
+        *.zip|*.jar|*.war|*.7z|*.iso|*.rar) kind=indexed ;;
+        *) kind=stream ;;
+    esac
+    size=$(tb_bytes "$archive")
+    tb_say "tool: $TOOL"
+    if [[ $kind == stream ]] && (( size > 64 * 1024 * 1024 )); then
+        tb_info "$TB_CMD: $(show_path "$archive") has no index, so $TOOL reads all $(tb_human "$size") once"
+    fi
+    t0=$(tb_now_ms)
+    tb_show "${cmd[@]}"
+    "${cmd[@]}" 2>"$ERRFILE"
+    local rc=$?
+    t1=$(tb_now_ms)
+    if (( rc != 0 )) || ! is_mounted "$dir"; then
+        (( created )) && rmdir -- "$dir" 2>/dev/null
+        local why
+        why=$(head -n 3 "$ERRFILE")
+        if [[ ! -e /dev/fuse ]]; then
+            why="this machine has no /dev/fuse, so FUSE cannot run here"
+        fi
+        tb_die "$E_FAIL" "$TOOL could not mount $(show_path "$archive")${why:+: $why}"
+    fi
+    record_add "$dir" "$archive" "$TOOL" "$created"
+    tb_say "mounted in $(tb_elapsed $(( t1 - t0 )))"
+
+    local shown
+    shown=$(show_path "$dir")
+    if (( MODE_BG )); then
+        tb_info "$TB_CMD: $(show_path "$archive") on $shown/, read-only"
+        tb_color_stdout
+        echo "Unmount with: archmount -u $(qarg "$shown")"
+        return 0
+    fi
+
+    MOUNTED=$dir
+    trap cleanup_mount EXIT
+    tb_info "$TB_CMD: $(show_path "$archive") on $shown/, read-only"
+    if (( ! MODE_WAIT )) && tb_is_tty; then
+        tb_info "$TB_CMD: new shell in $shown/. Type exit to unmount."
+        trap ':' INT
+        (cd -- "$dir" && "${SHELL:-/bin/sh}")
+        trap 'exit 130' INT
+    else
+        tb_info "$TB_CMD: press Ctrl+C to unmount."
+        local interval=${ARCHMOUNT_POLL:-1}
+        while is_mounted "$dir"; do
+            sleep "$interval"
+        done
+    fi
+    cleanup_mount
+    return 0
+}
+
+main() {
+    tb_tmpdir WORK || tb_die "$E_FAIL" "cannot make a temp folder"
+    ERRFILE=$WORK/err
+    if (( LIST )); then
+        (( ${#ARGS[@]} == 0 )) || tb_usage_error "--list takes no archive"
+        do_list
+        return
+    fi
+    if [[ -n $UNMOUNT ]]; then
+        (( ${#ARGS[@]} == 0 )) || tb_usage_error "-u takes only the folder to unmount"
+        do_unmount "$UNMOUNT"
+        return
+    fi
+    (( ${#ARGS[@]} >= 1 )) || tb_usage_error "name the archive to open"
+    (( ${#ARGS[@]} <= 2 )) || tb_usage_error "name one archive and at most one folder"
+    (( MODE_BG && MODE_WAIT )) && tb_usage_error "-b and -w contradict each other, pick one"
+    ARCHIVE=${ARGS[0]}
+    DIR=${ARGS[1]:-}
+    do_mount
+}
+
+MODE_BG=0 MODE_WAIT=0 LIST=0 UNMOUNT="" MOUNTED=""
+ARGS=()
+tb_expand "u" "$@"
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -b|--background) MODE_BG=1 ;;
+        -w|--wait)       MODE_WAIT=1 ;;
+        -u|--unmount)    tb_optarg "$@"; UNMOUNT=$2; shift ;;
+        --list)          LIST=1 ;;
+        --)              shift; TB_PASS=("$@"); break ;;
+        -*)              tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)               ARGS+=("$1") ;;
+    esac
+    shift
+done
+main

@@ -1,0 +1,237 @@
+.TH "ARCHMOUNT" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+archmount \- open an archive as a folder without unpacking
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+archmount [options] archive [dir] [-- fuse options]
+archmount -u dir
+archmount --list
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBarchmount\fR mounts an archive read\-only through FUSE, so you can \fBcd\fR into it, \fBgrep\fR it, open files in an editor and copy out what you need. Nothing is unpacked to disk, and the archive is never changed.
+.PP
+With no folder named, it mounts next to the archive in a folder named after it, so \fBbackup.tar.zst\fR opens on \fBbackup/\fR. When that name is taken by a file or a folder with files in it, it uses \fBbackup\-1/\fR, and so on. \fBarchmount\fR makes the folder, and removes it again on unmount. A folder you name yourself stays after unmount.
+.PP
+There are three ways to run it.
+.IP \(bu 2
+\fBIn a terminal, with no option\fR, it opens a new shell inside the mounted folder. Type \fBexit\fR and it unmounts. Ctrl+C inside that shell only stops the program running there, not the mount.
+.IP \(bu 2
+\fBWith `\-w`\fR, it stays in the foreground with no shell and unmounts on Ctrl+C. Use this from a script, or when you want to use the folder from another terminal.
+.IP \(bu 2
+\fBWith `\-b`\fR, it mounts and returns to the prompt. The mount stays until \fBarchmount \-u DIR\fR or a reboot. It prints the unmount line on stdout, so a script can capture it.
+.PP
+When not in a terminal and without \fB\-b\fR, it behaves as with \fB\-w\fR.
+.PP
+\fBarchmount\fR keeps a list of what it mounted in \fB~/.local/state/toolbelt/archmount.mounts\fR. \fB\-\-list\fR reads it, drops the entries that are gone, and adds archive mounts made by hand with fuse\-archive, archivemount or ratarmount.
+.SH OPTIONS
+.TP
+\fB\-b\fR, \fB\-\-background\fR
+Mount and return to the prompt. Unmount later with \fB\-u\fR.
+.TP
+\fB\-w\fR, \fB\-\-wait\fR
+Stay in the foreground without a shell, until Ctrl+C.
+.TP
+\fB\-u\fR, \fB\-\-unmount DIR\fR
+Unmount a folder, and remove it when \fBarchmount\fR made it.
+.TP
+\fB\-\-list\fR
+Show the archives mounted now, with the folder, the tool and the archive.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print only errors, and the unmount line with \fB\-b\fR.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print each step, and each real command before it runs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print the help.
+.PP
+\fB\-b\fR and \fB\-w\fR contradict each other.
+.SH TOOLS
+.PP
+\fBarchmount\fR uses the first of these that is installed.
+.TP
+fuse\-archive
+Formats: tar and compressed tars, zip, 7z, rar, iso, cpio. Notes: Built on libarchive, and read\-only by design.
+.TP
+archivemount
+Formats: the same, also through libarchive. Notes: The most widely packaged. Mounted with \fB\-o readonly\fR.
+.TP
+ratarmount
+Formats: tar and compressed tars, zip, rar. Notes: Python. Saves an index on the first mount, so later mounts of the same archive are instant.
+.PP
+A zip, 7z or iso has an index, so mounting is instant and opening a file reads only that file. A \fBtar.gz\fR, \fBtar.zst\fR or other compressed tar has no index, so the tool reads the whole archive once at mount time to find where each file starts. For an archive over 64MB \fBarchmount\fR says so first, since the mount can take a while. ratarmount saves that index and skips the read next time.
+.SH UNMOUNTING AND BUSY FOLDERS
+.PP
+\fB\-u DIR\fR runs \fBfusermount3 \-u\fR, or \fBfusermount \-u\fR on systems with FUSE 2, or \fBumount\fR as a last resort. When a program still has a file open or a shell sits inside the folder, the unmount fails. \fBarchmount\fR then names the programs, using \fBlsof\fR when it is installed:
+.PP
+.RS 4
+.nf
+archmount: mnt/site is busy, used by less (pid 48213)
+archmount: close it and run archmount -u mnt/site again
+.fi
+.RE
+.PP
+It never forces an unmount, since that can leave a program reading from a folder that vanished.
+.SH PASS\-THROUGH
+.PP
+Options after \fB\-\-\fR go to the FUSE tool, before the archive and folder. \fB\-o allow_other\fR lets other users read the mount, when \fB/etc/fuse.conf\fR has \fBuser_allow_other\fR. fuse\-archive and archivemount take the FUSE \fB\-o\fR options, and ratarmount takes its own, such as \fB\-\-recursive\fR to open archives inside the archive.
+.PP
+.RS 4
+.nf
+archmount -b logs.zip -- -o allow_other
+archmount -b nested.tar -- --recursive
+.fi
+.RE
+.SH NEEDS
+.PP
+One of fuse\-archive, archivemount or ratarmount, and \fBfusermount3\fR or \fBfusermount\fR to unmount. The kernel needs FUSE, which every desktop distro has. \fBlsof\fR is optional and names the programs that keep a folder busy.
+.TP
+archivemount
+apt: archivemount. dnf: archivemount. pacman: archivemount. zypper: archivemount. apk: none
+.TP
+fusermount3
+apt: fuse3. dnf: fuse3. pacman: fuse3. zypper: fuse3. apk: fuse3
+.TP
+fusermount
+apt: fuse. dnf: fuse. pacman: fuse2. zypper: fuse. apk: fuse
+.TP
+lsof
+apt: lsof. dnf: lsof. pacman: lsof. zypper: lsof. apk: lsof
+.PP
+ratarmount is on PyPI and installs on any distro with \fBpipx install ratarmount\fR. fuse\-archive comes from its project's releases, or from your distro where it has a package.
+.PP
+Per distro:
+.IP \(bu 2
+\fBDebian, Ubuntu, Fedora, Arch and openSUSE.\fR Install archivemount from the main repos. It is the simplest choice.
+.IP \(bu 2
+\fBAlpine.\fR archivemount has no package. Install ratarmount with pipx, and \fBfuse3\fR for the unmount tool.
+.IP \(bu 2
+\fBContainers.\fR FUSE needs \fB/dev/fuse\fR, and a container often lacks it. \fBarchmount\fR says so when it is missing. Use \fBunpack \-l\fR to list the archive instead, or \fBunpack \-\-only\fR to pull out one file.
+.PP
+When no tool is installed, \fBarchmount\fR exits 3 and prints the install line for archivemount.
+.SH EXAMPLES
+.SS Look inside a backup, then return
+.PP
+In a terminal, with no option:
+.PP
+.RS 4
+.nf
+$ archmount backup.tar.zst
+archmount: backup.tar.zst on backup/, read-only
+archmount: new shell in backup/. Type exit to unmount.
+$ exit
+archmount: unmounted backup
+.fi
+.RE
+.SS Mount in the background
+.PP
+.RS 4
+.nf
+$ archmount -b backup.tar.zst
+archmount: backup.tar.zst on backup/, read-only
+Unmount with: archmount -u backup
+.fi
+.RE
+.SS Mount on a folder you pick
+.PP
+.RS 4
+.nf
+$ archmount -b site.zip mnt/site
+archmount: site.zip on mnt/site/, read-only
+Unmount with: archmount -u mnt/site
+.fi
+.RE
+.SS What is mounted
+.PP
+.RS 4
+.nf
+$ archmount --list
+FOLDER                           TOOL         ARCHIVE
+/home/sam/backup                 fuse-archive /home/sam/backup.tar.zst
+/home/sam/mnt/site               fuse-archive /home/sam/site.zip
+.fi
+.RE
+.SS A busy folder
+.PP
+.RS 4
+.nf
+$ archmount -u mnt/site
+archmount: mnt/site is busy, used by less (pid 48213)
+archmount: close it and run archmount -u mnt/site again
+$ archmount -u mnt/site
+archmount: unmounted mnt/site
+.fi
+.RE
+.SS Wait in the foreground
+.PP
+.RS 4
+.nf
+$ archmount -w backup.tar.zst
+archmount: backup.tar.zst on backup/, read-only
+archmount: press Ctrl+C to unmount.
+^Carchmount: unmounted backup
+.fi
+.RE
+.SS A folder with files in it
+.PP
+.RS 4
+.nf
+$ archmount -b backup.tar.zst full
+archmount: full is not empty, and mounting would hide its files. Pick an empty folder
+.fi
+.RE
+.SS Pass options and see the command
+.PP
+.RS 4
+.nf
+$ archmount -v -b site.zip -- -o allow_other
+archmount: tool: fuse-archive
++ fuse-archive -o allow_other /home/sam/site.zip /home/sam/site-1
+archmount: mounted in 0.0s
+archmount: site.zip on site-1/, read-only
+Unmount with: archmount -u site-1
+.fi
+.RE
+.PP
+The default folder \fBsite/\fR already held files, so the mount went to \fBsite\-1/\fR.
+.SH TROUBLESHOOTING
+.PP
+\fB"needs fuse\-archive, archivemount or ratarmount"\fR None is installed. Install archivemount from your package manager, or ratarmount with pipx.
+.PP
+\fB"this machine has no /dev/fuse, so FUSE cannot run here"\fR The kernel module is not loaded, or you are in a container started without \fB\-\-device /dev/fuse\fR. On a normal machine, \fBsudo modprobe fuse\fR loads it.
+.PP
+\fB"fusermount3: mount failed: Operation not permitted"\fR Your user may not be allowed to mount. On older systems, add yourself to the \fBfuse\fR group and log in again.
+.PP
+\fBThe mount takes a long time.\fR A compressed tar has no index, so the tool reads it all once. Use ratarmount, which keeps the index for next time, or repack as zip or 7z with \fBsquash\fR if you mount it often.
+.PP
+\fB"is busy"\fR A program has a file open inside, or a shell has it as its current folder. Close it, \fBcd\fR out, and run \fBarchmount \-u\fR again.
+.PP
+\fB"is not mounted"\fR The mount is already gone, perhaps after a reboot. \fBarchmount\fR drops it from its list.
+.PP
+\fBA mount stays after a crash.\fR Run \fBarchmount \-u DIR\fR. When that fails too, \fBfusermount3 \-uz DIR\fR detaches it once nothing uses it.
+.SH EXIT STATUS
+.TP
+0
+Mounted, unmounted, or listed.
+.TP
+1
+The tool could not mount the archive, the folder is busy, or the folder is not mounted.
+.TP
+2
+Bad usage.
+.TP
+3
+No FUSE tool is installed.
+.TP
+4
+Refused, since the folder holds files, is already a mount point, or is a file.
+.PP
+After Ctrl+C in \fB\-w\fR mode, \fBarchmount\fR unmounts and exits 130, like any command stopped with Ctrl+C.
+.SH SEE ALSO
+.PP
+\fBunpack\fR, \fBarchdiff\fR, \fBsquash\fR, \fBfusermount3(1)\fR, \fBarchivemount(1)\fR, \fBratarmount(1)\fR

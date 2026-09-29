@@ -67,11 +67,16 @@ sed            sed                  sed                  sed                  se
 sha256sum      coreutils            coreutils            coreutils            coreutils            coreutils
 sort           coreutils            coreutils            coreutils            coreutils            coreutils
 stat           coreutils            coreutils            coreutils            coreutils            coreutils
+fuse-archive   -                    -                    -                    -                    -
+ratarmount     -                    -                    -                    -                    -
+fusermount3    fuse3                fuse3                fuse3                fuse3                fuse3
+fusermount     fuse                 fuse                 fuse2                fuse                 fuse
 split          coreutils            coreutils            coreutils            coreutils            coreutils
 nproc          coreutils            coreutils            coreutils            coreutils            coreutils
 od             coreutils            coreutils            coreutils            coreutils            coreutils
 tr             coreutils            coreutils            coreutils            coreutils            coreutils
 wc             coreutils            coreutils            coreutils            coreutils            coreutils
+umount         mount                util-linux           util-linux           util-linux           util-linux-misc
 bsdtar         libarchive-tools     bsdtar               libarchive           bsdtar               libarchive-tools
 lsar           unar                 unar                 unarchiver           unar                 unar
 uncompress     ncompress            ncompress            ncompress            ncompress            -
@@ -90,4 +95,5 @@ ls             coreutils            coreutils            coreutils            co
 cut            coreutils            coreutils            coreutils            coreutils            coreutils
 tail           coreutils            coreutils            coreutils            coreutils            coreutils
 basename       coreutils            coreutils            coreutils            coreutils            coreutils
+sleep          coreutils            coreutils            coreutils            coreutils            coreutils
 dirname        coreutils            coreutils            coreutils            coreutils            coreutils
