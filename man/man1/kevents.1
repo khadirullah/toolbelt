@@ -51,6 +51,17 @@ Show the help.
 The object is \fBKIND/NAME\fR or a bare \fBNAME\fR. The kind can be a short name kubectl knows, such as \fBpo\fR, \fBdeploy\fR, \fBrs\fR, \fBsvc\fR, \fBsts\fR, \fBds\fR, \fBjob\fR, \fBcj\fR, \fBpvc\fR, \fBhpa\fR, \fBing\fR, \fBcm\fR or \fBno\fR. \fBkevents\fR turns it into the Kind that events carry and asks the cluster for events with that kind and name. A bare \fBNAME\fR matches any kind with that name.
 .PP
 Events belong to the exact object. A Deployment's events are about scaling. The crashes are events of its pods, and the pods' names carry a hash. \fBkevents \-w\fR without an object shows both.
+.PP
+When \fBKIND/NAME\fR has no events, \fBkevents\fR asks whether the object exists. An object that exists and was quiet gets \fBno events for pod/api\-1 in the last 1h\fR and exit 0. One that does not exist is most likely a typo, so \fBkevents\fR names the closest match and exits 1.
+.PP
+.RS 4
+.nf
+$ kevents -n demo pod/crashr
+kevents: no pod crashr in demo. Did you mean crasher?
+.fi
+.RE
+.PP
+With \fB\-f\fR, the same line is only a warning and \fBkevents\fR goes on following, since you may be waiting for an object you are about to create. A bare \fBNAME\fR and \fB\-A\fR skip the check. A bare name could be any kind, and \fB\-A\fR has no one namespace to look in.
 .SH TIMES
 .PP
 The time is \fBHH:MM:SS\fR for today and \fBMon DD HH:MM\fR for older days, in your local time zone. It is the last time the event happened, from \fBlastTimestamp\fR, or from the newer \fBseries\fR and \fBeventTime\fR fields that some components write instead.
@@ -168,7 +179,7 @@ The count grows, but the time stays the same : Some components report repeats in
 It printed the events, found none, or stopped following with Ctrl+C.
 .TP
 1
-kubectl failed.
+The object has no events and does not exist, or kubectl failed.
 .TP
 2
 Bad usage, such as \fB\-\-since\fR with a word it does not know, or two objects.

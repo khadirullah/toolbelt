@@ -54,6 +54,19 @@ name.
 Events belong to the exact object. A Deployment's events are about scaling. The crashes are events of its pods,
 and the pods' names carry a hash. `kevents -w` without an object shows both.
 
+When `KIND/NAME` has no events, `kevents` asks whether the object exists. An object that exists and was quiet gets
+`no events for pod/api-1 in the last 1h` and exit 0. One that does not exist is most likely a typo, so `kevents`
+names the closest match and exits 1.
+
+```console
+$ kevents -n demo pod/crashr
+kevents: no pod crashr in demo. Did you mean crasher?
+```
+
+With `-f`, the same line is only a warning and `kevents` goes on following, since you may be waiting for an
+object you are about to create. A bare `NAME` and `-A` skip the check. A bare name could be any kind, and `-A`
+has no one namespace to look in.
+
 ## Times
 
 The time is `HH:MM:SS` for today and `Mon DD HH:MM` for older days, in your local time zone. It is the last time the
@@ -175,7 +188,7 @@ The count grows, but the time stays the same
 | Code | Meaning |
 |---|---|
 | 0 | It printed the events, found none, or stopped following with Ctrl+C. |
-| 1 | kubectl failed. |
+| 1 | The object has no events and does not exist, or kubectl failed. |
 | 2 | Bad usage, such as `--since` with a word it does not know, or two objects. |
 | 3 | kubectl or jq is missing. |
 

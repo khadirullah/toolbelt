@@ -36,8 +36,8 @@ Examples:
   kevents -- --context kind-kind
 
 Needs: kubectl and jq. See man kevents.
-Exit: 0 ok, also with no events, 1 kubectl failed, 2 bad usage,
-      3 missing tool.
+Exit: 0 ok, also with no events, 1 no such object or kubectl failed,
+      2 bad usage, 3 missing tool.
 EOF
 }
 
@@ -111,6 +111,27 @@ print_events() {
     echo "$n $w" > "$TMP/count"
 }
 
+# With no events for TYPE/NAME, make sure the object exists, so a typo
+# does not pass as a quiet object. Returns 1 after saying so. A bare name
+# could be any type, and -A has no one namespace, so those pass.
+check_object() {
+    local type=${obj%%/*} oname=${obj#*/} where=" in $ns" hint
+    [[ $obj == */* ]] && (( ! all )) || return 0
+    case ${type,,} in
+        no|node|nodes|pv|persistentvolume|persistentvolumes|ns|namespace|namespaces) where="" ;;
+    esac
+    kube_to "$TMP/obj" get "$type" "$oname" -n "$ns" -o name && return 0
+    kube_notfound || return 0
+    kube_to "$TMP/names" get "$type" -n "$ns" -o name
+    hint=$(sed 's|^[^/]*/||' "$TMP/names" 2>/dev/null | closest "$oname")
+    if [[ -n $hint ]]; then
+        tb_err "no $type $oname$where. Did you mean $hint?"
+    else
+        tb_err "no $type $oname$where. List them with: kubectl get $type${where:+ -n $ns}"
+    fi
+    return 1
+}
+
 main() {
     local get=(get events) sel="" scope cut=0 today n w
     tb_need kubectl jq
@@ -148,7 +169,10 @@ main() {
     (( warnings )) && what=warnings
     local span="in the last $since"
     [[ $since == all ]] && span="kept by the cluster"
-    if (( n == 0 )); then
+    # -f may wait for an object that is about to be made, so it goes on.
+    if (( n == 0 )) && ! check_object; then
+        (( follow )) || return 1
+    elif (( n == 0 )); then
         if [[ -n $obj ]]; then
             tb_info "$TB_CMD: no $what for $obj $span"
         else

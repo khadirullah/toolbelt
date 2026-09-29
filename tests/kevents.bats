@@ -46,6 +46,10 @@ case " $* " in
         [[ -n ${HANG:-} ]] && { echo $$ > "$FX/watch.pid"; exec sleep 30; }
         jq -c '{type: "ADDED", object: .items[0]}' "$FX/events.json"
         jq -c '.items[1]' "$FX/events.json" ;;
+    *" get pod api-9 "*|*" get pod zzz "*|*" get node wrker-1 "*)
+        echo "Error from server (NotFound): $2 \"$3\" not found" >&2; exit 1 ;;
+    *" get pod -n "*) printf 'pod/api-1\npod/api-2\n' ;;
+    *" get node -n "*) printf 'node/worker-1\n' ;;
     *" get events "*)
         [[ -n ${DOWN:-} ]] && { echo "The connection to the server 127.0.0.1:6443 was refused" >&2; exit 1; }
         cat "$FX/${EVENTS:-events}.json" ;;
@@ -128,6 +132,28 @@ SH
     run kevents -q
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 6 ]
+}
+
+@test "a missing object with no events is a typo, exit 1" {
+    EVENTS=none run kevents pod/api-9
+    [ "$status" -eq 1 ]
+    [ "$output" = "kevents: no pod api-9 in shop. Did you mean api-1?" ]
+    EVENTS=none run kevents pod/zzz
+    [ "$output" = "kevents: no pod zzz in shop. List them with: kubectl get pod -n shop" ]
+    EVENTS=none run kevents node/wrker-1
+    [ "$output" = "kevents: no node wrker-1. Did you mean worker-1?" ]
+}
+
+@test "bare names and -A are not checked, -f goes on after the warning" {
+    EVENTS=none run kevents api-9
+    [ "$status" -eq 0 ]
+    EVENTS=none run kevents -A pod/api-9
+    [ "$status" -eq 0 ]
+    [ -z "$(grep 'get pod' "$CALLS")" ]
+    EVENTS=none run kevents -f pod/api-9
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "kevents: no pod api-9 in shop. Did you mean api-1?" ]
+    [ "${lines[1]}" = "following events for pod/api-9, Ctrl+C stops" ]
 }
 
 @test "-f follows the watch stream after the list" {
