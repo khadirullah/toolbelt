@@ -1,0 +1,174 @@
+.TH "NOTIFY-DONE" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.SH NAME
+notify\-done \- tell you when a long command finishes
+.SH SYNOPSIS
+.PP
+.RS 4
+.nf
+notify-done [options] [--] command [args]
+.fi
+.RE
+.SH DESCRIPTION
+.PP
+\fBnotify\-done\fR runs a command as normal. When the command ends, it shows a desktop notice with the exit code and how long the command took, and prints the same on stderr:
+.PP
+.RS 4
+.nf
+notify-done: make build finished, exit 0, 4m12s
+.fi
+.RE
+.PP
+Start a long build, a \fBterraform apply\fR or a big copy, switch to another window, and the notice tells you when to come back. A failed command gets an urgent notice, which most desktops keep on screen until you dismiss it.
+.PP
+Short commands stay silent. When the command took less than 10 seconds, \fBnotify\-done\fR shows nothing at all, so you can put it in front of anything without getting a notice for every \fBls\fR. \fB\-\-min\fR changes the limit.
+.PP
+The command runs in your terminal as it would without \fBnotify\-done\fR. It reads your keyboard, its output goes straight to the screen, and its exit code comes back to you unchanged. \fBnotify\-done\fR never reads or changes the output.
+.SS Where the command starts
+.PP
+The command starts at the first word that is not an option of \fBnotify\-done\fR, or right after \fB\-\-\fR. Everything from there on belongs to the command, so \fBnotify\-done make \-j4 \-t\fR passes \fB\-j4\fR and \fB\-t\fR to \fBmake\fR.
+.SS The title
+.PP
+The notice title is the command, cut short: the command name and the words after it, up to the first option, path or \fBname=value\fR, at most three words. \fBterraform apply \-auto\-approve\fR gives \fBterraform apply\fR, and \fBrsync \-a big/ backup:/srv/big/\fR gives \fBrsync\fR. \fB\-t\fR sets your own title.
+.SS When there is no desktop
+.PP
+Over SSH, in a console with no graphical session, or when \fBnotify\-send\fR is missing or fails, \fBnotify\-done\fR rings the terminal bell instead and says so. Most terminal programs flash the tab or the window on a bell, and tmux marks the window. \fB\-\-bell\fR always uses the bell and never tries the desktop.
+.PP
+\fBnotify\-done\fR counts a desktop as present when \fBDISPLAY\fR or \fBWAYLAND_DISPLAY\fR is set.
+.SH OPTIONS
+.TP
+\fB\-t\fR, \fB\-\-title TEXT\fR
+The notice title. The command by default.
+.TP
+\fB\-\-min SECS\fR
+Only notify when the command ran at least this long. 10 by default. \fB\-\-min 0\fR always notifies.
+.TP
+\fB\-\-bell\fR
+Ring the terminal bell and skip the desktop notice.
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Print no lines of its own. The notice or the bell still happens.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the command line before it runs, and the \fBnotify\-send\fR line.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help.
+.SH THE NOTICE
+.TP
+exits 0
+Urgency: normal. Text: \fBdone in 4m12s\fR
+.TP
+exits non\-zero
+Urgency: critical. Text: \fBfailed with exit 1 after 17m48s\fR
+.PP
+The times use seconds with one decimal under 10 seconds, whole seconds under a minute, then minutes and seconds, then hours and minutes, as in \fB0.4s\fR, \fB18s\fR, \fB4m12s\fR and \fB1h07m\fR.
+.SH PASS\-THROUGH
+.PP
+None. The words after the options are the command it runs.
+.SH NEEDS
+.PP
+\fBnotify\-send\fR from libnotify shows the desktop notice. It is optional. Without it you get the bell.
+.TP
+Debian, Ubuntu
+\fBlibnotify\-bin\fR
+.TP
+Fedora
+\fBlibnotify\fR
+.TP
+Arch
+\fBlibnotify\fR
+.TP
+openSUSE
+\fBlibnotify\-tools\fR
+.TP
+Alpine
+\fBlibnotify\fR
+.PP
+GNOME, KDE Plasma, Xfce and Cinnamon show the notices with nothing more to set up. A bare window manager such as i3 or sway needs a notification daemon, such as \fBdunst\fR or \fBmako\fR, running in the session.
+.SH EXAMPLES
+.SS A build
+.PP
+.RS 4
+.nf
+$ notify-done make build
+go build -o bin/api ./cmd/api
+notify-done: make build finished, exit 0, 4m12s
+.fi
+.RE
+.PP
+The desktop shows "make build" with "done in 4m12s".
+.SS A failure, with your own title
+.PP
+.RS 4
+.nf
+$ notify-done -t "EKS apply" terraform apply -auto-approve
+Error: creating EKS Node Group: InvalidParameterException
+notify-done: EKS apply failed, exit 1, 17m48s
+$ echo $?
+1
+.fi
+.RE
+.SS Over SSH
+.PP
+.RS 4
+.nf
+$ notify-done rsync -a big/ backup:/srv/big/
+notify-done: rsync finished, exit 0, 2m03s
+notify-done: no desktop, rang the terminal bell instead
+.fi
+.RE
+.SS A short command stays quiet
+.PP
+.RS 4
+.nf
+$ notify-done -v true
++ true
+notify-done: it took 0.0s, under --min 10s, so no notice
+.fi
+.RE
+.PP
+Without \fB\-v\fR it prints nothing at all.
+.SS The exact notice it sends
+.PP
+.RS 4
+.nf
+$ notify-done -v --min 0 -t "EKS apply" terraform apply -auto-approve
++ terraform apply -auto-approve
+Error: creating EKS Node Group: InvalidParameterException
+notify-done: EKS apply failed, exit 1, 17m48s
++ notify-send -u critical -- 'EKS apply' 'failed with exit 1 after 17m48s'
+.fi
+.RE
+.SS In a pipeline or a script
+.PP
+.RS 4
+.nf
+$ notify-done --min 60 -- ./backup.sh && echo ok
+.fi
+.RE
+.PP
+\fBnotify\-done\fR exits with the command's code, so \fB&&\fR, \fB||\fR and \fBset \-e\fR work as they would without it.
+.SH TROUBLESHOOTING
+.PP
+No notice appears, but no bell either : \fBnotify\-send\fR ran and exited 0, but no daemon showed it. Check that a notification daemon runs, and that your desktop does not have "do not disturb" on.
+.PP
+\fBnotify\-done: no notify\-send, rang the terminal bell instead. Install it with: sudo apt install libnotify\-bin\fR : You have a desktop, but \fBnotify\-send\fR is missing. Install the package the line names.
+.PP
+\fBnotify\-done: no desktop, rang the terminal bell instead\fR on my own desktop : \fBDISPLAY\fR and \fBWAYLAND_DISPLAY\fR are both empty in this terminal, which happens inside \fBsudo \-i\fR, \fBsu \-\fR and some tmux sessions started before you logged in to the desktop. Run \fBnotify\-done\fR as your own user, or update the variables with \fBtmux show\-environment\fR.
+.PP
+The bell makes no sound : Many terminals turn the audible bell off and show a visual one, or none. Look for "bell" in your terminal's settings. The bell goes to stderr, so \fB2>/dev/null\fR also hides it.
+.PP
+\fBnotify\-done: mycmd: command not found\fR : The name is not a program on your \fBPATH\fR. Shell aliases and functions only exist in your shell. Run them through \fBbash \-ic 'mycmd'\fR.
+.SH EXIT STATUS
+.TP
+any
+The exit code of the command it ran.
+.TP
+2
+Bad usage, such as no command.
+.TP
+127
+The command does not exist.
+.SH SEE ALSO
+.PP
+\fBagain\fR, \fBtimer\fR, \fBnotify\-send(1)\fR

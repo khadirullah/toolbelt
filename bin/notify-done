@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# notify-done: tell you when a long command finishes.
+set -uo pipefail
+TB_CMD=notify-done
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: notify-done [options] [--] command [args]
+
+Tell you when a long command finishes.
+
+Options:
+  -t, --title TEXT    the notice title, the command by default
+  --min SECS          only tell you when it ran this long, 10 by default
+  --bell              ring the terminal bell, no desktop notice
+  -q, --quiet         no lines of its own, only the notice
+  -v, --verbose       the command line, and the notify-send line
+  -h, --help          this help
+
+Examples:
+  notify-done make build
+  notify-done -t "EKS apply" terraform apply -auto-approve
+  notify-done --min 0 -- rsync -a big/ backup:/srv/big/
+
+Needs: notify-send, optional, else the bell. See man notify-done.
+Exit: the command's own exit code, 2 bad usage, 127 no such command.
+EOF
+}
+
+# Split the arguments into our options and the command, so the command's
+# own options, such as make -j4, are never bundled or read as ours.
+# Usage: split_command "short letters with a value" "long options with a value" "$@"
+# Sets OPTS, and CMD as -- followed by the command.
+split_command() {
+    local short=$1 long=" $2 " a i
+    shift 2
+    OPTS=() CMD=()
+    while (( $# )); do
+        a=$1
+        shift
+        case $a in
+            --) CMD=(-- "$@"); return ;;
+            --*=*) OPTS+=("$a") ;;
+            --*) OPTS+=("$a")
+                 if [[ $long == *" $a "* ]] && (( $# )); then OPTS+=("$1"); shift; fi ;;
+            -?*) OPTS+=("$a")
+                 for (( i = 1; i < ${#a}; i++ )); do
+                     [[ $short == *"${a:i:1}"* ]] || continue
+                     if (( i == ${#a} - 1 && $# )); then OPTS+=("$1"); shift; fi
+                     break
+                 done ;;
+            *) CMD=(-- "$a" "$@"); return ;;
+        esac
+    done
+}
+
+# A short title from the command line: the words up to the first option or
+# path, at most three, so "terraform apply -auto-approve" gives "terraform apply".
+short_title() {
+    local w out="" n=0
+    for w in "$@"; do
+        [[ $w == -* || $w == */* || $w == *=* ]] && (( n )) && break
+        out+="${out:+ }${w##*/}"
+        (( ++n >= 3 )) && break
+    done
+    echo "${out:0:60}"
+}
+
+# Show a desktop notice. Returns 1 when there is no desktop to show it on.
+# Usage: desktop_notice urgency title body
+desktop_notice() {
+    [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] || return 1
+    tb_has notify-send || return 1
+    tb_show notify-send -u "$1" -- "$2" "$3"
+    notify-send -u "$1" -- "$2" "$3" >/dev/null 2>&1
+}
+
+# Ring the terminal bell on stderr, where a person is watching.
+bell() { printf '\a' >&2; }
+
+main() {
+    local start ms took rc word urgency body
+    if ! type -t -- "$1" >/dev/null 2>&1; then
+        tb_err "$1: command not found"
+        exit 127
+    fi
+    [[ -n $title ]] || title=$(short_title "$@")
+    start=$(tb_now_ms)
+    tb_show "$@"
+    "$@"
+    rc=$?
+    ms=$(( $(tb_now_ms) - start ))
+    if (( ms < min_secs * 1000 )); then
+        tb_say "it took $(tb_elapsed "$ms"), under --min ${min_secs}s, so no notice"
+        return "$rc"
+    fi
+    took=$(tb_elapsed "$ms")
+    if (( rc == 0 )); then
+        word=finished urgency=normal body="done in $took"
+    else
+        word=failed urgency=critical body="failed with exit $rc after $took"
+    fi
+    tb_info "$TB_CMD: $title $word, exit $rc, $took"
+    if (( only_bell )); then
+        bell
+    elif ! desktop_notice "$urgency" "$title" "$body"; then
+        bell
+        if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && ! tb_has notify-send; then
+            tb_hint notify-send "no notify-send, rang the terminal bell instead"
+        else
+            tb_info "$TB_CMD: no desktop, rang the terminal bell instead"
+        fi
+    fi
+    return "$rc"
+}
+
+title="" min_secs=10 only_bell=0
+split_command "t" "--title --min" "$@"
+tb_expand "t" ${OPTS[@]+"${OPTS[@]}"} ${CMD[@]+"${CMD[@]}"}
+set -- "${TB_EXPANDED[@]}"
+while (( $# )); do
+    case $1 in
+        -t|--title) tb_optarg "$@"; title=$2; shift ;;
+        --min)      tb_optarg "$@"; min_secs=$2; shift
+                    [[ $min_secs =~ ^[0-9]{1,7}$ ]] || tb_usage_error "--min needs whole seconds, not $min_secs"
+                    min_secs=$(( 10#$min_secs )) ;;
+        --bell)     only_bell=1 ;;
+        --)         shift; break ;;
+        -*)         tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)          break ;;
+    esac
+    shift
+done
+
+(( $# )) || tb_usage_error "no command to run"
+main "$@"
+exit $?
