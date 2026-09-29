@@ -1,0 +1,534 @@
+#!/usr/bin/env bash
+# imgpeek: look inside a container image.
+set -uo pipefail
+TB_CMD=imgpeek
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+usage: imgpeek [-o dir] image [-- save options]
+       imgpeek -l image
+       imgpeek --find PATTERN image
+
+Look inside a container image.
+
+Options:
+  -o, --out DIR       where the files go, a folder named after the image
+                      by default
+  -l, --layers        list the layers with their size and the step that
+                      made them
+  --find PATTERN      show which layer added, changed or deleted the files
+                      that match
+  -q, --quiet         only the result line
+  -v, --verbose       every step, and each real command before it runs
+  -h, --help          this help
+
+The image is a name such as nginx:1.27, or a file from docker save.
+
+Pass-through:
+  Options after -- go to podman save, docker save or skopeo copy.
+
+Examples:
+  imgpeek nginx:1.27
+  imgpeek -o /tmp/nginx nginx:1.27
+  imgpeek -l nginx:1.27
+  imgpeek --find nginx.conf nginx:1.27
+  imgpeek backup/app.tar
+
+Needs: podman, docker or skopeo, and python3. See man imgpeek.
+Exit: 0 ok, 1 failed or cannot pull, 2 bad usage, 3 missing tool,
+      4 refused.
+EOF
+}
+
+# Reads a docker save or OCI archive. Modes:
+#   meta ARCHIVE WANT     tag, config and one line per layer
+#   unpack ARCHIVE DEST   apply the layers in order into DEST
+#   find ARCHIVE PATTERN  which layer touched the matching paths
+# Output lines are tab separated. Problems go to stderr, with exit 1.
+PY='
+import fnmatch, json, os, shutil, subprocess, sys, tarfile, threading
+
+def die(msg):
+    sys.stderr.write("imgpeek: " + msg + "\n")
+    sys.exit(1)
+
+def norm(name):
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    return "/".join(parts)
+
+class Image:
+    def __init__(self, path, want):
+        try:
+            self.outer = tarfile.open(path, "r:*")
+            members = self.outer.getmembers()
+        except (tarfile.TarError, OSError) as e:
+            die("cannot read %s as an image archive, %s" % (path, e))
+        self.m = {norm(x.name): x for x in members}
+        self.tag = ""
+        if "manifest.json" in self.m:
+            man = json.loads(self.read("manifest.json"))
+            if not man:
+                die("the archive holds no image")
+            pick = man[0]
+            for e in man:
+                if want and any(t == want or t.endswith("/" + want) for t in e.get("RepoTags") or []):
+                    pick = e
+            tags = pick.get("RepoTags") or []
+            if want:
+                tags = [t for t in tags if t == want or t.endswith("/" + want)] or tags
+            self.tag = tags[0] if tags else ""
+            self.config = json.loads(self.read(pick["Config"]))
+            self.layers = [norm(x) for x in pick["Layers"]]
+        elif "index.json" in self.m:
+            idx = json.loads(self.read("index.json"))
+            mf = self.pick_manifest(idx)
+            self.config = json.loads(self.read(self.blob(mf["config"]["digest"])))
+            self.layers = [self.blob(x["digest"]) for x in mf["layers"]]
+        else:
+            die("%s is not an image archive, it has no manifest.json or index.json" % path)
+        hist = [h for h in self.config.get("history") or [] if not h.get("empty_layer")]
+        self.made = [h.get("created_by", "") for h in hist] if len(hist) == len(self.layers) else [""] * len(self.layers)
+
+    def read(self, name):
+        name = norm(name)
+        if name not in self.m:
+            die("the archive lacks %s" % name)
+        return self.outer.extractfile(self.m[name]).read()
+
+    def blob(self, digest):
+        return "blobs/" + digest.replace(":", "/", 1)
+
+    def pick_manifest(self, idx):
+        arch = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "arm"}.get(os.uname().machine, os.uname().machine)
+        for _ in range(3):
+            ms = idx.get("manifests") or []
+            if not ms:
+                die("the image index lists no image")
+            m = next((x for x in ms if (x.get("platform") or {}).get("architecture") == arch), ms[0])
+            ann = m.get("annotations") or {}
+            self.tag = self.tag or ann.get("io.containerd.image.name") or ann.get("org.opencontainers.image.ref.name", "")
+            doc = json.loads(self.read(self.blob(m["digest"])))
+            if "layers" in doc:
+                return doc
+            idx = doc
+        die("the image index is nested too deep")
+
+    def open_layer(self, name):
+        if name not in self.m:
+            die("the archive lacks the layer %s" % name)
+        f = self.outer.extractfile(self.m[name])
+        head = f.read(4)
+        f.seek(0)
+        if head == b"\x28\xb5\x2f\xfd":
+            if not shutil.which("zstd"):
+                die("a layer is compressed with zstd. Install zstd and run it again")
+            p = subprocess.Popen(["zstd", "-dcq"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            def feed():
+                try:
+                    shutil.copyfileobj(f, p.stdin)
+                except BrokenPipeError:
+                    pass
+                finally:
+                    p.stdin.close()
+            threading.Thread(target=feed, daemon=True).start()
+            return tarfile.open(fileobj=p.stdout, mode="r|")
+        return tarfile.open(fileobj=f, mode="r|*")
+
+def meta(img):
+    c = img.config.get("config") or {}
+    print("tag\t" + img.tag)
+    print("user\t" + (c.get("User") or "root"))
+    print("entrypoint\t" + json.dumps(c.get("Entrypoint") or []))
+    print("cmd\t" + json.dumps(c.get("Cmd") or []))
+    print("ports\t" + " ".join(sorted((c.get("ExposedPorts") or {}).keys())))
+    for i, name in enumerate(img.layers):
+        size = img.m[name].size if name in img.m else 0
+        print("layer\t%d\t%d\t%s" % (i + 1, size, " ".join(img.made[i].split())))
+
+def rootpath(root, rel):
+    """Resolve rel inside root, following symlinks as if root were /."""
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    cur, hops = "", 0
+    while parts:
+        p = parts.pop(0)
+        if p == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, p)
+        full = os.path.join(root, nxt)
+        if os.path.islink(full):
+            hops += 1
+            if hops > 40:
+                raise OSError("too many symlinks")
+            t = os.readlink(full)
+            if t.startswith("/"):
+                cur = ""
+            parts = [x for x in t.split("/") if x not in ("", ".")] + parts
+            continue
+        cur = nxt
+    return os.path.join(root, cur)
+
+def remove(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.unlink(path)
+
+def unpack(img, dest):
+    deleted = skipped = bad = 0
+    first_err = ""
+    for name in img.layers:
+        tf = img.open_layer(name)
+        written = set()
+        for m in tf:
+            rel = norm(m.name)
+            if not rel:
+                continue
+            d, base = os.path.split(rel)
+            if base == "..":
+                bad += 1
+                continue
+            try:
+                parent = rootpath(dest, d)
+                if base == ".wh..wh..opq":
+                    if os.path.isdir(parent) and not os.path.islink(parent):
+                        for e in os.listdir(parent):
+                            if os.path.join(d, e) not in written:
+                                remove(os.path.join(parent, e))
+                                deleted += 1
+                    continue
+                if base.startswith(".wh."):
+                    t = os.path.join(parent, base[4:])
+                    if os.path.lexists(t):
+                        remove(t)
+                        deleted += 1
+                    continue
+                written.add(rel)
+                target = os.path.join(parent, base)
+                if m.isdir():
+                    if os.path.lexists(target) and (os.path.islink(target) or not os.path.isdir(target)):
+                        remove(target)
+                    os.makedirs(target, exist_ok=True)
+                    os.chmod(target, (m.mode & 0o777) | 0o700)
+                    continue
+                if not (m.isreg() or m.issym() or m.islnk()):
+                    skipped += 1
+                    continue
+                os.makedirs(parent, exist_ok=True)
+                if os.path.lexists(target):
+                    remove(target)
+                if m.isreg():
+                    with open(target, "wb") as o:
+                        shutil.copyfileobj(tf.extractfile(m), o)
+                    os.chmod(target, (m.mode & 0o777) | 0o600)
+                elif m.issym():
+                    os.symlink(m.linkname, target)
+                else:
+                    src = rootpath(dest, norm(m.linkname))
+                    if os.path.isfile(src) and not os.path.islink(src):
+                        try:
+                            os.link(src, target)
+                        except OSError:
+                            shutil.copy2(src, target)
+                    else:
+                        bad += 1
+            except OSError as e:
+                bad += 1
+                first_err = first_err or "%s: %s" % (rel, e.strerror or e)
+    files = size = 0
+    for top, dirs, fs in os.walk(dest):
+        files += sum(1 for x in dirs if os.path.islink(os.path.join(top, x)))
+        for f in fs:
+            files += 1
+            st = os.lstat(os.path.join(top, f))
+            if not os.path.islink(os.path.join(top, f)):
+                size += st.st_size
+    print("done\t%d\t%d\t%d\t%d\t%d\t%s" % (files, size, deleted, skipped, bad, first_err))
+
+def find(img, pat):
+    globby = any(c in pat for c in "*?[")
+    def match(p):
+        if globby:
+            return (fnmatch.fnmatchcase(p, pat) or fnmatch.fnmatchcase(p, "*/" + pat)
+                    or fnmatch.fnmatchcase(os.path.basename(p), pat))
+        return pat in p
+    seen = set()
+    for i, name in enumerate(img.layers, 1):
+        tf = img.open_layer(name)
+        for m in tf:
+            rel = norm(m.name)
+            if not rel or m.isdir():
+                continue
+            d, base = os.path.split(rel)
+            if base == ".wh..wh..opq":
+                gone = [p for p in seen if p.startswith(d + "/")]
+                for p in sorted(gone):
+                    seen.discard(p)
+                    if match(p):
+                        print("hit\t%d\tdeleted\t%s" % (i, p))
+                continue
+            if base.startswith(".wh."):
+                p = os.path.join(d, base[4:])
+                gone = [x for x in seen if x == p or x.startswith(p + "/")]
+                for x in sorted(gone):
+                    seen.discard(x)
+                    if match(x):
+                        print("hit\t%d\tdeleted\t%s" % (i, x))
+                if not gone and match(p):
+                    print("hit\t%d\tdeleted\t%s" % (i, p))
+                continue
+            if match(rel):
+                print("hit\t%d\t%s\t%s" % (i, "changed" if rel in seen else "added", rel))
+            seen.add(rel)
+
+mode, path, arg = sys.argv[1], sys.argv[2], sys.argv[3]
+img = Image(path, arg if mode == "meta" else "")
+if mode == "meta":
+    meta(img)
+elif mode == "unpack":
+    unpack(img, arg)
+else:
+    find(img, arg)
+'
+
+# A folder name for an image: docker.io/library/nginx:1.27 becomes nginx-1.27.
+out_name() {
+    local n=$1
+    if [[ -f $n ]]; then
+        n=$(basename "$n")
+        n=${n%.gz}
+        n=${n%.tgz}
+        n=${n%.tar}
+        echo "$n"
+        return
+    fi
+    n=${n##*/}
+    if [[ $n == *@* ]]; then
+        local digest=${n#*@}
+        digest=${digest#*:}
+        n="${n%%@*}-${digest:0:12}"
+    fi
+    echo "${n//:/-}"
+}
+
+# A JSON list such as ["nginx","-g","daemon off;"] as a command line.
+words() {
+    python3 -c '
+import json, sys
+a = json.loads(sys.argv[1])
+print(" ".join(x if x and not any(c in x for c in " \"\x27;&|") else "\"" + x.replace("\"", "\\\"") + "\"" for x in a))
+' "$1"
+}
+
+# Save the image into $ARCHIVE, pulling it first when it is not local.
+save_image() {
+    local saver size need free
+    if tb_has podman; then saver=podman
+    elif tb_has docker; then saver=docker
+    elif tb_has skopeo; then saver=skopeo
+    else
+        local line
+        if line=$(tb_install_line podman); then
+            tb_die "$E_TOOL" "needs podman or docker. Install it with: $line"
+        fi
+        tb_die "$E_TOOL" "needs podman or docker. Install the package that provides podman"
+    fi
+    ARCHIVE=$work/image.tar
+    if [[ $saver == skopeo ]]; then
+        tb_say "no podman or docker, copying $image with skopeo"
+        tb_run skopeo copy ${TB_PASS[@]+"${TB_PASS[@]}"} "docker://$image" "docker-archive:$ARCHIVE:$image" >&2 ||
+            tb_die 1 "cannot copy $image. Check the name, and skopeo login for a private registry"
+        return 0
+    fi
+    tb_show "$saver" image inspect --format '{{.Size}}' "$image"
+    if ! size=$("$saver" image inspect --format '{{.Size}}' "$image" 2>/dev/null); then
+        tb_info "pulling $image"
+        tb_run "$saver" pull "$image" >&2 ||
+            tb_die 1 "cannot pull $image. Check the name, and $saver login for a private registry"
+        size=$("$saver" image inspect --format '{{.Size}}' "$image" 2>/dev/null)
+    fi
+    size=${size//[^0-9]/}
+    if [[ -n $size ]]; then
+        need=$(( size / 1024 + 1024 ))
+        free=$(tb_free_kb "$work")
+        if [[ -n $free ]] && (( free < need )); then
+            tb_die "$E_SAFE" "not enough space to save $image, it needs $(tb_human $(( need * 1024 ))) in $work_parent and $(tb_human $(( free * 1024 ))) is free"
+        fi
+    fi
+    tb_say "saving $image with $saver"
+    tb_run "$saver" save -o "$ARCHIVE" ${TB_PASS[@]+"${TB_PASS[@]}"} "$image" >&2 ||
+        tb_die 1 "$saver save $image failed"
+}
+
+# Read the tag, config and layers into variables.
+read_meta() {
+    local out k a b c
+    out=$(python3 -c "$PY" meta "$ARCHIVE" "$image") || exit 1
+    LAYER_ROWS=()
+    TAG="" USER_="" ENTRY="" CMD="" PORTS=""
+    while IFS=$'\t' read -r k a b c; do
+        case $k in
+            tag)        TAG=$a ;;
+            user)       USER_=$a ;;
+            entrypoint) ENTRY=$a ;;
+            cmd)        CMD=$a ;;
+            ports)      PORTS=$a ;;
+            layer)      LAYER_ROWS+=("$a"$'\t'"$b"$'\t'"$c") ;;
+        esac
+    done <<<"$out"
+    [[ -n $TAG ]] || TAG=$image
+}
+
+# "/bin/sh -c #(nop)  CMD [...]" as "CMD [...]", and a RUN for the rest.
+made_by() {
+    local s=$1
+    s=${s% # buildkit}
+    case $s in
+        "/bin/sh -c #(nop) "*) s=${s#/bin/sh -c #(nop) }; s=${s#"${s%%[! ]*}"} ;;
+        "/bin/sh -c "*)        s="RUN ${s#/bin/sh -c }" ;;
+        "RUN /bin/sh -c "*)    s="RUN ${s#RUN /bin/sh -c }" ;;
+        "")                    s="unknown" ;;
+    esac
+    (( ${#s} > 60 )) && s="${s:0:56} ..."
+    printf '%s\n' "$s"
+}
+
+list_layers() {
+    local row n size by
+    tb_color_stdout
+    echo "LAYER  SIZE    MADE BY"
+    for row in "${LAYER_ROWS[@]}"; do
+        IFS=$'\t' read -r n size by <<<"$row"
+        printf '%-6s %-7s %s\n' "$n" "$(tb_human "$size" " ")" "$(made_by "$by")"
+    done
+    if tb_has dive && [[ ! -f $image ]]; then
+        tb_info "dive $image browses the files of each layer"
+    fi
+}
+
+find_files() {
+    local out n=0 k layer what path
+    out=$(python3 -c "$PY" find "$ARCHIVE" "$pattern") || exit 1
+    while IFS=$'\t' read -r k layer what path; do
+        [[ $k == hit ]] || continue
+        printf 'layer %-3s %-8s %s\n' "$layer" "$what" "$path"
+        ((n++))
+    done <<<"$out"
+    if (( n == 0 )); then
+        tb_err "no file in $TAG matches $pattern"
+        return 1
+    fi
+}
+
+unpack_image() {
+    local asize free out k files size deleted skipped bad err total=0 row sz line2
+    asize=$(tb_bytes "$ARCHIVE")
+    free=$(tb_free_kb "$out_parent")
+    if [[ -n $free ]] && (( free * 1024 < asize + asize / 10 )); then
+        tb_die "$E_SAFE" "not enough space in $out_parent, the image needs about $(tb_human "$asize") and $(tb_human $(( free * 1024 ))) is free"
+    fi
+    mkdir -p "$dest" || tb_die 1 "cannot make $dest"
+    tb_say "applying $(tb_plural "${#LAYER_ROWS[@]}" layer) into $dest"
+    tb_show_text "python3 -c '<apply the layers in order>' $ARCHIVE $dest"
+    out=$(python3 -c "$PY" unpack "$ARCHIVE" "$dest") || tb_die 1 "unpacking stopped, $dest holds what was written so far"
+    IFS=$'\t' read -r k files size deleted skipped bad err <<<"$out"
+    for row in "${LAYER_ROWS[@]}"; do
+        IFS=$'\t' read -r _ sz _ <<<"$row"
+        total=$(( total + sz ))
+    done
+    local shown=$dest
+    [[ $shown == /* || $shown == ./* || $shown == ../* ]] || shown=./$shown
+    if (( ! TB_QUIET )); then
+        tb_color_stdout
+        printf '%-8s %s, %s, %s\n' image "$TAG" "$(tb_plural "${#LAYER_ROWS[@]}" layer)" "$(tb_human "$total" " ")"
+        line2="applied in order"
+        (( deleted )) && line2+=", $(tb_plural "$deleted" "deleted file") left out"
+        (( skipped )) && line2+=", $(tb_plural "$skipped" "device file") skipped"
+        printf '%-8s %s\n' layers "$line2"
+    fi
+    printf '%-8s %s/, %s, %s\n' wrote "$shown" "$(tb_plural "$files" file)" "$(tb_human "$size" " ")"
+    if (( ! TB_QUIET )); then
+        local cfg="user $USER_" e c
+        e=$(words "$ENTRY")
+        c=$(words "$CMD")
+        [[ -n $e ]] && cfg+=", entrypoint $e"
+        printf '%-8s %s\n' config "$cfg"
+        cfg=""
+        [[ -n $c ]] && cfg="cmd $c"
+        if [[ -n $PORTS ]]; then
+            local p=${PORTS// /, }
+            [[ $PORTS == *" "* ]] && p="ports $p" || p="port $p"
+            cfg+=${cfg:+, }$p
+        fi
+        [[ -n $cfg ]] && printf '%-8s %s\n' "" "$cfg"
+    fi
+    if (( bad )); then
+        tb_warn "$(tb_plural "$bad" entry entries) could not be written, the first was $err"
+    fi
+    return 0
+}
+
+main() {
+    local mode=unpack
+    (( list )) && mode=list
+    [[ -n $pattern ]] && mode=find
+    (( list )) && [[ -n $pattern ]] && tb_usage_error "use -l or --find, not both"
+    [[ -n $outdir && $mode != unpack ]] && tb_usage_error "-o works when unpacking, not with -l or --find"
+    tb_need python3
+
+    if [[ $mode == unpack ]]; then
+        if [[ -n $outdir ]]; then
+            dest=${outdir%/}
+            [[ -n $dest ]] || dest=/
+            if [[ -e $dest ]] && [[ ! -d $dest || -n $(ls -A -- "$dest" 2>/dev/null) ]]; then
+                tb_die "$E_SAFE" "$dest already exists and is not empty, pick another folder with -o"
+            fi
+        else
+            dest=$(tb_free_name "$(out_name "$image")")
+        fi
+        out_parent=$(dirname -- "$dest")
+        [[ -d $out_parent ]] || tb_die 1 "$out_parent: no such folder"
+    fi
+
+    if [[ -f $image ]]; then
+        (( ${#TB_PASS[@]} )) && tb_usage_error "options after -- go to save, and $image is already a file"
+        ARCHIVE=$image
+    else
+        # Save next to the output, or in the cache folder, not in /tmp,
+        # which is often in RAM.
+        if [[ $mode == unpack ]]; then work_parent=$out_parent; else work_parent=$(tb_cache_dir); fi
+        tb_tmpdir work "$work_parent" || tb_die 1 "cannot make a temp folder in $work_parent"
+        save_image
+    fi
+    read_meta
+    case $mode in
+        list)   list_layers ;;
+        find)   find_files ;;
+        unpack) unpack_image ;;
+    esac
+}
+
+outdir=""
+list=0
+pattern=""
+image=""
+tb_expand "o" "$@"
+set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
+while (( $# )); do
+    case $1 in
+        -o|--out)    tb_optarg "$@"; outdir=$2; shift ;;
+        -l|--layers) list=1 ;;
+        --find)      tb_optarg "$@"; pattern=$2; shift ;;
+        --)          shift; TB_PASS=("$@"); break ;;
+        -*)          tb_common_opt "$1" || tb_unknown "$1" ;;
+        *)           [[ -z $image ]] || tb_usage_error "one image at a time, not $image and $1"
+                     image=$1 ;;
+    esac
+    shift
+done
+[[ -n $image ]] || tb_usage_error "name an image, such as: imgpeek nginx:1.27"
+
+main
+exit $?
