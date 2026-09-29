@@ -6,6 +6,7 @@ Show why pods are not Ready, on one screen.
 
 ```
 kwhy [-n NAMESPACE | -A] [--lines N] [POD ...] [-- kubectl options]
+kwhy [options] deploy/NAME | sts/NAME | ds/NAME | job/NAME
 ```
 
 ## Description
@@ -32,7 +33,12 @@ every pod is Ready it says so on one line and exits 0. Pods of finished Jobs cou
 line then says `Ready or Completed`.
 
 Name one or more pods to see them even when they are Ready. That is useful for a pod that is Running but whose
-service does not answer.
+service does not answer. `pod/NAME` works the same as `NAME`.
+
+Name a workload, such as `deploy/web`, to check the pods it runs. `kwhy` reads its selector and looks at the pods
+that match, Ready ones included. The header then counts them, such as `deploy/web has 3 pods, 2 Ready and 1 not
+Ready`. It takes `deploy/`, `sts/`, `ds/` and `job/`, or their long names, one workload at a time and not mixed
+with pod names.
 
 `kwhy` only reads. It never restarts, deletes or changes a pod.
 
@@ -47,8 +53,8 @@ service does not answer.
 | `-v`, `--verbose` | Print each kubectl command before it runs, as `+ kubectl ...`. |
 | `-h`, `--help` | Show the help. |
 
-`-A` and `-n` together are a usage error, and so are `-A` and pod names, since a pod name only means something in
-one namespace.
+`-A` and `-n` together are a usage error, and so are `-A` and pod or workload names, since a name only means
+something in one namespace.
 
 ## Reasons and hints
 
@@ -230,6 +236,17 @@ worker-6c7b9f5d8-8vhwp   Pending            restarts 0
   hint   no node has cpu 2, memory 1Gi free, see kres
 ```
 
+### The pods of a deployment
+
+```console
+$ kwhy -n demo deploy/web
+context kind-toolbelt, namespace demo, deploy/web has 2 pods, 2 Ready
+web-58ccdc5667-btlc4   Ready              restarts 0
+web-58ccdc5667-z8xjx   Ready              restarts 0
+$ kwhy -n demo deploy/wbe
+kwhy: no deploy/wbe in demo. Did you mean web?
+```
+
 ### A pod name with a typo
 
 ```console
@@ -280,8 +297,8 @@ The event line is empty
 | Code | Meaning |
 |---|---|
 | 0 | Every pod looked at is Ready or Completed, or the namespace has no pods. |
-| 1 | Some pods are not Ready, a named pod does not exist, or kubectl failed. |
-| 2 | Bad usage, such as `-A` with `-n` or with pod names. |
+| 1 | Some pods are not Ready, a named pod or workload does not exist, or kubectl failed. |
+| 2 | Bad usage, such as `-A` with `-n` or with pod names, a type other than pod/, deploy/, sts/, ds/ or job/, or a workload with pod names. |
 | 3 | kubectl or jq is missing. |
 
 ## See also

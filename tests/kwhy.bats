@@ -71,6 +71,14 @@ case " $* " in
     *" get nodes "*)
         [[ -n ${NODES:-} ]] || { echo 'Error from server (Forbidden): nodes is forbidden' >&2; exit 1; }
         cat "$FX/$NODES.json" ;;
+    *" get deploy/api "*)
+        echo '{"kind":"Deployment","spec":{"selector":{"matchLabels":{"app":"api"},
+            "matchExpressions":[{"key":"tier","operator":"In","values":["a","b"]}]}}}' ;;
+    *" get deploy/apo "*)
+        echo 'Error from server (NotFound): deployments.apps "apo" not found' >&2; exit 1 ;;
+    *" get deploy -n "*) printf 'deployment.apps/api\ndeployment.apps/web\n' ;;
+    *" get pods -n shop -l app=api,tier in (a,b) "*)
+        jq '{kind: "List", items: [.items[1], .items[3]]}' "$FX/pods.json" ;;
     *" get pods "*) cat "$FX/${PODS:-pods}.json" ;;
     *" logs "*)
         printf '09:12:04 INFO  loading config\n09:12:04 ERROR DATABASE_URL is not set\npanic: missing DATABASE_URL\n' ;;
@@ -241,4 +249,33 @@ SH
     [[ $output != *"NotReady"* ]]
     [[ $output == *"web-6d4cf56db6-xk2p9     Running 1/1"* ]]
     grep -q ' logs api-' "$CALLS"
+}
+
+@test "deploy/NAME checks the pods its selector picks" {
+    run kwhy --lines 0 deploy/api
+    [ "$status" -eq 1 ]
+    [ "${lines[0]}" = "context kind-kind, namespace shop, deploy/api has 2 pods, 1 Ready and 1 not Ready" ]
+    [[ ${lines[1]} == "api-5b8c9d7f6-mk4tn    CrashLoopBackOff   restarts 9" ]]
+    [[ $output == *$'\n'"web-6d4cf56db6-xk2p9   Ready              restarts 0"* ]]
+}
+
+@test "pod/NAME is a pod name" {
+    run kwhy --lines 0 pod/api-5b8c9d7f6-mk4tn
+    [ "$status" -eq 1 ]
+    grep -q "get pod api-5b8c9d7f6-mk4tn -n shop" "$CALLS"
+}
+
+@test "a workload typo suggests the closest name" {
+    run kwhy deploy/apo
+    [ "$status" -eq 1 ]
+    [ "$output" = "kwhy: no deploy/apo in shop. Did you mean api?" ]
+}
+
+@test "other types, and a workload with pods, are bad usage" {
+    run kwhy svc/api
+    [ "$status" -eq 2 ]
+    [ "${lines[0]}" = "kwhy: give pods, or deploy/, sts/, ds/ or job/ names, not svc/api" ]
+    run kwhy deploy/api web-6d4cf56db6-xk2p9
+    [ "$status" -eq 2 ]
+    [ "${lines[0]}" = "kwhy: name a workload or pods, not both" ]
 }

@@ -6,6 +6,7 @@ kwhy \- show why pods are not Ready, on one screen
 .RS 4
 .nf
 kwhy [-n NAMESPACE | -A] [--lines N] [POD ...] [-- kubectl options]
+kwhy [options] deploy/NAME | sts/NAME | ds/NAME | job/NAME
 .fi
 .RE
 .SH DESCRIPTION
@@ -28,7 +29,9 @@ The log lines themselves, indented. For a container that restarted, they come fr
 .PP
 The first line names the context and the namespace, and counts the pods, such as \fB3 of 4 pods not Ready\fR. When every pod is Ready it says so on one line and exits 0. Pods of finished Jobs count as done, not as broken, and the line then says \fBReady or Completed\fR.
 .PP
-Name one or more pods to see them even when they are Ready. That is useful for a pod that is Running but whose service does not answer.
+Name one or more pods to see them even when they are Ready. That is useful for a pod that is Running but whose service does not answer. \fBpod/NAME\fR works the same as \fBNAME\fR.
+.PP
+Name a workload, such as \fBdeploy/web\fR, to check the pods it runs. \fBkwhy\fR reads its selector and looks at the pods that match, Ready ones included. The header then counts them, such as \fBdeploy/web has 3 pods, 2 Ready and 1 not Ready\fR. It takes \fBdeploy/\fR, \fBsts/\fR, \fBds/\fR and \fBjob/\fR, or their long names, one workload at a time and not mixed with pod names.
 .PP
 \fBkwhy\fR only reads. It never restarts, deletes or changes a pod.
 .SH OPTIONS
@@ -51,7 +54,7 @@ Print each kubectl command before it runs, as \fB+ kubectl ...\fR.
 \fB\-h\fR, \fB\-\-help\fR
 Show the help.
 .PP
-\fB\-A\fR and \fB\-n\fR together are a usage error, and so are \fB\-A\fR and pod names, since a pod name only means something in one namespace.
+\fB\-A\fR and \fB\-n\fR together are a usage error, and so are \fB\-A\fR and pod or workload names, since a name only means something in one namespace.
 .SH REASONS AND HINTS
 .PP
 The reason is the first of these that fits the pod.
@@ -233,6 +236,18 @@ worker-6c7b9f5d8-8vhwp   Pending            restarts 0
   hint   no node has cpu 2, memory 1Gi free, see kres
 .fi
 .RE
+.SS The pods of a deployment
+.PP
+.RS 4
+.nf
+$ kwhy -n demo deploy/web
+context kind-toolbelt, namespace demo, deploy/web has 2 pods, 2 Ready
+web-58ccdc5667-btlc4   Ready              restarts 0
+web-58ccdc5667-z8xjx   Ready              restarts 0
+$ kwhy -n demo deploy/wbe
+kwhy: no deploy/wbe in demo. Did you mean web?
+.fi
+.RE
 .SS A pod name with a typo
 .PP
 .RS 4
@@ -273,10 +288,10 @@ The event line is empty : Events expire after an hour by default. A pod that has
 Every pod looked at is Ready or Completed, or the namespace has no pods.
 .TP
 1
-Some pods are not Ready, a named pod does not exist, or kubectl failed.
+Some pods are not Ready, a named pod or workload does not exist, or kubectl failed.
 .TP
 2
-Bad usage, such as \fB\-A\fR with \fB\-n\fR or with pod names.
+Bad usage, such as \fB\-A\fR with \fB\-n\fR or with pod names, a type other than pod/, deploy/, sts/, ds/ or job/, or a workload with pod names.
 .TP
 3
 kubectl or jq is missing.

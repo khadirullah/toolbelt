@@ -10,6 +10,7 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/kube.sh"
 usage() {
     cat <<'EOF'
 usage: kwhy [-n NAMESPACE | -A] [--lines N] [POD ...] [-- kubectl options]
+       kwhy [options] deploy/NAME | sts/NAME | ds/NAME | job/NAME
 
 Show why pods are not Ready, on one screen.
 
@@ -29,6 +30,7 @@ Examples:
   kwhy
   kwhy -n shop --lines 5
   kwhy -n shop api-5b8c9d7f6-mk4tn
+  kwhy -n shop deploy/api
   kwhy -A -- --context kind-kind
 
 Needs: kubectl and jq. See man kwhy.
@@ -97,6 +99,18 @@ $p |
   ($sched // "" | clean), ($cpu | cpu_text), ($mem | mem_text),
   (.status.message // "" | clean), ($c.init // 0), (.spec.nodeName // "")
 ] | map(tostring) | join("\u001f")
+JQ
+
+# A workload's pod selector as a kubectl -l string.
+read -r -d '' SELECTOR_JQ <<'JQ'
+.spec.selector // {} |
+[(.matchLabels // {} | to_entries[] | "\(.key)=\(.value)"),
+ (.matchExpressions // [] | .[] |
+    if .operator == "In" then "\(.key) in (\(.values | join(",")))"
+    elif .operator == "NotIn" then "\(.key) notin (\(.values | join(",")))"
+    elif .operator == "Exists" then .key
+    else "!\(.key)" end)]
+| join(",")
 JQ
 
 # Nodes that are not Ready, and since when: name TAB epoch.
@@ -260,6 +274,22 @@ main() {
         where="namespace $ns"
         (( ${#pods[@]} )) && get=(get pod "${pods[@]}" -n "$ns" -o json)
     fi
+    if [[ -n $owner ]]; then
+        local sel
+        if ! kube_to "$TMP/owner" get "$owner" -n "$ns" -o json; then
+            if kube_notfound; then
+                local hint
+                kube_to "$TMP/names" get "${owner%%/*}" -n "$ns" -o name 2>/dev/null
+                hint=$(sed 's|^[^/]*/||' "$TMP/names" 2>/dev/null | closest "${owner#*/}")
+                [[ -n $hint ]] && tb_die 1 "no $owner in $ns. Did you mean $hint?"
+                tb_die 1 "no $owner in $ns. List them with: kubectl get ${owner%%/*} -n $ns"
+            fi
+            kube_fail
+        fi
+        sel=$(jq -r "$SELECTOR_JQ" "$TMP/owner" 2>/dev/null)
+        [[ -n $sel ]] || tb_die 1 "$owner has no pod selector"
+        get=(get pods -n "$ns" -l "$sel" -o json)
+    fi
     tb_say "context ${KCTX:-none}, $where"
     if ! kube_to "$TMP/pods" "${get[@]}"; then
         if kube_notfound && (( ${#pods[@]} )); then
@@ -291,7 +321,18 @@ main() {
         (( ${#n} + 2 > width )) && width=$(( ${#n} + 2 ))
     done <<<"$rows"
 
-    if (( ! TB_QUIET )); then
+    if (( ! TB_QUIET )) && [[ -n $owner ]]; then
+        local done_n parts=()
+        done_n=$(awk -F '\x1f' '$5 == 1 && $3 == "Completed"' <<<"$rows" | grep -c .)
+        (( total - bad - done_n )) && parts+=("$(( total - bad - done_n )) Ready")
+        (( done_n )) && parts+=("$done_n Completed")
+        (( bad )) && parts+=("$bad not Ready")
+        if (( total == 0 )); then
+            echo "context ${KCTX:-none}, $where, $owner has no pods"
+        else
+            echo "context ${KCTX:-none}, $where, $owner has $(tb_plural "$total" pod), $(join_and "${parts[@]}")"
+        fi
+    elif (( ! TB_QUIET )); then
         if (( total == 0 )); then
             echo "context ${KCTX:-none}, $where, no pods"
         elif (( bad == 0 )); then
@@ -322,7 +363,7 @@ main() {
     while IFS=$'\x1f' read -r -a f; do
         (( ${#f[@]} )) || continue
         if [[ ${f[4]} == 1 ]]; then
-            (( ${#pods[@]} )) || continue
+            (( ${#pods[@]} )) || [[ -n $owner ]] || continue
             local state=Ready
             [[ ${f[2]} == Completed ]] && state=Completed
             printf "%-${width}s %-18s restarts %s\n" "${f[1]}" "$state" "${f[3]}"
@@ -339,6 +380,7 @@ ns=""
 all=0
 lines=20
 pods=()
+owner=""
 declare -A DOWN=()
 tb_expand "n" "$@"
 set -- ${TB_EXPANDED[@]+"${TB_EXPANDED[@]}"}
@@ -351,12 +393,28 @@ while (( $# )); do
                              lines=$2; shift ;;
         --)                  shift; TB_PASS=("$@"); break ;;
         -*)                  tb_common_opt "$1" || tb_unknown "$1" ;;
+        */*)
+            [[ -n ${1#*/} ]] || tb_usage_error "give a name after the slash, such as deploy/api"
+            case ${1%%/*} in
+                po|pod|pods) pods+=("${1#*/}") ;;
+                deploy|deployment|deployments|sts|statefulset|statefulsets|\
+                ds|daemonset|daemonsets|job|jobs)
+                    [[ -z $owner ]] || tb_usage_error "one workload at a time, not $owner and $1"
+                    owner=$1 ;;
+                *) tb_usage_error "give pods, or deploy/, sts/, ds/ or job/ names, not $1" ;;
+            esac ;;
         *)                   pods+=("$1") ;;
     esac
     shift
 done
 if (( all )) && [[ -n $ns ]]; then
     tb_usage_error "use -n or -A, not both"
+fi
+if [[ -n $owner ]] && (( ${#pods[@]} )); then
+    tb_usage_error "name a workload or pods, not both"
+fi
+if (( all )) && [[ -n $owner ]]; then
+    tb_usage_error "name a workload with -n, not -A, such as: kwhy -n shop $owner"
 fi
 if (( all && ${#pods[@]} )); then
     tb_usage_error "name pods with -n, not -A, such as: kwhy -n shop ${pods[0]}"
