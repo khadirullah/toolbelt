@@ -221,7 +221,8 @@ The shared codes, and any meaning this command adds.
 - Answer questions with `tb_tty` and `echo y |`.
 - `make test` runs everything, and `make test T=unpack` runs one file.
 - [TESTING.md](TESTING.md) covers lint, the docs check and `tools/distro-test`, which runs CI's test job on
-  every distro in Docker.
+  every distro in Docker. It also covers `tools/kind-lab`, a throwaway cluster for trying the Kubernetes
+  commands by hand.
 
 ## Commits
 

@@ -8,11 +8,16 @@ that touches install, packages or anything distro specific.
 | One command's tests | `make test T=unpack` | bash 4.4+, make, bats | seconds |
 | Lint, every test, the docs | `make check` | bats, shellcheck, python3 | 10 to 15 min |
 | CI's test job on all 8 distros | `make distro-test` | Docker, git | 60 to 80 min |
+| The Kubernetes commands by hand | `tools/kind-lab up` | Docker, kind, kubectl | 1 min to start |
 
 A new machine has none of these. [Setting up a machine](#setting-up-a-machine) installs each one.
 
 CI on GitHub runs the same checks on every push to `main` and on every pull request. See
 [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
+The tests stub kubectl, so they never meet a real cluster. To try the Kubernetes commands against one,
+`tools/kind-lab` makes a throwaway cluster, covered in
+[Kubernetes commands on a real cluster](#kubernetes-commands-on-a-real-cluster).
 
 ## Setting up a machine
 
@@ -55,7 +60,7 @@ $ shellcheck --version
 With Docker installed you can skip this and run shellcheck from its image, as [Lint and docs](#lint-and-docs)
 shows.
 
-### Docker, for make distro-test
+### Docker, for make distro-test and the kind lab
 
 ```console
 $ sudo apt install docker.io                     # Debian, Ubuntu
@@ -86,12 +91,31 @@ $ docker rmi hello-world
 Anyone in the `docker` group can get root on the machine through Docker, so add only users you would trust with
 root.
 
+### kind and kubectl, for the kind lab
+
+Each is one file. These commands put both in `~/.local/bin`, the folder toolbelt installs to, so no sudo is
+needed. Debian, Ubuntu and Fedora put that folder on your PATH at login once it exists. On other distros, add
+`export PATH=$HOME/.local/bin:$PATH` to `~/.bashrc`.
+
+```console
+$ mkdir -p ~/.local/bin
+$ arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+$ curl -fLo ~/.local/bin/kind "https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-$arch"
+$ curl -fLo ~/.local/bin/kubectl \
+    "https://dl.k8s.io/release/$(curl -fsL https://dl.k8s.io/release/stable.txt)/bin/linux/$arch/kubectl"
+$ chmod +x ~/.local/bin/kind ~/.local/bin/kubectl
+$ kind version
+$ kubectl version --client
+```
+
 ### Disk and memory
 
 - `make test` and `make check` need almost nothing. Fixtures are a few KB and go in a temp folder.
 - `make distro-test` needs about 2 GB of free disk for the image and packages of the distro it is running. It
   removes them before the next one. Each container uses up to 1.5 GB of memory. On a small machine, cap it
   with `tools/distro-test -m 1500m`.
+- `tools/kind-lab up` needs about 1.5 GB of disk for the kind node image and about 1 GB of free memory while
+  the cluster runs.
 
 ## The test suite
 
@@ -139,7 +163,7 @@ Docker image:
 ```console
 $ docker run --rm -v "$PWD":/mnt:ro -w /mnt koalaman/shellcheck:v0.9.0 -x \
     bin/* lib/common.sh lib/kube.sh shell/functions.sh install.sh completions/toolbelt.bash \
-    tools/distro-test
+    tools/distro-test tools/kind-lab
 ```
 
 `.shellcheckrc` lists the checks the code turns off on purpose, each with its reason. Anything else shellcheck
@@ -191,6 +215,163 @@ The containers start with `tail -f /dev/null` as PID 1, as GitHub Actions does. 
 reaps a process whose parent has exited, so such a process stays a zombie, and `kill -0` still finds it. A test
 that checks a background process has stopped must use `gone PID` from `tests/helpers.bash`, which counts a zombie
 as stopped.
+
+## Kubernetes commands on a real cluster
+
+The tests stub kubectl, so the only way to see `kwhy`, `ksecret`, `kyaml`, `kclean`, `kfwd`, `kres`, `knodes`
+and `kevents` talk to a real API server is to give them one. `tools/kind-lab` makes a small throwaway cluster
+for that. It needs Docker, kind and kubectl, see [Setting up a machine](#setting-up-a-machine).
+
+### What it builds
+
+kind runs each Kubernetes node as a Docker container. `tools/kind-lab up` makes a cluster named `toolbelt` with
+one node, the container `toolbelt-control-plane`, which runs the control plane and the pods. Then it adds:
+
+- metrics-server, so `kres` can show CPU and memory in use. `up --no-metrics` skips it to save memory.
+- a `demo` namespace with something for each command to find:
+
+| Object | State | Try |
+|---|---|---|
+| pod `crasher` | exits 1 with a config error, over and over | `kwhy -n demo crasher` |
+| pod `badimage` | its image tag does not exist | `kwhy -n demo badimage` |
+| pod `toobig` | asks for 64 CPUs, so it never schedules | `kwhy -n demo toobig` |
+| job `once` | finished, its pod left behind | `kclean -n demo` |
+| secret `app-db` | three keys with fake values | `ksecret -n demo app-db` |
+| deployment `web` | healthy, 2 replicas serving on 8080 | `kyaml -n demo deploy/web` |
+| service `web` | port 80 to the web pods | `kfwd -n demo --local 18080 web` |
+
+It writes its own kubeconfig to `~/.cache/toolbelt-dev/kind-toolbelt.kubeconfig`. It never changes
+`~/.kube/config`, so kubectl in your other shells keeps pointing where it did.
+
+### A walk through
+
+Start the cluster. With the node image already on disk this takes about a minute. The first time, kind also
+downloads that image, about 370 MB.
+
+```console
+$ tools/kind-lab up
+== creating cluster toolbelt
+Creating cluster "toolbelt" ...
+...
+== metrics-server
+== demo namespace
+NAME                   READY   STATUS         RESTARTS     AGE
+badimage               0/1     ErrImagePull   0            23s
+crasher                0/1     Error          1 (8s ago)   23s
+once-9g78f             0/1     Completed      0            23s
+toobig                 0/1     Pending        0            23s
+web-58ccdc5667-5zbm2   1/1     Running        0            22s
+web-58ccdc5667-kp9c8   1/1     Running        0            23s
+
+Ready. Point this shell at it with:
+  eval "$(tools/kind-lab env)"
+```
+
+Point this shell at it. Only this shell changes, and the context name says where kubectl now goes:
+
+```console
+$ eval "$(tools/kind-lab env)"
+$ kubectl config current-context
+kind-toolbelt
+```
+
+Ask why pods are not Ready. With no pod name, `kwhy` explains every one in the namespace:
+
+```console
+$ kwhy -n demo
+context kind-toolbelt, namespace demo, 3 of 6 pods not Ready
+badimage               ImagePullBackOff   restarts 0
+  image  busybox:no-such-tag-1
+  event  Error: ErrImagePull
+  hint   the tag does not exist, or the pull secret is wrong
+crasher                Error              restarts 2
+  event  Back-off restarting failed container main
+  exit   1, 8s ago, last 20 lines
+    starting
+    error: config file /etc/app.yaml not found
+  hint   the app stops on start, read the log lines above
+toobig                 Pending            restarts 0
+  event  0/1 nodes are available: 1 Insufficient cpu.
+  asks   cpu 64, memory 1Gi
+  hint   no node has cpu 64, memory 1Gi free, see kres
+```
+
+Read a secret without the base64 step:
+
+```console
+$ ksecret -n demo app-db
+secret demo/app-db, type Opaque, 3 keys
+DB_HOST      db.demo.svc
+DB_PASSWORD  not-a-real-password
+DB_USER      app
+```
+
+See what the cluster has room for, once metrics-server has been up a minute:
+
+```console
+$ kres
+context kind-toolbelt, 1 node
+                        CPU                   MEMORY
+NODE                    requests   used       requests    used
+toolbelt-control-plane  1.1 28%    335m 8%    554Mi 7%    903Mi 11%
+```
+
+Give the node a taint, see `knodes` report it, then take it off:
+
+```console
+$ kubectl taint node toolbelt-control-plane dedicated=db:NoSchedule
+$ knodes
+NODE                     STATUS  ROLE           AGE  VERSION
+toolbelt-control-plane   Ready   control-plane  1m   v1.37.0
+taint  toolbelt-control-plane  dedicated=db:NoSchedule
+all conditions normal
+$ kubectl taint node toolbelt-control-plane dedicated-
+```
+
+Forward the web service to a local port and fetch the page from a second terminal. Port 18080 keeps clear of
+anything already on 8080. Ctrl-C stops the forward.
+
+```console
+$ kfwd -n demo --local 18080 web
+forwarding svc/web port 80 to http://127.0.0.1:18080
+Ctrl+C stops it
+```
+
+```console
+$ curl http://127.0.0.1:18080/
+hello from web
+```
+
+List what `kclean` would delete. It asks before it deletes anything, and `--yes` skips the question. Run
+`tools/kind-lab down` and `up` to get back what it deleted.
+
+```console
+$ kclean -n demo
+context kind-toolbelt, namespace demo
+completed  1  once-9g78f
+```
+
+`kyaml -n demo deploy/web` prints the deployment without the uid, status and other fields the cluster added,
+ready to reuse. `kevents -n demo` lists what happened, newest last.
+
+### Cleaning up
+
+```console
+$ tools/kind-lab down
+Deleting cluster "toolbelt" ...
+Deleted nodes: ["toolbelt-control-plane"]
+```
+
+That removes the node container, everything in the cluster and the lab's kubeconfig. Other kind clusters stay.
+kind keeps the node image for next time, about 1.3 GB on disk. To remove it as well:
+
+```console
+$ docker images kindest/node
+$ docker rmi IMAGE_ID
+```
+
+`up --image` picks another node image, such as `kindest/node:v1.36.0`, to try the commands on an older
+Kubernetes.
 
 ## When CI fails
 

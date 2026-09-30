@@ -26,7 +26,7 @@ test:
 
 lint:
 	shellcheck -x bin/* lib/common.sh lib/kube.sh shell/functions.sh install.sh completions/toolbelt.bash \
-		tools/distro-test
+		tools/distro-test tools/kind-lab
 
 man:
 	python3 tools/md2man.py

@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# A throwaway kind cluster with broken and healthy workloads, to try the
+# Kubernetes commands by hand. It keeps its own kubeconfig, so it never
+# changes ~/.kube/config or the cluster kubectl points at.
+set -uo pipefail
+
+dev=${XDG_CACHE_HOME:-$HOME/.cache}/toolbelt-dev
+name=toolbelt
+kubeconfig=$dev/kind-$name.kubeconfig
+metrics=https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+usage() {
+    cat <<'EOF'
+usage: tools/kind-lab up [--image IMAGE] [--no-metrics]
+       tools/kind-lab down
+       tools/kind-lab env
+
+Make a kind cluster named toolbelt with a demo namespace that has
+something for each Kubernetes command to find: a pod that crashes, one
+with a bad image, one too big to schedule, a finished job, a secret, and
+a web deployment with two services.
+
+  up            create the cluster, add metrics-server and the demo
+  down          delete the cluster and its kubeconfig
+  env           print the export line that points kubectl at it
+
+Options for up:
+  --image IMAGE  kind node image, such as kindest/node:v1.37.0
+  --no-metrics   skip metrics-server, which kres needs, to save memory
+  -h, --help     this help
+
+The kubeconfig is ~/.cache/toolbelt-dev/kind-toolbelt.kubeconfig. Use
+the lab in a shell after: eval "$(tools/kind-lab env)"
+
+Needs: kind, kubectl, docker. up needs about 1 GB of free memory.
+Exit: 0 done, 1 a step failed, 2 bad usage, 3 a tool is missing.
+EOF
+}
+
+die() { echo "kind-lab: $2" >&2; exit "$1"; }
+
+exists() { kind get clusters 2>/dev/null | grep -qxF "$name"; }
+
+# Each object gives one command something to report. See TESTING.md.
+demo() {
+    cat <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata: {name: demo}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: crasher, namespace: demo, labels: {app: crasher}}
+spec:
+  containers:
+  - name: main
+    image: busybox:1.36
+    command: ["sh", "-c", "echo starting; echo 'error: config file /etc/app.yaml not found' >&2; exit 1"]
+    resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 32Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: badimage, namespace: demo}
+spec:
+  containers:
+  - {name: main, image: "busybox:no-such-tag-1", resources: {requests: {cpu: 10m, memory: 16Mi}}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: toobig, namespace: demo}
+spec:
+  containers:
+  - name: main
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    resources: {requests: {cpu: "64", memory: 1Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: once, namespace: demo}
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - {name: main, image: busybox:1.36, command: ["sh", "-c", "echo done"]}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: app-db, namespace: demo}
+stringData: {DB_HOST: db.demo.svc, DB_USER: app, DB_PASSWORD: not-a-real-password}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: demo}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      containers:
+      - name: web
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /www && echo hello from web > /www/index.html && httpd -f -p 8080 -h /www"]
+        ports: [{containerPort: 8080, name: http}]
+        resources: {requests: {cpu: 20m, memory: 16Mi}, limits: {memory: 64Mi}}
+        readinessProbe: {httpGet: {path: /, port: 8080}, periodSeconds: 3}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web, namespace: demo}
+spec:
+  selector: {app: web}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web-headless, namespace: demo}
+spec:
+  clusterIP: None
+  selector: {app: web}
+  ports: [{port: 8080}]
+YAML
+}
+
+up() {
+    local image="" with_metrics=1
+    while (( $# )); do
+        case $1 in
+            --image)      [[ -n ${2:-} ]] || die 2 "--image needs an image, such as kindest/node:v1.37.0"; image=$2; shift ;;
+            --no-metrics) with_metrics=0 ;;
+            -h|--help)    usage; exit 0 ;;
+            *)            die 2 "unknown option $1, see tools/kind-lab --help" ;;
+        esac
+        shift
+    done
+    if exists; then
+        echo "kind-lab: cluster $name already exists, run tools/kind-lab down first to start over" >&2
+        exit 1
+    fi
+    mkdir -p "$dev"
+    export KUBECONFIG=$kubeconfig
+    echo "== creating cluster $name"
+    kind create cluster --name "$name" --kubeconfig "$kubeconfig" ${image:+--image "$image"} --wait 180s ||
+        die 1 "kind could not create the cluster"
+    if (( with_metrics )); then
+        echo "== metrics-server"
+        # kind's kubelets have self-signed certificates, which metrics-server refuses by default.
+        kubectl apply -f "$metrics" >/dev/null &&
+            kubectl -n kube-system patch deploy metrics-server --type=json \
+                -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null ||
+            echo "kind-lab: could not add metrics-server, kres will say metrics are missing" >&2
+    fi
+    echo "== demo namespace"
+    demo | kubectl apply -f - >/dev/null || die 1 "could not create the demo objects"
+    kubectl -n demo rollout status deploy/web --timeout=180s >/dev/null ||
+        echo "kind-lab: web is not ready yet, check it with: kubectl -n demo get pods" >&2
+    kubectl -n demo wait --for=condition=complete job/once --timeout=60s >/dev/null || true
+    kubectl -n demo get pods
+    echo
+    echo "Ready. Point this shell at it with:"
+    echo "  eval \"\$(tools/kind-lab env)\""
+}
+
+down() {
+    if exists; then
+        kind delete cluster --name "$name" --kubeconfig "$kubeconfig" || die 1 "kind could not delete the cluster"
+    else
+        echo "kind-lab: no cluster named $name"
+    fi
+    rm -f "$kubeconfig"
+}
+
+cmd=${1:-}
+[[ -n $cmd ]] || { usage >&2; exit 2; }
+shift
+case $cmd in
+    -h|--help) usage; exit 0 ;;
+    up|down|env) ;;
+    *) die 2 "unknown command $cmd, see tools/kind-lab --help" ;;
+esac
+for tool in kind kubectl docker; do
+    command -v "$tool" >/dev/null || die 3 "needs $tool"
+done
+if [[ $cmd == env ]]; then
+    exists || die 1 "no cluster named $name, make it with: tools/kind-lab up"
+    printf 'export KUBECONFIG=%q\n' "$kubeconfig"
+    exit 0
+fi
+"$cmd" "$@"
