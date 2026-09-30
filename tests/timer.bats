@@ -70,7 +70,8 @@ notices() { cat "$BATS_TEST_TMPDIR/notices" 2>/dev/null; }
     run timeout 1 timer --at "$at" call
     # GNU timeout exits 124. BusyBox timeout passes on the exit code of what it stopped.
     [[ $status == 124 || $status == 1 ]]
-    [[ ${lines[0]} =~ ^timer:\ 1:5[89]:[0-9]{2}\ left,\ ends\ at\ $at,\ call$ ]]
+    # At most two hours, rounded up, so 2:00:00 when the clock was on :00.
+    [[ ${lines[0]} =~ ^timer:\ (1:5[89]:[0-9]{2}|2:00:00)\ left,\ ends\ at\ $at,\ call$ ]]
     [[ $output == *"timer: stopped with 1:5"*" left"* ]]
 }
 
