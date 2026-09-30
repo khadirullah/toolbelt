@@ -1,8 +1,9 @@
 PREFIX ?= $(HOME)/.local
 BATS ?= $(shell command -v bats 2>/dev/null || echo $(HOME)/.cache/toolbelt-dev/bats-core/bin/bats)
 T ?=
+D ?=
 
-.PHONY: help install uninstall test lint man site check clean
+.PHONY: help install uninstall test lint man site check distro-test clean
 
 help:
 	@echo "make install     install to $(PREFIX), no sudo"
@@ -12,6 +13,7 @@ help:
 	@echo "make man         build man/man1 from docs"
 	@echo "make site        build site/ from docs"
 	@echo "make check       lint, test, and check the docs"
+	@echo "make distro-test run CI's tests on every distro in Docker, or one with D=alpine:3"
 
 install:
 	./install.sh --prefix "$(PREFIX)"
@@ -23,7 +25,8 @@ test:
 	$(BATS) $(if $(T),tests/$(T).bats,tests)
 
 lint:
-	shellcheck -x bin/* lib/common.sh lib/kube.sh shell/functions.sh install.sh completions/toolbelt.bash
+	shellcheck -x bin/* lib/common.sh lib/kube.sh shell/functions.sh install.sh completions/toolbelt.bash \
+		tools/distro-test
 
 man:
 	python3 tools/md2man.py
@@ -33,6 +36,9 @@ site:
 
 check: lint test
 	python3 tools/check-docs.py
+
+distro-test:
+	tools/distro-test $(D)
 
 clean:
 	rm -rf site/out

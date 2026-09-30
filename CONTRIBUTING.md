@@ -17,7 +17,7 @@ docs/<command>.md      the full manual page, also the source for man/ and site/
 man/man1/<command>.1   built from docs by `make man`, committed
 completions/           bash and zsh completion
 tests/<command>.bats   tests, with fixtures of a few KB made on the fly
-tools/                 build and check scripts for the repo, never installed
+tools/                 build, check and test scripts for the repo, never installed
 site/                  the website, built from docs by `make site`
 ```
 
@@ -220,6 +220,8 @@ The shared codes, and any meaning this command adds.
   network and no cluster.
 - Answer questions with `tb_tty` and `echo y |`.
 - `make test` runs everything, and `make test T=unpack` runs one file.
+- [TESTING.md](TESTING.md) covers lint, the docs check and `tools/distro-test`, which runs CI's test job on
+  every distro in Docker.
 
 ## Commits
 

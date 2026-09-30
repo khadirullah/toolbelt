@@ -260,10 +260,12 @@ $ make lint            # shellcheck
 $ make check           # lint, every test and the docs check
 $ make man             # rebuild man/ from docs/
 $ make site            # build the website into site/out
+$ make distro-test     # CI's tests on all 8 distros, in Docker
 ```
 
 Tests make their fixtures on the fly, a few KB each, and stub the network, systemd, the package manager and
-kubectl. The suite needs no network, no root and no cluster.
+kubectl. The suite needs no network, no root and no cluster. [TESTING.md](TESTING.md) covers every check, how
+to run CI's distro tests locally and how to read a failure.
 
 ## Credits
 

@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Run CI's test job for each distro image in a local container, then check
+# install and uninstall as a normal user. The images and the install step
+# come from .github/workflows/ci.yml, so this runs what CI runs.
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+ci=$root/.github/workflows/ci.yml
+dev=${XDG_CACHE_HOME:-$HOME/.cache}/toolbelt-dev
+logs=$dev/distro-test
+bats=$dev/bats-core
+docker=${DOCKER:-docker}
+
+usage() {
+    cat <<'EOF'
+usage: tools/distro-test [options] [IMAGE...]
+
+Run CI's test job in a container for each image, one at a time: the
+install step from .github/workflows/ci.yml, every test, the package name
+check, then install, a few commands and uninstall as a normal user. PID 1
+is tail, as on GitHub Actions, so ended processes stay zombies there too.
+
+Options:
+  -m, --memory SIZE  memory cap per container, such as 1500m, none by default
+  -t, --tests PATH   run only these tests, such as tests/unpack.bats
+  --no-smoke         skip the install check as a normal user
+  -l, --list         print the CI images and stop
+  -h, --help         this help
+
+With no IMAGE it runs every image in the CI matrix. It removes the images
+it pulled when it is done. Logs go to ~/.cache/toolbelt-dev/distro-test/.
+
+Needs: docker, or podman with DOCKER=podman, and git to fetch bats.
+Exit: 0 all passed, 1 a run failed, 2 bad usage, 3 no docker.
+EOF
+}
+
+die() { echo "distro-test: $2" >&2; exit "$1"; }
+
+# The images in the test job's matrix.
+ci_images() {
+    awk '/^ *image:$/ { on = 1; next } on && /^ *- / { sub(/^ *- */, ""); print; next } on { exit }' "$ci"
+}
+
+# The body of the "install test tools" step, with its indent removed.
+ci_install() {
+    awk '/- name: install test tools/ { step = 1; next }
+        step && /^ *run: \|/ { match($0, /^ */); ind = RLENGTH; body = 1; next }
+        body { match($0, /^ */); if (NF && RLENGTH <= ind) exit; print substr($0, ind + 3) }' "$ci"
+}
+
+# The images the package name step leaves out, from its if: line.
+ci_pkgmap_skips() {
+    awk '/- name: package names exist in this distro/ { s = 1; next } s && /if:/ { print; exit }' "$ci" |
+        grep -o "'[^']*'" | tr -d "'"
+}
+
+# Runs inside the container, as root, with sh until bash is installed.
+read -r -d '' INSIDE <<'SH'
+set -u
+. /etc/os-release && echo "== $PRETTY_NAME"
+sh -c "$CI_INSTALL" > /tmp/install.log 2>&1
+rc=$?
+echo "install rc=$rc"
+if [ "$rc" -ne 0 ]; then tail -n 20 /tmp/install.log; exit 1; fi
+cp -a /src /work && cd /work || exit 1
+git config --global --add safe.directory /work
+echo "== tests"
+/bats/bin/bats $TESTS
+echo "bats rc=$?"
+if [ "$PKGMAP" = 1 ]; then
+    echo "== package names"
+    bash tools/check-pkgmap
+    echo "pkgmap rc=$?"
+fi
+[ "$SMOKE" = 1 ] || exit 0
+echo "== install as a normal user"
+(id tb || useradd -m tb || adduser -D tb) >/dev/null 2>&1
+cp -a /src /home/tb/toolbelt && chown -R tb /home/tb/toolbelt
+su tb -c "bash -s" <<'SMOKE'
+export PATH=$HOME/.local/bin:$PATH NO_COLOR=1
+# check NAME CODES CMD...: pass when CMD exits with one of CODES, such as 0 or 0,1.
+check() {
+    local name=$1 codes=",$2," rc
+    shift 2
+    "$@" > /tmp/smoke.out 2>&1
+    rc=$?
+    if [[ $codes == *",$rc,"* ]]; then
+        echo "smoke ok    $name"
+    else
+        echo "smoke FAIL  $name, exit $rc"
+        tail -n 5 /tmp/smoke.out | sed 's/^/            /'
+    fi
+}
+cd ~/toolbelt && check install 0 ./install.sh -q
+cd ~
+mkdir -p demo/sub && seq 1 500 > demo/a.txt && seq 1 900 > demo/sub/b.txt
+check "toolbelt doctor" 0 toolbelt doctor
+check squash 0 squash -k demo
+check unpack 0 bash -c 'mkdir un && cd un && unpack -k ../demo.tar.zst'
+check checksum 0 checksum demo/a.txt
+check bak 0 bak demo/a.txt
+check bigfiles 0 bigfiles -n 3 .
+check recent 0 recent -n 3 demo
+check dupes 0 dupes demo
+check sysinfo 0 sysinfo
+check mem 0 mem -n 3
+check proc 0 proc 1
+# Minimal images lack lsblk, and nothing listens in a fresh container, so
+# exit 3 (missing tool) and exit 1 (nothing listens) are right there.
+check disks 0,3 disks
+check port 0,1 port
+check genpass 0 genpass -w 4
+check epoch 0 epoch 1700000000
+check jwtpeek 0 jwtpeek eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0YiIsImV4cCI6NDEwMjQ0NDgwMH0.x
+check "git whoami" 0 bash -c 'cd demo && git init -q . && git config user.email t@example.com &&
+    git config user.name t && git add -A && git commit -qm one && git whoami'
+# seccheck exits 1 when it finds something to fix, which a container has.
+check seccheck 0,1 seccheck -q
+check schedules 0 schedules
+check uninstall 0 toolbelt uninstall -y -q
+if [[ -z $(ls -A ~/.local/bin 2>/dev/null) ]]; then
+    echo "smoke ok    nothing left in ~/.local/bin"
+else
+    echo "smoke FAIL  ~/.local/bin still has $(ls ~/.local/bin | head -n 3 | tr '\n' ' ')"
+fi
+SMOKE
+SH
+
+# One image: start it with tail as PID 1, run INSIDE, sum up the log.
+run_image() {
+    local img=$1 log had=0 start ok=1 pass fail skip smoke_ok smoke_bad bats_rc line
+    log=$logs/$(tr ':/' '__' <<<"$img").log
+    "$docker" image inspect "$img" >/dev/null 2>&1 && had=1
+    start=$(date +%s)
+    echo "$img: running, log in $log"
+    # Only the container id goes to stdout. A pull prints its progress on stderr.
+    if ! cid=$("$docker" run -d --pids-limit 2000 ${memory:+--memory "$memory"} \
+            -v "$root":/src:ro -v "$bats":/bats:ro "$img" tail -f /dev/null 2>"$log"); then
+        cid=""
+        ok=0
+        line="$img  could not start: $(tail -n 1 "$log")"
+    else
+        "$docker" exec -e CI_INSTALL="$(ci_install)" -e TESTS="$tests" -e SMOKE="$smoke" \
+            -e PKGMAP="$(ci_pkgmap_skips | grep -qxF "$img" && echo 0 || echo 1)" \
+            "$cid" sh -c "$INSIDE" > "$log" 2>&1 &
+        wait $!    # in the background so the trap fires at once
+        "$docker" rm -f "$cid" >/dev/null 2>&1
+        cid=""
+        pass=$(grep -cE '^ok [0-9]+ ' "$log")
+        fail=$(grep -cE '^not ok [0-9]+ ' "$log")
+        skip=$(grep -cE '^ok [0-9]+ .* # skip' "$log")
+        bats_rc=$(sed -n 's/^bats rc=//p' "$log")
+        line="$img  passed $pass, failed $fail, skipped $skip"
+        [[ $bats_rc == 0 ]] || { ok=0; line+=", bats exit ${bats_rc:-missing}"; }
+        if grep -q '^pkgmap rc=[1-9]' "$log"; then
+            ok=0
+            line+=", package names failed"
+        fi
+        if (( smoke )); then
+            smoke_ok=$(grep -c '^smoke ok' "$log")
+            smoke_bad=$(grep -c '^smoke FAIL' "$log")
+            line+=", smoke $smoke_ok ok $smoke_bad failed"
+            (( smoke_bad == 0 && smoke_ok > 0 )) || ok=0
+        fi
+    fi
+    line+="  $(( $(date +%s) - start ))s"
+    (( had )) || "$docker" rmi -f "$img" >/dev/null 2>&1
+    echo "$line" | tee -a "$logs/summary.txt"
+    (( ok ))
+}
+
+memory="" tests=tests smoke=1 images=()
+while (( $# )); do
+    case $1 in
+        -m|--memory) [[ -n ${2:-} ]] || die 2 "$1 needs a size, such as 1500m"; memory=$2; shift ;;
+        -t|--tests)  [[ -n ${2:-} ]] || die 2 "$1 needs a path, such as tests/unpack.bats"; tests=$2; shift ;;
+        --no-smoke)  smoke=0 ;;
+        -l|--list)   ci_images; exit 0 ;;
+        -h|--help)   usage; exit 0 ;;
+        -*)          die 2 "unknown option $1, see tools/distro-test --help" ;;
+        *)           images+=("$1") ;;
+    esac
+    shift
+done
+
+command -v "$docker" >/dev/null || die 3 "needs docker, or set DOCKER=podman"
+"$docker" info >/dev/null 2>&1 || die 3 "$docker is installed but not running, or you lack access to it"
+[[ -n $(ci_install) ]] || die 1 "cannot find the install step in $ci"
+(( ${#images[@]} )) || mapfile -t images < <(ci_images)
+(( ${#images[@]} )) || die 1 "cannot find the image list in $ci"
+
+mkdir -p "$logs"
+if [[ -d $bats/.git ]]; then
+    git -C "$bats" pull -q --ff-only 2>/dev/null || echo "distro-test: could not update bats, using the copy in $bats" >&2
+else
+    git clone -q --depth 1 https://github.com/bats-core/bats-core.git "$bats" || die 1 "could not fetch bats"
+fi
+
+# Remove the running container when stopped with Ctrl-C or kill.
+cid=""
+trap '[[ -n $cid ]] && "$docker" rm -f "$cid" >/dev/null 2>&1; exit 130' INT TERM
+
+: > "$logs/summary.txt"
+failed=0
+for img in "${images[@]}"; do
+    run_image "$img" || failed=1
+done
+exit "$failed"
