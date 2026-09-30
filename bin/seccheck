@@ -500,7 +500,7 @@ check_screenlock() {
         idle=$(( idle * 60 ))
     else
         case $desk in
-            *Cinnamon*|*X-Cinnamon*) schema=org.cinnamon.desktop.screensaver session=org.cinnamon.desktop.session ;;
+            *Cinnamon*) schema=org.cinnamon.desktop.screensaver session=org.cinnamon.desktop.session ;;
             *MATE*) schema=org.mate.screensaver session=org.mate.screensaver factor=60 ;;
             *GNOME*|*Unity*|*Budgie*|*Pantheon*) schema=org.gnome.desktop.screensaver session=org.gnome.desktop.session ;;
         esac

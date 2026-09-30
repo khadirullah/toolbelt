@@ -54,7 +54,7 @@ detect_kind() {
         *.tar.lz)                       echo tar.lz; return ;;
         *.tar.lzo|*.tzo)                echo tar.lzo; return ;;
         *.tar.br)                       echo tar.br; return ;;
-        *.zip|*.jar|*.war|*.ear|*.whl|*.xpi|*.epub|*.apk.zip) echo zip; return ;;
+        *.zip|*.jar|*.war|*.ear|*.whl|*.xpi|*.epub) echo zip; return ;;
         *.7z|*.rar|*.iso|*.cab)         echo 7z; return ;;
     esac
     fam=$(magic_fam "$f")

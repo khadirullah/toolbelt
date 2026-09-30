@@ -170,7 +170,7 @@ collect() {
 reword() {
     local m=$1
     case $m in
-        *"found character '\\t'"*|*"found character '\t'"*) m="tab character, YAML allows spaces only" ;;
+        *"found character '\\t'"*) m="tab character, YAML allows spaces only" ;;
         "duplication of key "*" in mapping (key-duplicates)")
             m=${m#duplication of key }
             m="duplicate key ${m% in mapping (key-duplicates)}" ;;
