@@ -94,7 +94,8 @@ name_tests() {
 
 # Print "mtime size path" for every match under one path, unsorted.
 scan() {
-    local p=$1 args=(-P "$p") skip=() mins trash
+    local p=$1
+    local args=(-P "$p") skip=() mins trash
     trash=${XDG_DATA_HOME:-$HOME/.local/share}/Trash
     # find -mmin is whole minutes, so ask for one more and cut exactly later.
     mins=$(( (now - SINCE) / 60 + 2 ))
