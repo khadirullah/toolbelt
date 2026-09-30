@@ -8,7 +8,7 @@ setup() {
     export CALLS=$BATS_TEST_TMPDIR/calls
     : > "$CALLS"
     local t
-    for t in apt apt-get dnf pacman zypper apk flatpak fwupdmgr; do
+    for t in apt apt-get apt-cache dnf pacman zypper apk flatpak fwupdmgr; do
         tb_stub "$t" "echo \"$t \$*\" >> \"\$CALLS\""
     done
     tb_stub sudo 'echo "sudo $*" >> "$CALLS"; exec "$@"'
@@ -79,7 +79,7 @@ setup() {
     TB_PM=apk run pkg -n install htop
     [ "$output" = "${s}apk add htop" ]
     TB_PM=apt run pkg -n info htop
-    [ "$output" = "apt show htop" ]
+    [ "$output" = "apt-cache show htop" ]
     TB_PM=pacman run pkg -n files htop
     [ "$output" = "pacman -Qlq htop" ]
     TB_PM=apk run pkg -n files htop
@@ -117,14 +117,24 @@ setup() {
     run pkg -v search ripgrep
     [ "$status" -eq 0 ]
     [[ ${lines[0]} == "pkg: "*", package manager apt" ]]
-    [ "${lines[1]}" = "+ apt search ripgrep" ]
+    [ "${lines[1]}" = "+ apt-cache search ripgrep" ]
+}
+
+@test "apt searches on a terminal, apt-cache through a pipe" {
+    command -v script >/dev/null || skip "no script command to make a terminal"
+    run script -qec "pkg search htop" /dev/null
+    grep -qx "apt search htop" "$CALLS"
+    : > "$CALLS"
+    pkg search htop | cat
+    grep -qx "apt-cache search htop" "$CALLS"
+    not grep -q "^apt " "$CALLS"
 }
 
 @test "a closed pipe after a search is not an error" {
-    tb_stub apt 'echo "htop/stable 3.4.1-1 amd64"; exit 141'
+    tb_stub apt-cache 'echo "htop - interactive processes viewer"; exit 141'
     run pkg search htop
     [ "$status" -eq 0 ]
-    [ "$output" = "htop/stable 3.4.1-1 amd64" ]
+    [ "$output" = "htop - interactive processes viewer" ]
     tb_stub apt 'exit 141'
     run pkg install htop
     [ "$status" -eq 1 ]

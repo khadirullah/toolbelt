@@ -106,8 +106,10 @@ native() {
     case $1:$PM in
         install:apt)    CMD=("$APT" install) ;;
         remove:apt)     CMD=("$APT" remove) ;;
-        search:apt)     if [[ $APT == apt ]]; then CMD=(apt search); else CMD=(apt-cache search); fi ;;
-        info:apt)       if [[ $APT == apt ]]; then CMD=(apt show); else CMD=(apt-cache show); fi ;;
+        # apt is for people. Through a pipe it adds a warning and progress
+        # lines, so scripts get apt-cache, which prints the same data plainly.
+        search:apt)     if [[ $APT == apt && -t 1 ]]; then CMD=(apt search); else CMD=(apt-cache search); fi ;;
+        info:apt)       if [[ $APT == apt && -t 1 ]]; then CMD=(apt show); else CMD=(apt-cache show); fi ;;
         files:apt)      CMD=(dpkg -L) ;;
         install:dnf)    CMD=("$DNF" install) ;;
         remove:dnf)     CMD=("$DNF" remove) ;;

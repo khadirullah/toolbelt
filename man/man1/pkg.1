@@ -1,4 +1,4 @@
-.TH "PKG" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "PKG" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 pkg \- one package command on every distro
 .SH SYNOPSIS
@@ -99,7 +99,7 @@ With \fB\-y\fR, apt and dnf get \fB\-y\fR, pacman gets \fB\-\-noconfirm\fR and z
 \fBpacman \-Rs\fR removes the package and the dependencies nothing else needs, which is what most people expect from "remove". \fBapt remove\fR keeps the config files in \fB/etc\fR. Pass \fB\-\- \-\-purge\fR to drop them too.
 .SH PER\-DISTRO NOTES
 .PP
-Debian and Ubuntu : \fBpkg\fR uses \fBapt\fR when it is there and \fBapt\-get\fR and \fBapt\-cache\fR when it is not, as on minimal images. \fBapt\fR prints \fBWARNING: apt does not have a stable CLI interface\fR when its output goes to a pipe. The warning is harmless.
+Debian and Ubuntu : \fBpkg\fR uses \fBapt\fR when it is there and \fBapt\-get\fR and \fBapt\-cache\fR when it is not, as on minimal images. When the output of \fBsearch\fR or \fBinfo\fR goes to a pipe or a file, \fBpkg\fR runs \fBapt\-cache\fR even where \fBapt\fR exists. Piped \fBapt\fR adds a warning about its CLI and "Sorting..." lines, and \fBapt\-cache\fR prints the same packages without them.
 .PP
 Fedora, RHEL, Rocky and Alma : \fBpkg\fR uses \fBdnf\fR, or \fByum\fR on old releases without it. \fBdnf upgrade\fR refreshes the metadata on its own, so there is no separate update step.
 .PP

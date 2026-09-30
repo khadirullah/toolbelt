@@ -90,9 +90,10 @@ subcommand, which is where zypper wants it. apk never asks, so it gets nothing.
 ## Per-distro notes
 
 Debian and Ubuntu
-: `pkg` uses `apt` when it is there and `apt-get` and `apt-cache` when it is not, as on minimal images. `apt`
-  prints `WARNING: apt does not have a stable CLI interface` when its output goes to a pipe. The warning is
-  harmless.
+: `pkg` uses `apt` when it is there and `apt-get` and `apt-cache` when it is not, as on minimal images. When
+  the output of `search` or `info` goes to a pipe or a file, `pkg` runs `apt-cache` even where `apt` exists. Piped
+  `apt` adds a warning about its CLI and "Sorting..." lines, and `apt-cache` prints the same packages without
+  them.
 
 Fedora, RHEL, Rocky and Alma
 : `pkg` uses `dnf`, or `yum` on old releases without it. `dnf upgrade` refreshes the metadata on its own, so there
