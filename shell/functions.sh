@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # toolbelt shell functions: mkcd and up. They change the folder of the shell
 # you type in, which a script in its own process cannot do, so they are
 # functions. shell/init.sh loads this file when the "functions" setting is on.

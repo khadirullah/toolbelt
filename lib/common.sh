@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# The commands that source this file read its colours and exit codes.
+# shellcheck disable=SC2034
 # Shared helpers for every toolbelt command.
 #
 # A command sources this file, defines usage(), and parses its options with

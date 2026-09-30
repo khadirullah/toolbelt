@@ -1,0 +1,12 @@
+# Follow each command's "source ../lib/common.sh" from the script's folder.
+source-path=SCRIPTDIR
+
+# Patterns this code uses on purpose, everywhere:
+# SC2015  [[ check ]] && (( range )) || tb_usage_error, the error fires if either fails
+# SC2154  tb_tmpdir work sets $work through printf -v, which shellcheck cannot see
+# SC2209  what=file and mode=make are words, not commands
+# SC2317,SC2329  functions that only a trap or a dispatch table calls
+# SC2088  "~/.ssh" and the like are text shown to people, not paths
+# SC2016  single quotes around jq, awk and shell code meant to stay literal
+# SC2001  sed on a joined list reads clearer than nested ${//}
+disable=SC2015,SC2154,SC2209,SC2317,SC2329,SC2088,SC2016,SC2001

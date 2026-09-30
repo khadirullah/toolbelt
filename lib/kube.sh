@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Helpers for the kubectl wrappers: kwhy, ksecret, kyaml, kclean, kfwd,
 # kres, knodes and kevents. Sourced after lib/common.sh. They read TB_PASS
 # for the options after -- and write kubectl errors to $TMP/kerr.
