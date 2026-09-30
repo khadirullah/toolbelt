@@ -293,9 +293,9 @@ log_line() {
         fi
     fi
     [[ " $DEVICES " == *" $ip "* ]] || DEVICES+=" $ip"
-    local shown=$path
-    (( ${#shown} > 40 )) && shown="...${shown: -37}"
-    printf '%s  %s  %s %-20s %s%s\n' "$t" "$ip" "$method" "$shown" "$code" "${size:+  $size}"
+    local short=$path
+    (( ${#short} > 40 )) && short="...${short: -37}"
+    printf '%s  %s  %s %-20s %s%s\n' "$t" "$ip" "$method" "$short" "$code" "${size:+  $size}"
 }
 
 serve() {

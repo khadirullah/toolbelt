@@ -82,6 +82,7 @@ osc52() {
     data=$(base64 < "$file" | tr -d '\n') || return 1
     tb_show_text "base64 < $file, sent to the terminal as OSC 52"
     if [[ -n ${TMUX:-} ]]; then
+        # shellcheck disable=SC1003
         { printf '\ePtmux;\e\e]52;%s;%s\a\e\\' "$target" "$data" > "$tty"; } 2>/dev/null
     else
         { printf '\e]52;%s;%s\a' "$target" "$data" > "$tty"; } 2>/dev/null

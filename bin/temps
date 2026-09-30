@@ -171,6 +171,7 @@ show_table() {
         printf '%-8s %-12s %s' "$grp" "$name" "$out"
         if [[ -n $high ]]; then
             printf '  high %s C' "$high"
+            # shellcheck disable=SC2086
             top=$(max_of $vals)
             (( top >= high - HOT_MARGIN )) && printf '  %shot%s' "$C_RED" "$C_OFF"
         fi
@@ -233,6 +234,7 @@ watch_loop() {
         local table=""
         table+=$(printf '%s%-16s %9s %9s %9s%s' "$C_BOLD" "" NOW MIN MAX "$C_OFF")$'\n'
         while IFS=$'\037' read -r grp name vals high unit; do
+            # shellcheck disable=SC2086
             v=$(max_of $vals)
             if [[ $grp == fan ]]; then k="fan $name"; else k="$grp $name"; fi
             [[ $grp == cpu && $name == cores ]] && k="cpu cores"

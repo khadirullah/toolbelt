@@ -59,6 +59,8 @@ set_tree_chars() {
 read_devices() {
     local line NAME KNAME PKNAME TYPE SIZE FSTYPE MOUNTPOINT MODEL DPATH i
     N=0
+    # A comma list is one argument to -o.
+    # shellcheck disable=SC2054
     local cmd=(lsblk -P -b -o NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL,PATH)
     tb_show "${cmd[@]}"
     while IFS= read -r line; do

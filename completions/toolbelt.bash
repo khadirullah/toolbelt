@@ -38,5 +38,6 @@ _toolbelt_names() {
     awk '!/^#/ && NF { for (i = 2; i <= NF; i++) print $i }' "$lib" 2>/dev/null
 }
 
+# shellcheck disable=SC2046
 complete -o default -o bashdefault -F _toolbelt_complete $(_toolbelt_names | grep -v -e '^mkcd$' -e '^up$')
 complete -o dirnames mkcd up 2>/dev/null

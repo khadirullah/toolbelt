@@ -228,7 +228,8 @@ show_pod() {
             [[ -n $text ]] && echo "  exit   $text"
             echo "  logs   not readable while the node is NotReady"
         elif (( lines > 0 )); then
-            local what="last $(tb_plural "$lines" line)"
+            local what
+            what="last $(tb_plural "$lines" line)"
             [[ $from == previous ]] && what+=" of the crashed container"
             if [[ -n $text ]]; then echo "  exit   $text, $what"; else echo "  logs   $what"; fi
             local args=(logs "$name" -n "$ns" -c "$c" --tail "$lines")
@@ -340,7 +341,8 @@ main() {
             done_n=$(awk -F '\x1f' '$3 == "Completed"' <<<"$rows" | grep -c .)
             local what="Ready"
             (( done_n )) && what="Ready or Completed"
-            local count="all $(tb_plural "$total" pod)"
+            local count
+            count="all $(tb_plural "$total" pod)"
             (( total == 1 )) && count="1 pod"
             if (( all )); then
                 echo "context ${KCTX:-none}, $count $what in $(tb_plural "$nsn" namespace)"

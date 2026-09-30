@@ -50,7 +50,7 @@ exec_mode() {
     for (( i = 0; i < ${#m}; i++ )); do
         d=${m:i:1}
         (( d & 4 )) && d=$(( d | 1 ))
-        out+=$d
+        out+="$d"
     done
     echo "$out"
 }

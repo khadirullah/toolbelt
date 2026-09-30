@@ -195,7 +195,8 @@ measure_trash() {
     [[ -d $t ]] || { WHAT="no trash folder, nothing to do"; NOTHING=1; return; }
     SIZE=$(size_of "$t/files" "$t/info" "$t/expunged")
     n=$(find "$t/files" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
-    local files="$(tb_commas "$n") file"
+    local files
+    files="$(tb_commas "$n") file"
     (( n == 1 )) || files+=s
     WHAT="empties $(tilde "$t"), $files"
     (( n > 0 )) || { WHAT="empty, nothing to do"; NOTHING=1; SIZE=0; }
@@ -234,6 +235,8 @@ kernel_list() {
                 KERNELS+=("${line#"$pkg"-}")
             done < <(rpm -q "$pkg" 2>/dev/null | grep -v 'not installed' | sort -V) ;;
         zypper)
+            # Kernel folders are version names, safe to list with ls.
+            # shellcheck disable=SC2012
             while read -r line; do
                 KERNELS+=("$line")
             done < <(ls -1 "$ROOT/lib/modules" 2>/dev/null | sort -V) ;;

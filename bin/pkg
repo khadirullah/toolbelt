@@ -294,6 +294,7 @@ newer_kernel() {
     local running newest
     running=$(uname -r)
     [[ -d /lib/modules ]] || return 1
+    # shellcheck disable=SC2012
     newest=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -n 1)
     [[ -n $newest && $newest != "$running" ]] || return 1
     [[ $(printf '%s\n%s\n' "$running" "$newest" | sort -V | tail -n 1) == "$newest" ]] || return 1

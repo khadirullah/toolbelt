@@ -231,7 +231,7 @@ list_devices() {
     echo
     printf '%-*s%-19s%-15s%s\n' "$ipw" IP MAC VENDOR NAME
     printf '%s' "$out"
-    echo "$(tb_plural "$count" device)"
+    tb_plural "$count" device
 }
 
 # Resolve a host name to one IPv4 address.
@@ -260,6 +260,8 @@ scan_ports() {
         tb_show nmap -sT "${args[@]:1}"
         out=$(nmap -sT "${args[@]:1}" 2>&1)
     fi
+    # The if returns the status of the nmap that ran.
+    # shellcheck disable=SC2181
     (( $? == 0 )) || tb_die 1 "nmap failed on $host: $(tail -n1 <<<"$out")"
     if grep -q 'Host seems down\|0 hosts up' <<<"$out"; then
         tb_die 1 "$host ($ip) does not answer. It may be off, or a firewall drops every probe"

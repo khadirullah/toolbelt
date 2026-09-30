@@ -175,7 +175,7 @@ rc_shadows() {
     for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_aliases"; do
         [[ -r $f ]] || continue
         while read -r c; do
-            if grep -Eq "^[[:space:]]*(alias[[:space:]]+$c=|function[[:space:]]+$c\b|$c[[:space:]]*\(\))" "$f"; then
+            if grep -Eq "^[[:space:]]*(alias[[:space:]]+$c=|function[[:space:]]+${c}\b|${c}[[:space:]]*\(\))" "$f"; then
                 echo "$c ${f/#$HOME/\~}"
             fi
         done < <(all_commands | grep -v -e '^mkcd$' -e '^up$')
@@ -452,6 +452,7 @@ cmd_new() {
         echo "try it: ./bin/$name --help"
     else
         [[ -e $name ]] && tb_die "$E_SAFE" "./$name already exists"
+        # shellcheck disable=SC2094
         write_template "$name" "source \"$TB_ROOT/lib/common.sh\"" > "$name"
         chmod +x "$name"
         echo "wrote ./$name, using the installed toolbelt library"

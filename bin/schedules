@@ -120,6 +120,8 @@ read_results() {
     [[ $1 == user ]] && user_flag=(--user)
     shift
     (( $# )) || return 0
+    # A comma list is one argument to -p.
+    # shellcheck disable=SC2054
     local cmd=(systemctl ${user_flag[@]+"${user_flag[@]}"} show -p Id,Result,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,ActiveState "$@")
     tb_show "${cmd[@]}"
     while IFS= read -r line; do

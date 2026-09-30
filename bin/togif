@@ -110,7 +110,7 @@ main() {
     pal=(ffmpeg -nostdin -hide_banner -loglevel error -y "${cut[@]}" -i "$in_arg"
         -vf "$filter,palettegen" ${TB_PASS[@]+"${TB_PASS[@]}"} "$work/palette.png")
     gif=(ffmpeg -nostdin -hide_banner -loglevel error -y "${cut[@]}" -i "$in_arg" -i "$work/palette.png"
-        -lavfi "$filter[x];[x][1:v]paletteuse" -loop "$loop_val" ${TB_PASS[@]+"${TB_PASS[@]}"} "$work/out.gif")
+        -lavfi "${filter}[x];[x][1:v]paletteuse" -loop "$loop_val" ${TB_PASS[@]+"${TB_PASS[@]}"} "$work/out.gif")
     start_ms=$(tb_now_ms)
     tb_line "togif: building the palette"
     tb_show "${pal[@]}"
