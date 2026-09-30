@@ -11,6 +11,9 @@ setup() {
     head -c 8192 /dev/zero > 'my docs/tax 2025.pdf'
     printf 'hi\n' > small.txt
     touch -d "$(tb_ago 864000)" dl/debian.iso
+    # Two hours old, so the age reads 2h however slow the run. A fresh file
+    # would read 0s or 1s depending on when the second ticks over.
+    touch -d "$(tb_ago 7200)" vms/disk.img 'my docs/tax 2025.pdf'
 }
 
 @test "help prints usage and exits 0" {
@@ -40,9 +43,9 @@ setup() {
 @test "lists files biggest first with size, age and path" {
     run bigfiles
     [ "$status" -eq 0 ]
-    [ "${lines[0]}" = "   40KB     0s  ./vms/disk.img" ]
+    [ "${lines[0]}" = "   40KB     2h  ./vms/disk.img" ]
     [ "${lines[1]}" = "   20KB    10d  ./dl/debian.iso" ]
-    [ "${lines[2]}" = "    8KB     0s  ./my docs/tax 2025.pdf" ]
+    [ "${lines[2]}" = "    8KB     2h  ./my docs/tax 2025.pdf" ]
     [ "${lines[4]}" = "4 files, 68KB together" ]
 }
 
