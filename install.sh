@@ -60,19 +60,21 @@ remove_rc_lines() {
 
 if (( uninstall )); then
     [[ -r $record ]] || die "no toolbelt install found in $prefix"
-    n=0
+    declare -A n=([bin]=0 [man]=0 [comp]=0)
     while read -r kind path; do
         case $kind in
             bin|man|comp)
                 # Only remove links that still point into toolbelt.
                 if [[ -L $path && $(readlink "$path") == "$root"/* ]]; then
-                    rm -f "$path" && ((n++))
+                    rm -f "$path" && n[$kind]=$(( n[$kind] + 1 ))
                 fi ;;
         esac
     done < "$record"
     remove_rc_lines
     rm -rf "${root:?}"
-    say "toolbelt removed, $n links. Open a new terminal to drop mkcd and up."
+    count() { if (( $1 == 1 )); then echo "1 $2"; else echo "$1 ${3:-${2}s}"; fi; }
+    say "toolbelt removed, $(count "${n[bin]}" command), $(count "${n[man]}" "man page") and" \
+        "$(count "${n[comp]}" "completion file"). Open a new terminal to drop mkcd and up."
     exit 0
 fi
 

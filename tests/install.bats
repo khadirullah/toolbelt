@@ -40,6 +40,7 @@ setup() {
     echo mine > "$PREFIX/bin/other"
     run "$TB_REPO/install.sh" --prefix "$PREFIX" --uninstall
     [ "$status" -eq 0 ]
+    [[ ${lines[-1]} =~ ^"toolbelt removed, "[0-9]+" commands, "[0-9]+" man pages and "[0-9]+" completion files. Open a new terminal" ]]
     [ ! -e "$PREFIX/bin/toolbelt" ]
     [ ! -d "$PREFIX/share/toolbelt" ]
     [ -f "$PREFIX/bin/other" ]
