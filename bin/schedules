@@ -91,9 +91,9 @@ took_text() {
 # One line per timer from systemctl list-timers JSON: next and last in
 # epoch seconds (0 for none), the timer and the unit it starts.
 timer_lines() {
-    local scope=() out
-    [[ $1 == user ]] && scope=(--user)
-    local cmd=(systemctl ${scope[@]+"${scope[@]}"} list-timers --output=json --no-pager)
+    local user_flag=() out
+    [[ $1 == user ]] && user_flag=(--user)
+    local cmd=(systemctl ${user_flag[@]+"${user_flag[@]}"} list-timers --output=json --no-pager)
     (( all )) && cmd+=(--all)
     tb_show "${cmd[@]}"
     if ! out=$("${cmd[@]}" 2>/dev/null); then
@@ -116,11 +116,11 @@ timer_lines() {
 # Result, run time and state for each service, from systemctl show.
 # Fills RESULT[service] with "ok", "failed, exit 1" and so on, and TOOK[service].
 read_results() {
-    local scope=() key val line id="" result="" status="" start=0 stop=0 state=""
-    [[ $1 == user ]] && scope=(--user)
+    local user_flag=() key val line id="" result="" status="" start=0 stop=0 state=""
+    [[ $1 == user ]] && user_flag=(--user)
     shift
     (( $# )) || return 0
-    local cmd=(systemctl ${scope[@]+"${scope[@]}"} show -p Id,Result,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,ActiveState "$@")
+    local cmd=(systemctl ${user_flag[@]+"${user_flag[@]}"} show -p Id,Result,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,ActiveState "$@")
     tb_show "${cmd[@]}"
     while IFS= read -r line; do
         if [[ -z $line ]]; then
