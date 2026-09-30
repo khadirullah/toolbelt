@@ -106,6 +106,7 @@ Help fits in 80 columns and, for most commands, one screen. The long form lives 
 - Progress bars only when `tb_progress` is true.
 - Sizes from `tb_human`, times from `tb_elapsed`, ages from `tb_age`, counts from `tb_plural`. Read sizes the user
   types, such as `100K` or `1.5G`, with `tb_parse_size`.
+- Read a date from openssl, such as `notAfter`, with `tb_cert_epoch`. BusyBox `date` cannot read that form.
 - A status line that rewrites itself uses `tb_line` and `tb_line_end`.
 
 ## Exit codes

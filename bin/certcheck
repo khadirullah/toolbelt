@@ -116,18 +116,6 @@ fetch() {
     return 1
 }
 
-# "Oct  9 15:04:16 2026 GMT" in seconds since the epoch.
-to_epoch() {
-    local mon day time year m
-    read -r mon day time year _ <<<"$1"
-    case $mon in
-        Jan) m=01 ;; Feb) m=02 ;; Mar) m=03 ;; Apr) m=04 ;; May) m=05 ;; Jun) m=06 ;;
-        Jul) m=07 ;; Aug) m=08 ;; Sep) m=09 ;; Oct) m=10 ;; Nov) m=11 ;; Dec) m=12 ;;
-        *) return 1 ;;
-    esac
-    date -u -d "$year-$m-$(printf '%02d' "$((10#$day))") $time" +%s 2>/dev/null
-}
-
 # Read a certificate file. Sets END, EXPIRES, ISSUER and NAMES.
 read_cert() {
     local file=$1 info inform=() line section="" o="" cn="" scn="" sans="" n=0 more=0 name
@@ -141,7 +129,7 @@ read_cert() {
     END="" sans=""
     while IFS= read -r line; do
         case $line in
-            notAfter=*) END=$(to_epoch "${line#notAfter=}") ;;
+            notAfter=*) END=$(tb_cert_epoch "${line#notAfter=}") ;;
             issuer=*) section=issuer ;;
             subject=*) section=subject ;;
             "X509v3 Subject Alternative Name"*) section=san ;;

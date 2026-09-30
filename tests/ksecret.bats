@@ -135,6 +135,12 @@ SH
     [[ ${lines[1]} == "tls.crt  CN=shop.example.com, expires "*", 79 days left" || ${lines[1]} == *", 80 days left" ]]
     [ "${lines[2]}" = "tls.key  RSA 2048 private key, hidden, use --show-keys" ]
     [[ $output != *"BEGIN PRIVATE KEY"* ]]
+    # BusyBox date, as on Alpine, cannot read openssl's own date form.
+    if command -v busybox >/dev/null && [[ $(readlink -f "$(type -P date)") != */busybox ]]; then
+        tb_stub date 'exec busybox date "$@"'
+        run ksecret shop-tls
+        [[ ${lines[1]} == *", 79 days left" || ${lines[1]} == *", 80 days left" ]]
+    fi
     run ksecret ec
     [ "${lines[1]}" = "key.pem  EC 256 private key, hidden, use --show-keys" ]
 }

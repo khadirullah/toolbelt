@@ -447,6 +447,20 @@ tb_elapsed() {
     else printf '%dh%02dm' $((ms / 3600000)) $((ms % 3600000 / 60000)); fi
 }
 
+# "Oct  9 15:04:16 2026 GMT", as openssl prints notAfter, in seconds since
+# the epoch. BusyBox date cannot read that form, so rebuild it as
+# "2026-10-09 15:04:16" first.
+tb_cert_epoch() {
+    local mon day time year m
+    read -r mon day time year _ <<<"$1"
+    case $mon in
+        Jan) m=01 ;; Feb) m=02 ;; Mar) m=03 ;; Apr) m=04 ;; May) m=05 ;; Jun) m=06 ;;
+        Jul) m=07 ;; Aug) m=08 ;; Sep) m=09 ;; Oct) m=10 ;; Nov) m=11 ;; Dec) m=12 ;;
+        *) return 1 ;;
+    esac
+    date -u -d "$year-$m-$(printf '%02d' "$((10#$day))") $time" +%s 2>/dev/null
+}
+
 # Seconds as an age: 5s, 3m, 2h, 40d, 1y.
 tb_age() {
     local s=${1:-0}
