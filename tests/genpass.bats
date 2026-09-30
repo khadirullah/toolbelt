@@ -83,6 +83,13 @@ setup() {
     [ "$(grep -v '^#' "$TB_REPO/lib/words" | sort -u | wc -l)" -eq 7776 ]
 }
 
+@test "every word is plain a to z and none is the start of another" {
+    # A hyphen inside a word would read as a separator.
+    [ -z "$(grep -v '^#' "$TB_REPO/lib/words" | grep -v '^[a-z]*$')" ]
+    [ -z "$(grep -v '^#' "$TB_REPO/lib/words" | LC_ALL=C sort |
+        awk 'NR > 1 && index($0, prev) == 1 { print prev, $0 } { prev = $0 }')" ]
+}
+
 @test "-c copies with clip and prints no password" {
     run genpass -c
     [ "$status" -eq 0 ]

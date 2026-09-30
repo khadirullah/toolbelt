@@ -51,6 +51,10 @@ Electronic Frontier Foundation for dice passphrases. It ships with toolbelt as `
 that are hard to spell, and no word is the start of another, so a phrase with no separator still reads only one
 way.
 
+Four words differ from the EFF original, since a hyphen inside a word would look like the separator. drop-down,
+felt-tip and t-shirt lose the hyphen, and yo-yo becomes yeti, because yoyo is already in the list. The list still
+has 7776 words, so a passphrase is as strong as before.
+
 ### How strong it is
 
 `-v` prints the strength in bits. Each bit doubles the guesses an attacker needs.

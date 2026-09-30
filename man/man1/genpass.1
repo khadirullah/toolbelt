@@ -1,4 +1,4 @@
-.TH "GENPASS" 1 "2026-09-29" "toolbelt 0.1.0" "toolbelt manual"
+.TH "GENPASS" 1 "2026-09-30" "toolbelt 0.1.0" "toolbelt manual"
 .SH NAME
 genpass \- random passwords and passphrases
 .SH SYNOPSIS
@@ -37,6 +37,8 @@ For a passphrase, \fBgenpass\fR reads two random bytes per word, a number from 0
 .SS The word list
 .PP
 The words come from the EFF large word list, 7776 common English words from 3 to 9 letters, made by the Electronic Frontier Foundation for dice passphrases. It ships with toolbelt as \fBlib/words\fR. The list avoids words that are hard to spell, and no word is the start of another, so a phrase with no separator still reads only one way.
+.PP
+Four words differ from the EFF original, since a hyphen inside a word would look like the separator. drop\-down, felt\-tip and t\-shirt lose the hyphen, and yo\-yo becomes yeti, because yoyo is already in the list. The list still has 7776 words, so a passphrase is as strong as before.
 .SS How strong it is
 .PP
 \fB\-v\fR prints the strength in bits. Each bit doubles the guesses an attacker needs.
