@@ -33,7 +33,7 @@ EOF
     echo "*/15 * * * * $HOME/bin/sync-notes.sh" > "$f/crontab"
     printf '[%s,%s,%s]\n' \
         "$(jt 2310 -1300 logrotate.timer logrotate.service)" \
-        "$(jt 90000 -50000 fstrim.timer fstrim.service)" \
+        "$(jt 90030 -50000 fstrim.timer fstrim.service)" \
         "$(jt 300000 0 plocate-updatedb.timer plocate-updatedb.service)" > "$f/timers-system"
     printf '[%s]\n' "$(jt 600 -3000 backup-notes.timer backup-notes.service)" > "$f/timers-user"
     cat > "$f/show-system" <<'EOF'
