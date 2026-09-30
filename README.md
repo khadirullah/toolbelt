@@ -245,7 +245,7 @@ settings in `~/.config/toolbelt`. The XDG variables move them. Temp folders are 
 - `man COMMAND` prints the full manual page, with every option, how the command decides, per-distro notes,
   worked examples and troubleshooting.
 - [docs/](docs/) holds the same manual pages as Markdown. `make site` builds them into a static website in
-  `site/out`.
+  `site/out`, and each push to `main` publishes it to GitHub Pages.
 
 ## Working on toolbelt
 
