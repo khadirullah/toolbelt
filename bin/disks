@@ -57,12 +57,12 @@ set_tree_chars() {
 
 # Read lsblk into arrays: one entry per device, in tree order.
 read_devices() {
-    local line NAME KNAME PKNAME TYPE SIZE FSTYPE MOUNTPOINT MODEL DPATH TRAN i
+    local line NAME KNAME PKNAME TYPE SIZE FSTYPE MOUNTPOINT MODEL DPATH i
     N=0
-    local cmd=(lsblk -P -b -o NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL,PATH,TRAN)
+    local cmd=(lsblk -P -b -o NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL,PATH)
     tb_show "${cmd[@]}"
     while IFS= read -r line; do
-        NAME="" KNAME="" PKNAME="" TYPE="" SIZE=0 FSTYPE="" MOUNTPOINT="" MODEL="" DPATH="" TRAN=""
+        NAME="" KNAME="" PKNAME="" TYPE="" SIZE=0 FSTYPE="" MOUNTPOINT="" MODEL="" DPATH=""
         # lsblk -P prints KEY="value" pairs with shell-safe quoting.
         while [[ $line =~ ^[[:space:]]*([A-Z:]+)=\"([^\"]*)\"(.*)$ ]]; do
             case ${BASH_REMATCH[1]} in
@@ -70,7 +70,7 @@ read_devices() {
                 PKNAME) PKNAME=${BASH_REMATCH[2]} ;; TYPE) TYPE=${BASH_REMATCH[2]} ;;
                 SIZE) SIZE=${BASH_REMATCH[2]} ;; FSTYPE) FSTYPE=${BASH_REMATCH[2]} ;;
                 MOUNTPOINT) MOUNTPOINT=${BASH_REMATCH[2]} ;; MODEL) MODEL=${BASH_REMATCH[2]} ;;
-                PATH) DPATH=${BASH_REMATCH[2]} ;; TRAN) TRAN=${BASH_REMATCH[2]} ;;
+                PATH) DPATH=${BASH_REMATCH[2]} ;;
             esac
             line=${BASH_REMATCH[3]}
         done
@@ -78,7 +78,7 @@ read_devices() {
         i=$N
         d_name[i]=$NAME d_kname[i]=$KNAME d_parent[i]=$PKNAME d_type[i]=$TYPE
         d_size[i]=${SIZE:-0} d_fs[i]=$FSTYPE d_mnt[i]=$MOUNTPOINT d_model[i]=$MODEL
-        d_path[i]=${DPATH:-/dev/$KNAME} d_tran[i]=$TRAN
+        d_path[i]=${DPATH:-/dev/$KNAME}
         N=$(( N + 1 ))
     done < <("${cmd[@]}" 2>/dev/null)
 }

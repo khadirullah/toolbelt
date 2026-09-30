@@ -253,8 +253,8 @@ scan_fast() {
         while IFS= read -r line; do
             [[ $line == \#* || -z $line ]] && continue
             read -r _ id _ _ _ _ _ <<<"$line"
-            local name=$line k
-            for k in 1 2 3 4 5 6 7; do name=${name#* }; done
+            local name=$line
+            for _ in 1 2 3 4 5 6 7; do name=${name#* }; done
             id=${id#-}
             [[ -z ${byid[$id]:-} ]] && ids+=("$id")
             byid[$id]+="$name"$'\n'
@@ -364,7 +364,7 @@ act() {
     else
         tb_confirm "Replace $(tb_plural "$n_act" copy copies) ($(tb_human "$bytes")) with hard links?"
     fi
-    local pair k done_n=0 done_b=0 tmp
+    local pair done_n=0 done_b=0 tmp
     tb_need cmp
     for pair in "${plan[@]}"; do
         keep=${pair%%:*}

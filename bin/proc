@@ -74,11 +74,9 @@ find_pids() {
 # Read /proc/PID/status into ST_ variables.
 read_status() {
     local k v _
-    ST_NAME="" ST_PPID=0 ST_UID="" ST_RSS=0 ST_SWAP=0 ST_THREADS=1
+    ST_UID="" ST_RSS=0 ST_SWAP=0 ST_THREADS=1
     while IFS=$' \t' read -r k v _; do
         case $k in
-            Name:)    ST_NAME=$v ;;
-            PPid:)    ST_PPID=$v ;;
             Uid:)     ST_UID=$v ;;
             VmRSS:)   ST_RSS=$v ;;
             VmSwap:)  ST_SWAP=$v ;;

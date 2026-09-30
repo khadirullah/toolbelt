@@ -172,7 +172,7 @@ show_blame() {
 
 # Total and userspace time for each boot the journal still holds.
 show_history() {
-    local boots msgs idx id rest total user started line bid msg
+    local idx id rest total user started line msg
     tb_need journalctl
     tb_tmpdir work || tb_die 1 "could not make a temp folder"
     tb_show journalctl --list-boots --no-pager -q

@@ -303,7 +303,7 @@ read_cron_runs() {
 # ---------------------------------------------------------------- main
 
 main() {
-    local rows=() line next last unit svc t n=0 failed=0 i
+    local line next last unit svc t n=0 failed=0 i
     declare -gA RESULT=() TOOK=() CRON_LAST=()
     printf -v NOW '%(%s)T' -1
     tb_tmpdir work || tb_die 1 "could not make a temp folder"

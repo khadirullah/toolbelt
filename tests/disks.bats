@@ -9,14 +9,14 @@ setup() {
     export LANG=C.UTF-8 LC_ALL=C.UTF-8
     local f=$BATS_TEST_TMPDIR
     cat > "$f/lsblk.out" <<'EOF'
-NAME="loop0" KNAME="loop0" PKNAME="" TYPE="loop" SIZE="4194304" FSTYPE="squashfs" MOUNTPOINT="/snap/core/1" MODEL="" PATH="/dev/loop0" TRAN=""
-NAME="nvme0n1" KNAME="nvme0n1" PKNAME="" TYPE="disk" SIZE="256060514304" FSTYPE="" MOUNTPOINT="" MODEL="SAMSUNG MZVLB256HAHQ-000L7" PATH="/dev/nvme0n1" TRAN="nvme"
-NAME="nvme0n1p1" KNAME="nvme0n1p1" PKNAME="nvme0n1" TYPE="part" SIZE="629145600" FSTYPE="vfat" MOUNTPOINT="/boot/efi" MODEL="" PATH="/dev/nvme0n1p1" TRAN="nvme"
-NAME="nvme0n1p2" KNAME="nvme0n1p2" PKNAME="nvme0n1" TYPE="part" SIZE="1073741824" FSTYPE="ext4" MOUNTPOINT="/boot" MODEL="" PATH="/dev/nvme0n1p2" TRAN="nvme"
-NAME="nvme0n1p3" KNAME="nvme0n1p3" PKNAME="nvme0n1" TYPE="part" SIZE="254356226048" FSTYPE="btrfs" MOUNTPOINT="/" MODEL="" PATH="/dev/nvme0n1p3" TRAN="nvme"
-NAME="sda" KNAME="sda" PKNAME="" TYPE="disk" SIZE="62277025792" FSTYPE="" MOUNTPOINT="" MODEL="SanDisk Ultra" PATH="/dev/sda" TRAN="usb"
-NAME="sda1" KNAME="sda1" PKNAME="sda" TYPE="part" SIZE="62276025792" FSTYPE="exfat" MOUNTPOINT="/run/media/khadir/USB" MODEL="" PATH="/dev/sda1" TRAN="usb"
-NAME="zram0" KNAME="zram0" PKNAME="" TYPE="disk" SIZE="8160000000" FSTYPE="swap" MOUNTPOINT="[SWAP]" MODEL="" PATH="/dev/zram0" TRAN=""
+NAME="loop0" KNAME="loop0" PKNAME="" TYPE="loop" SIZE="4194304" FSTYPE="squashfs" MOUNTPOINT="/snap/core/1" MODEL="" PATH="/dev/loop0"
+NAME="nvme0n1" KNAME="nvme0n1" PKNAME="" TYPE="disk" SIZE="256060514304" FSTYPE="" MOUNTPOINT="" MODEL="SAMSUNG MZVLB256HAHQ-000L7" PATH="/dev/nvme0n1"
+NAME="nvme0n1p1" KNAME="nvme0n1p1" PKNAME="nvme0n1" TYPE="part" SIZE="629145600" FSTYPE="vfat" MOUNTPOINT="/boot/efi" MODEL="" PATH="/dev/nvme0n1p1"
+NAME="nvme0n1p2" KNAME="nvme0n1p2" PKNAME="nvme0n1" TYPE="part" SIZE="1073741824" FSTYPE="ext4" MOUNTPOINT="/boot" MODEL="" PATH="/dev/nvme0n1p2"
+NAME="nvme0n1p3" KNAME="nvme0n1p3" PKNAME="nvme0n1" TYPE="part" SIZE="254356226048" FSTYPE="btrfs" MOUNTPOINT="/" MODEL="" PATH="/dev/nvme0n1p3"
+NAME="sda" KNAME="sda" PKNAME="" TYPE="disk" SIZE="62277025792" FSTYPE="" MOUNTPOINT="" MODEL="SanDisk Ultra" PATH="/dev/sda"
+NAME="sda1" KNAME="sda1" PKNAME="sda" TYPE="part" SIZE="62276025792" FSTYPE="exfat" MOUNTPOINT="/run/media/khadir/USB" MODEL="" PATH="/dev/sda1"
+NAME="zram0" KNAME="zram0" PKNAME="" TYPE="disk" SIZE="8160000000" FSTYPE="swap" MOUNTPOINT="[SWAP]" MODEL="" PATH="/dev/zram0"
 EOF
     cat > "$f/findmnt.out" <<'EOF'
 /dev/nvme0n1p3[/root] / btrfs

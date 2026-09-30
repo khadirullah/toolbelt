@@ -145,6 +145,8 @@ cmd_help() {
 # ---------------------------------------------------------------- doctor
 
 distro_name() {
+    # PRETTY_NAME is local only so sourcing os-release does not leak it.
+    # shellcheck disable=SC2034
     local NAME="" VERSION_ID="" PRETTY_NAME=""
     # shellcheck disable=SC1091
     [[ -r /etc/os-release ]] && . /etc/os-release
@@ -433,13 +435,12 @@ cmd_uninstall() {
 # ---------------------------------------------------------------- new
 
 cmd_new() {
-    local name=$1 dir where
+    local name=$1 where
     [[ $name =~ ^[a-z][a-z0-9-]*$ ]] || tb_usage_error "use lower case letters, digits and -, starting with a letter"
     if where=$(type -P "$name"); then
         tb_die "$E_SAFE" "$name is already on PATH at $where, pick another name"
     fi
     if [[ -f lib/common.sh && -f lib/commands && -d bin ]]; then
-        dir=.
         [[ -e bin/$name ]] && tb_die "$E_SAFE" "bin/$name already exists"
         write_template "$name" 'source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"' > "bin/$name"
         chmod +x "bin/$name"

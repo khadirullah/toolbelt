@@ -1200,9 +1200,6 @@ safety_checks() {
     local list=$1 count total tops one bad n kind p t
     read -r count total tops one <<<"$(listing_stats "$list")"
     LIST_COUNT=$count
-    LIST_BYTES=$total
-    LIST_TOPS=$tops
-    LIST_ONE=$one
     if (( tops == 1 )) && [[ $one == */ ]]; then
         tb_say "listing: $(tb_plural "$count" file), $(tb_human "$total"), one top folder $one"
     elif (( tops == 1 )); then

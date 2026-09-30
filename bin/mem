@@ -70,11 +70,11 @@ pressure() {
 
 # One line per zram device in use.
 zram_lines() {
-    local d name algo orig compr used _ ratio
+    local d name algo orig used _ ratio
     for d in "$ROOT"/sys/block/zram*; do
         [[ -r $d/mm_stat ]] || continue
         name=${d##*/}
-        read -r orig compr used _ <"$d/mm_stat" || continue
+        read -r orig _ used _ <"$d/mm_stat" || continue
         (( orig > 0 )) || continue
         algo=$(<"$d/comp_algorithm")
         [[ $algo =~ \[([^]]+)\] ]] && algo=${BASH_REMATCH[1]}
