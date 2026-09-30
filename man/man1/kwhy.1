@@ -147,7 +147,7 @@ cart-7d9f8c6b54-q2lzx    ImagePullBackOff   restarts 0
   event  Failed to pull image "registry.example.com/cart:1.4.3": rpc error: code = NotFound desc = failed to pull and unpack image "registry.example.com/cart:1.4.3": manifest unknown
   hint   the tag does not exist, or the pull secret is wrong
 api-5b8c9d7f6-mk4tn      CrashLoopBackOff   restarts 9
-  event  Back-off restarting failed container api in pod api-5b8c9d7f6-mk4tn_shop(1f0c)
+  event  Back-off restarting failed container api
   exit   1, 5h ago, last 20 lines of the crashed container
     2026/09/29 10:31:58 loading config from /etc/api/config.yaml
     2026/09/29 10:31:58 connecting to postgres at db:5432
@@ -183,7 +183,7 @@ kwhy: context kind-kind, namespace shop
 context kind-kind, namespace shop, 1 of 1 pod not Ready
 api-5b8c9d7f6-mk4tn   CrashLoopBackOff   restarts 9
 + kubectl get events -n shop --field-selector involvedObject.name=api-5b8c9d7f6-mk4tn -o json
-  event  Back-off restarting failed container api in pod api-5b8c9d7f6-mk4tn_shop(1f0c)
+  event  Back-off restarting failed container api
   exit   1, 5h ago, last 2 lines of the crashed container
 + kubectl logs api-5b8c9d7f6-mk4tn -n shop -c api --tail 2 --previous
     2026/09/29 10:31:58 connecting to postgres at db:5432
