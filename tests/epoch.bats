@@ -71,12 +71,36 @@ setup() {
     [ "$output" = 1790672400 ]
     run epoch -u 2026-09-29 09:00
     [ "$output" = 1790672400 ]
-    # BusyBox date, on Alpine, reads neither form below. docs/epoch.md says so.
-    [[ $(readlink -f "$(type -P date)") == */busybox ]] && return 0
     run epoch 2026-09-29T09:00:00Z
     [ "$output" = 1790672400 ]
     run epoch --ms "2026-09-29 14:30:00.250"
     [ "$output" = 1790672400250 ]
+}
+
+@test "ISO dates read the same through BusyBox date" {
+    if [[ $(readlink -f "$(type -P date)") != */busybox ]]; then
+        command -v busybox >/dev/null || skip "no busybox"
+        tb_stub date 'exec busybox date "$@"'
+    fi
+    run epoch 2026-09-29T09:00:00Z
+    [ "$output" = 1790672400 ]
+    run epoch 2026-09-29T14:30
+    [ "$output" = 1790672400 ]
+    run epoch -u 2026-09-29T09:00
+    [ "$output" = 1790672400 ]
+    run epoch 2026-09-29T11:00:00+02:00
+    [ "$output" = 1790672400 ]
+    run epoch 2026-09-29T04:30:00-0430
+    [ "$output" = 1790672400 ]
+    run epoch --ms 2026-09-29T09:00:00.25Z
+    [ "$output" = 1790672400250 ]
+    run epoch --ms "2026-09-29 14:30:00.250"
+    [ "$output" = 1790672400250 ]
+    run epoch -v 2026-09-29T09:00:00Z
+    [ "${lines[1]}" = "+ date -u -d '2026-09-29 09:00:00' +%s" ]
+    [ "${lines[2]}" = "epoch: Tue 2026-09-29 14:30:00 IST" ]
+    run epoch 2026-09-29T25:00
+    [ "$status" -eq 2 ]
 }
 
 @test "nothing to read prints now" {

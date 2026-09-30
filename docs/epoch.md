@@ -103,8 +103,10 @@ None. It calls `date` with fixed options.
 
 ## Needs
 
-`date` from coreutils. BusyBox `date`, on Alpine, reads timestamps fine but knows far fewer date forms. Stick to
-`2026-09-29 14:30` there. `--ms` for a date uses `%N`, and on BusyBox it prints whole seconds times 1000.
+`date` from coreutils, or BusyBox `date` as on Alpine. BusyBox reads `2026-09-29 14:30` but not ISO 8601, so
+when it refuses a date such as `2026-09-29T09:00:00.25Z`, `epoch` splits off the `T`, the zone and the fraction
+and gives it the plain `2026-09-29 09:00:00`. `-v` shows that second `date` call. The HTTP form and words such as
+`yesterday` still need GNU `date`.
 
 ## Examples
 

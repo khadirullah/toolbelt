@@ -102,21 +102,47 @@ from_number() {
     show_stamp "$secs" "$frac"
 }
 
+# BusyBox date, on Alpine, reads "2026-09-29 14:30" but not the T, Z,
+# offset or fraction of ISO 8601. Split such a date here, give date the
+# plain part and apply the rest. Sets ISO_S and ISO_MS, or returns 1.
+iso() {
+    local re='^([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]([0-9]{2}:[0-9]{2})(:[0-9]{2})?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?$'
+    [[ $1 =~ $re ]] || return 1
+    local plain="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}${BASH_REMATCH[3]:-:00}" frac=${BASH_REMATCH[4]#.}
+    local zone=${BASH_REMATCH[5]} args=() off=0 z
+    if [[ -n $zone ]] || (( utc )); then args=(-u); fi
+    tb_show date ${args[@]+"${args[@]}"} -d "$plain" +%s
+    ISO_S=$(date ${args[@]+"${args[@]}"} -d "$plain" +%s 2>/dev/null) || return 1
+    if [[ $zone == [+-]* ]]; then
+        z=${zone:1}
+        z=${z/:/}
+        off=$(( (10#${z:0:2} * 60 + 10#${z:2:2}) * 60 ))
+        [[ $zone == -* ]] && off=$(( -off ))
+    fi
+    ISO_S=$(( ISO_S - off ))
+    frac=${frac}000
+    ISO_MS=$(( ISO_S * 1000 + 10#${frac:0:3} ))
+}
+
 # A date: print its timestamp.
 from_date() {
-    local d=$1 out tz_args=()
+    local d=$1 out ms_out shown tz_args=()
     (( utc )) && tz_args=(-u)
     tb_show date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s
-    out=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s 2>/dev/null) ||
+    if out=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s 2>/dev/null); then
+        if (( ms )); then
+            ms_out=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s%3N 2>/dev/null)
+            [[ $ms_out =~ ^-?[0-9]+$ ]] || ms_out=$(( out * 1000 ))
+        fi
+        shown=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" '+%a %F %T %Z')
+    elif iso "$d"; then
+        out=$ISO_S ms_out=$ISO_MS
+        shown=$(date ${tz_args[@]+"${tz_args[@]}"} -d "@$out" '+%a %F %T %Z')
+    else
         tb_usage_error "cannot read $d as a timestamp or a date"
-    if (( ms )); then
-        local n
-        n=$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" +%s%3N 2>/dev/null)
-        [[ $n =~ ^-?[0-9]+$ ]] || n=$(( out * 1000 ))
-        out=$n
     fi
-    tb_say "$(date ${tz_args[@]+"${tz_args[@]}"} -d "$d" '+%a %F %T %Z')"
-    echo "$out"
+    tb_say "$shown"
+    if (( ms )); then echo "$ms_out"; else echo "$out"; fi
 }
 
 main() {
