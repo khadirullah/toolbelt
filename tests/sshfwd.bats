@@ -116,7 +116,7 @@ spare_port() {
     run sshfwd --stop 1
     [ "$status" -eq 0 ]
     [ "$output" = "closed tunnel 1, localhost:$p to db.example.com:$p" ]
-    not kill -0 "$master" 2>/dev/null
+    gone "$master"
     run sshfwd --stop 1
     [ "$status" -eq 1 ]
     [[ $output == *"no tunnel 1"* ]]
@@ -190,7 +190,7 @@ spare_port() {
     kill "$FG_PID"
     wait "$FG_PID" || true
     FG_PID=""
-    ! kill -0 "$master" 2>/dev/null || grep -qs '^State:[[:space:]]*Z' "/proc/$master/status"
+    gone "$master"
 
     nohup sshfwd k8s-master "$p" > out 2>&1 &
     FG_PID=$!

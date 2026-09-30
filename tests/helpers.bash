@@ -70,3 +70,13 @@ not() {
     fi
     return 0
 }
+
+# Fail while a pid still runs. A zombie counts as ended, as in tb_alive,
+# since GitHub runs containers with tail as PID 1, which never reaps.
+gone() {
+    if kill -0 "$1" 2>/dev/null && ! grep -qs '^State:[[:space:]]*Z' "/proc/$1/status"; then
+        echo "expected pid $1 to have ended" >&2
+        return 1
+    fi
+    return 0
+}
