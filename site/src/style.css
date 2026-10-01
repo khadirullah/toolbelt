@@ -92,6 +92,7 @@ li { margin-bottom: .35rem; }
 li > ul, li > ol { margin: .35rem 0 0; }
 strong { font-weight: 650; }
 .lede { font-size: 1.1875rem; margin-bottom: 1.5rem; }
+.proof { font-family: var(--mono); color: var(--muted); }
 
 code, pre { font-family: var(--mono); }
 code { font-size: .9em; overflow-wrap: break-word; }

@@ -18,6 +18,7 @@ DOCS = ROOT / "docs"
 SRC = ROOT / "site" / "src"
 OUT = ROOT / "site" / "out"
 REPO = "https://github.com/khadirullah/toolbelt"
+POST = "https://khadirullah.com/blog/toolbelt-bash-commands-8-distros/"
 INSTALL = "curl -fsSL https://raw.githubusercontent.com/khadirullah/toolbelt/main/install.sh | bash"
 INTRO = [
     "toolbelt is a set of {n} small Bash commands for daily Linux work. Each one does one job, such as unpacking "
@@ -525,6 +526,18 @@ def readme_intro():
     return paras or None
 
 
+def test_count():
+    """The number of bats tests under tests/, for the line under the title."""
+    return sum(len(re.findall(r"^@test ", p.read_text(encoding="utf-8"), re.M)) for p in (ROOT / "tests").rglob("*.bats"))
+
+
+def ci_distros():
+    """The number of images in CI's test matrix."""
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    m = re.search(r"^\s*image:\n((?:\s+- .+\n)+)", text, re.M)
+    return len(m.group(1).splitlines()) if m else 0
+
+
 def index_page(groups, docs, total):
     md = Markdown()
     md.ids.update({"install", "commands", "commands-h", "examples", "main", "filter", "filter-box", "nomatch"})
@@ -551,11 +564,20 @@ def index_page(groups, docs, total):
             f'<p class="label">Without toolbelt</p>\n{code_block("console", [b if b[0] == " " else "$ " + b for b in before], " before")}\n'
             f'<p class="label">With <a href="{page_url(cmd)}"><code>{esc(cmd)}</code></a></p>\n'
             f'{code_block("console", after)}\n</div>')
+    proof = (f'<p class="proof">{total} commands · <a href="{REPO}/tree/main/tests">{test_count():,} tests</a> · '
+             f'<a href="{REPO}/actions/workflows/ci.yml">CI on {ci_distros()} distros</a> · '
+             f'<a href="{POST}">How it was tested</a></p>')
     main = f"""<main id="main" class="home">
 <h1>toolbelt</h1>
 {"".join(f"<p>{md.inline(p)}</p>" for p in intro)}
+{proof}
 <p>New here? <a href="getting-started.html">Getting started</a> walks through install, the health check and the
 shell settings.</p>
+<section aria-labelledby="examples">
+<h2 id="examples">What it looks like</h2>
+<p>Real runs, copied from the manual pages, next to what you would type without toolbelt.</p>
+{chr(10).join(shows)}
+</section>
 <section aria-labelledby="install">
 <h2 id="install">Install</h2>
 {install_blocks(True)}</section>
@@ -568,11 +590,6 @@ shell settings.</p>
 </div>
 <p id="nomatch" role="status" hidden>No command matches. Try a shorter word.</p>
 {chr(10).join(lists)}
-</section>
-<section aria-labelledby="examples">
-<h2 id="examples">What it looks like</h2>
-<p>Real runs, copied from the manual pages, next to what you would type without toolbelt.</p>
-{chr(10).join(shows)}
 </section>
 {rules}
 </main>"""
